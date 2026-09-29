@@ -1,0 +1,466 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace filly {
+
+void set_log_level(const std::string& level);
+
+using Vec3 = std::array<float, 3>;
+using Vec4 = std::array<float, 4>;
+using Matrix = std::array<float, 16>;
+
+struct AssetTexture {
+    std::vector<uint8_t> bytes;
+    std::string mime;
+    int uv = 0;
+    std::array<float, 9> transform = {1,0,0,0,1,0,0,0,1};
+    int wrap_s = 10497, wrap_t = 10497;
+    int min_filter = 9987, mag_filter = 9729;
+};
+struct DiffuseSource {
+    float factor = 0;
+    Vec3 color = {1,1,1};
+    AssetTexture factor_texture, color_texture;
+    float thickness = 0;
+    Vec3 absorption = {};
+    AssetTexture thickness_texture;
+};
+struct SurfaceSource {
+    float anisotropy = 0, rotation = 0, iridescence = 0, ior = 1.3f, minimum = 100, maximum = 400;
+    AssetTexture anisotropy_texture, iridescence_texture, thickness_texture;
+};
+// Names from the glTF document, by node index. Missing names stay empty rather than taking
+// gltfio's fallback of the mesh, light, or camera name.
+struct NodeSource {
+    std::optional<std::string> name, mesh;
+};
+struct CameraSource {
+    bool orthographic = false;
+    // Perspective: yfov, aspect (0 = render target aspect), znear, zfar. Orthographic: xmag, ymag, znear, zfar.
+    Vec4 projection = {};
+};
+
+struct PropertyTrackSource {
+    int kind = 0;
+    size_t index = 0;
+    std::string parameter;
+    int components = 1, interpolation = 1;
+    float minimum = 0, maximum = 1;
+    std::vector<float> times, values;
+    std::vector<float> setup;
+};
+struct AnimationSource {
+    std::string name;
+    int native_index = -1;
+    std::vector<PropertyTrackSource> tracks;
+};
+
+struct FillyError : std::runtime_error { using runtime_error::runtime_error; };
+struct BackendError : FillyError { using FillyError::FillyError; };
+struct AssetError : FillyError { using FillyError::FillyError; };
+struct InteropError : FillyError { using FillyError::FillyError; };
+
+struct Stats {
+    double cpu_submit_ms = 0;
+    double host_wait_ms = 0;
+    double host_release_ms = 0;
+    double finish_ms = 0;
+    double readback_ms = 0;
+    size_t live_models = 0, live_lights = 0, material_copies = 0;
+    uint64_t frames_rendered = 0;
+};
+
+namespace detail {
+struct Resource;
+struct State;
+struct SceneData;
+struct CameraData;
+struct ModelData;
+struct TargetData;
+struct TextureData;
+}
+
+struct AnimationInfo {
+    std::string name;
+    float duration;
+};
+
+// Borrowed views of caller arrays. Null members are absent.
+struct MeshArrays {
+    size_t vertices = 0, triangles = 0;
+    const float* positions = nullptr;   // vertices x 3
+    const float* normals = nullptr;     // vertices x 3
+    const float* uvs = nullptr;         // vertices x 2
+    const float* colors = nullptr;      // vertices x 4
+    const uint32_t* indices = nullptr;  // triangles x 3
+};
+
+// Per-render overrides. A viewport is (x, y, width, height) from the lower-left corner.
+struct RenderOptions {
+    const class Camera* camera = nullptr;
+    bool has_viewport = false;
+    std::array<int64_t, 4> viewport = {};
+    bool clear = true;
+};
+
+class Node;
+
+class Light {
+public:
+    Light(std::shared_ptr<detail::Resource> owner, uint32_t entity);
+    void close();
+    bool closed() const;
+    // The glTF node that places an imported light; false for lights that a scene created.
+    bool has_node() const;
+    Node node() const;
+    bool same(const Light& other) const;
+    uintptr_t key() const;
+    std::string type() const;
+    Vec3 color() const;
+    void set_color(Vec3 value);
+    float intensity() const;
+    void set_intensity(float value);
+    Vec3 position() const;
+    void set_position(Vec3 value);
+    Vec3 direction() const;
+    void set_direction(Vec3 value);
+    float range() const;
+    void set_range(float value);
+    bool casts_shadows() const;
+    void set_casts_shadows(bool value);
+    void set_shadow_options(uint32_t map_size, float constant_bias, float normal_bias);
+    void set_spot_cone(float inner, float outer);
+private:
+    std::shared_ptr<detail::Resource> owner_;
+    uint32_t entity_;
+};
+
+class Material {
+public:
+    Material(std::shared_ptr<detail::ModelData> data, size_t index);
+    Vec4 base_color() const;
+    void set_base_color(Vec4 value);
+    float metallic() const;
+    void set_metallic(float value);
+    float roughness() const;
+    void set_roughness(float value);
+    Vec3 emissive() const;
+    void set_emissive(Vec3 value);
+    // Slot 0 is base color and slot 1 is emissive. A null texture removes the assignment.
+    std::shared_ptr<detail::TextureData> texture(int slot) const;
+    void set_texture(int slot, std::shared_ptr<detail::TextureData> texture);
+    // Offset and scale in UV units, rotation in radians, as KHR_texture_transform.
+    void set_texture_transform(int slot, std::array<float, 2> offset, std::array<float, 2> scale,
+                               float rotation);
+private:
+    std::shared_ptr<detail::ModelData> data_;
+    size_t index_;
+};
+
+class Node {
+public:
+    Node(std::shared_ptr<detail::ModelData> data, uint32_t entity);
+    std::optional<std::string> name() const;
+    std::optional<std::string> mesh_name() const;
+    int64_t index() const;
+    // False for a top-level node.
+    bool has_parent() const;
+    Node parent() const;
+    std::vector<Node> children() const;
+    Matrix transform() const;
+    void set_transform(const Matrix& value);
+    Vec3 position() const;
+    void set_position(Vec3 value);
+    Vec3 scale() const;
+    void set_scale(Vec3 value);
+    Vec4 quaternion() const;
+    void set_quaternion(Vec4 value);
+    Vec3 rotation_euler_rad() const;
+    void set_rotation_euler_rad(Vec3 value);
+    Vec3 rotation_euler_deg() const;
+    void set_rotation_euler_deg(Vec3 value);
+    Material material(size_t slot) const;
+    size_t morph_target_count() const;
+    void set_morph_weights(const std::vector<float>& values);
+    bool same(const Node& other) const;
+    uintptr_t key() const;
+private:
+    std::shared_ptr<detail::ModelData> data_;
+    uint32_t entity_;
+};
+
+class Camera {
+public:
+    explicit Camera(std::shared_ptr<detail::CameraData> data);
+    // An aspect of zero selects the render target's aspect, applied at render time.
+    void set_perspective(double fov_y, double aspect, double near, double far);
+    void set_lens_projection(double focal_length, double aspect, double near, double far);
+    void set_orthographic(double left, double right, double bottom, double top,
+                          double near, double far);
+    void set_orthographic_height(double height, double center_x, double center_y,
+                                 double near, double far);
+    Vec3 position() const;
+    void set_position(Vec3 value);
+    void look_at(Vec3 target, Vec3 up);
+    Matrix transform() const;
+    void set_transform(const Matrix& value);
+    Matrix view_matrix() const;
+    Matrix projection() const;
+    float exposure() const;
+    void set_exposure(float ev100);
+    // Depth-of-field inputs. The aperture is an f-number and does not change exposure.
+    float focus_distance() const;
+    void set_focus_distance(float value);
+    float aperture() const;
+    void set_aperture(float value);
+    bool same(const Camera& other) const;
+    uintptr_t key() const;
+    // The glTF node of an imported camera; false for cameras that a scene created.
+    bool has_node() const;
+    Node node() const;
+private:
+    std::shared_ptr<detail::CameraData> data_;
+    friend class Scene;
+    friend class Renderer;
+};
+
+class Model {
+public:
+    explicit Model(std::shared_ptr<detail::ModelData> data);
+    void close();
+    bool closed() const;
+    Model clone();
+    std::array<Vec3, 2> bounds() const;
+    Matrix transform() const;
+    void set_transform(const Matrix& value);
+    Vec3 position() const;
+    void set_position(Vec3 value);
+    bool visible() const;
+    void set_visible(bool value);
+    Node root() const;
+    Node node(const std::string& name) const;
+    Node node(int64_t index) const;
+    std::vector<Node> nodes() const;
+    std::vector<std::string> node_names() const;
+    Material material(const std::string& name) const;
+    std::vector<std::string> material_names() const;
+    std::vector<AnimationInfo> animations() const;
+    void apply_animation(const std::string& name, float time, bool loop);
+    void apply_animation(int64_t index, float time, bool loop);
+    void reset_animation();
+    std::vector<std::string> variants() const;
+    void apply_variant(const std::string& name);
+    void apply_variant(int64_t index);
+    // Lights and cameras are addressed by the node that places them: a node name or glTF index.
+    Light light(const std::string& node) const;
+    Light light(int64_t node) const;
+    std::vector<Light> lights() const;
+    Camera camera(const std::string& node) const;
+    Camera camera(int64_t node) const;
+    std::vector<Camera> cameras() const;
+    // Generated meshes only. Replaces the geometry of a placeholder asset from Scene::create_mesh.
+    void attach_mesh(const MeshArrays& arrays);
+    bool is_mesh() const;
+    size_t vertex_count() const;
+    void update_mesh(const MeshArrays& arrays);
+private:
+    Camera camera_at(size_t position) const;
+    std::shared_ptr<detail::ModelData> data_;
+};
+
+class Scene {
+public:
+    explicit Scene(std::shared_ptr<detail::SceneData> data);
+    void close();
+    bool closed() const;
+    Camera create_camera();
+    Camera camera() const;
+    void set_camera(const Camera& camera);
+    Model load_asset(const std::vector<uint8_t>& bytes, const std::string& path,
+                     const std::vector<DiffuseSource>& diffuse = {},
+                     const std::vector<std::vector<float>>& morphs = {},
+                     const std::vector<AnimationSource>& animations = {},
+                     const std::vector<SurfaceSource>& surfaces = {},
+                     const std::vector<CameraSource>& cameras = {},
+                     const std::vector<NodeSource>& nodes = {},
+                     bool masked = false,
+                     bool clonable = false);
+    bool precompiled_shaders() const;
+    Light add_directional_light(Vec3 direction, float intensity, Vec3 color);
+    Light add_sun_light(Vec3 direction, float intensity, Vec3 color, float angular_radius,
+                        float halo_size, float halo_falloff);
+    Light add_point_light(Vec3 position, float intensity, Vec3 color, float range);
+    Light add_spot_light(Vec3 position, Vec3 direction, float intensity, Vec3 color,
+                         float range, float inner, float outer);
+    std::string encoding() const;
+    void set_encoding(const std::string& value);
+    // "graded" (the default) or "direct". Direct output skips postprocessing, so it rejects
+    // every option and material that needs color grading instead of falling back.
+    std::string output_path() const;
+    void set_output_path(const std::string& value);
+    std::string tone_mapping() const;
+    void set_tone_mapping(const std::string& value);
+    std::string antialiasing() const;
+    void set_antialiasing(const std::string& value);
+    int msaa() const;
+    void set_msaa(int value);
+    bool shadows() const;
+    void set_shadows(bool value);
+    bool refraction() const;
+    void set_refraction(bool value);
+    bool transparent() const;
+    void set_transparent(bool value);
+    bool dithering() const;
+    void set_dithering(bool value);
+    bool ssao() const;
+    void set_ssao(bool value);
+    bool bloom() const;
+    void set_bloom(bool value);
+    bool fog() const;
+    void set_fog(bool value);
+    // Fog color is the linear output color of fully fogged pixels; density is per scene unit.
+    void set_fog_options(Vec3 color, float density, float start);
+    bool depth_of_field() const;
+    void set_depth_of_field(bool value);
+    bool vignette() const;
+    void set_vignette(bool value);
+    void set_vignette_options(float midpoint, float roundness, float feather, Vec3 color);
+    void set_environment(const std::vector<float>& pixels, uint32_t width, uint32_t height,
+                         float intensity, float rotation);
+    void load_environment(const std::string& path, float intensity, float rotation);
+    void load_environment_ktx(const std::string& ibl_path, const std::string& skybox_path,
+                              float intensity, float rotation);
+    void clear_environment();
+    float environment_intensity() const;
+    void set_environment_intensity(float value);
+    bool environment_visible() const;
+    void set_environment_visible(bool value);
+    float environment_rotation() const;
+    void set_environment_rotation(float value);
+    Vec4 background() const;
+    void set_background(Vec4 color);
+private:
+    std::shared_ptr<detail::SceneData> data_;
+    friend class Renderer;
+};
+
+// A sampled texture with pixels from the caller. Updates copy into a small ring of staging
+// buffers, so the caller's array is free again when update() returns.
+class Texture {
+public:
+    explicit Texture(std::shared_ptr<detail::TextureData> data);
+    uint32_t width() const;
+    uint32_t height() const;
+    uint32_t channels() const;
+    bool is_float() const;
+    std::string color_space() const;
+    bool mipmaps() const;
+    // Pixels are rows from the top, tightly packed, in the type and channel count of creation.
+    void update(const void* pixels, size_t bytes);
+    void close();
+    bool closed() const;
+    bool same(const Texture& other) const;
+    uintptr_t key() const;
+    std::shared_ptr<detail::TextureData> data() const { return data_; }
+private:
+    std::shared_ptr<detail::TextureData> data_;
+};
+
+// A host-owned OpenGL texture that Filament samples. The host writes it between begin_write()
+// and end_write(); Filament waits for those writes, and the host waits for Filament's reads.
+class HostTexture {
+public:
+    explicit HostTexture(std::shared_ptr<detail::TextureData> data);
+    uint32_t width() const;
+    uint32_t height() const;
+    std::string color_space() const;
+    void begin_write();
+    void end_write();
+    bool writing() const;
+    void close();
+    bool closed() const;
+    bool same(const HostTexture& other) const;
+    uintptr_t key() const;
+    std::shared_ptr<detail::TextureData> data() const { return data_; }
+private:
+    std::shared_ptr<detail::TextureData> data_;
+};
+
+// A Filament-owned color texture that supports readback.
+class OffscreenTarget {
+public:
+    explicit OffscreenTarget(std::shared_ptr<detail::TargetData> data);
+    uint32_t width() const;
+    uint32_t height() const;
+    std::vector<uint8_t> read() const;
+    void close();
+    bool closed() const;
+private:
+    std::shared_ptr<detail::TargetData> data_;
+    friend class Renderer;
+};
+
+// A host-owned OpenGL texture. The host samples it between acquire() and release().
+// Nested acquisitions only count depth.
+class ImportedTarget {
+public:
+    explicit ImportedTarget(std::shared_ptr<detail::TargetData> data);
+    uint32_t width() const;
+    uint32_t height() const;
+    void acquire();
+    void release();
+    bool acquired() const;
+    void close();
+    bool closed() const;
+private:
+    std::shared_ptr<detail::TargetData> data_;
+    friend class Renderer;
+};
+
+class Renderer {
+public:
+    explicit Renderer(uintptr_t shared_context = 0, bool precompiled_shaders = false);
+    Scene create_scene();
+    OffscreenTarget create_render_target(int64_t width, int64_t height,
+                                         const std::string& format, bool depth);
+    ImportedTarget import_gl_texture(uint32_t texture, int64_t width, int64_t height,
+                                     const std::string& format, bool depth);
+    void render(const Scene& scene, const OffscreenTarget& target, const RenderOptions& options = {});
+    void render(const Scene& scene, const ImportedTarget& target, const RenderOptions& options = {});
+    // channels is 1, 3, or 4. Float textures hold linear values. pixels as for Texture::update().
+    Texture create_texture(int64_t width, int64_t height, int channels, bool is_float,
+                           const std::string& color_space, bool mipmaps,
+                           const std::string& filter, const std::string& wrap,
+                           const void* pixels, size_t bytes);
+    HostTexture import_gl_input(uint32_t texture, int64_t width, int64_t height,
+                                const std::string& color_space, const std::string& filter,
+                                const std::string& wrap);
+    void finish();
+    void close();
+    bool closed() const;
+    bool precompiled_shaders() const;
+    uintptr_t shared_context() const;
+    Stats stats() const;
+private:
+    void submit(const Scene& scene, detail::TargetData& target, const RenderOptions& options);
+    std::shared_ptr<detail::State> state_;
+};
+
+// Whether a material's texture is a HostTexture rather than a Texture.
+bool is_host_texture(const std::shared_ptr<detail::TextureData>& data);
+
+uintptr_t current_gl_context();
+// For host adapters: an immutable GL_RGBA8 texture in the current context, which
+// import_gl_texture() accepts, and its deletion. Pending host errors are discarded first.
+uint32_t create_host_texture(int64_t width, int64_t height);
+void delete_host_texture(uint32_t texture);
+
+}

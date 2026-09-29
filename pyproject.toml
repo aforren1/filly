@@ -1,0 +1,33 @@
+[build-system]
+requires = ["scikit-build-core>=0.11,<2", "nanobind>=2.4,<4"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "filly"
+version = "0.1.0.dev0"
+description = "A small 3D renderer for psychophysics stimuli, built on Google Filament"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+images = ["Pillow>=10"]
+examples = ["Pillow>=10"]
+psychopy = ["psychopy-lib==2026.2.4"]
+pyglet = ["pyglet>=1.4.11"]
+moderngl = ["pyglet>=1.4.11", "moderngl>=5.12"]
+zengl = ["pyglet>=1.4.11", "zengl>=2.7"]
+
+[dependency-groups]
+dev = ["pytest>=8", "nanobind>=2.4,<4", "scikit-build-core>=0.11,<2", "ninja>=1.11"]
+
+[tool.scikit-build]
+minimum-version = "0.11"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/filly"]
+wheel.py-api = "cp312"
+sdist.exclude = [".deps", ".venv", "build", "dist", "Microsoft", ".vscode"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: requires a working OpenGL driver", "interop: requires a host WGL or GLX context", "psychopy: requires psychopy-lib and a display"]

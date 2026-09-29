@@ -1,0 +1,62 @@
+name: Build wheels
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheels-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wheels:
+    name: ${{ matrix.os }} wheels
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cache Linux SDK
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: .deps/filament-linux
+          key: filament-linux-x86_64-manylinux228-${{ hashFiles('tools/build_filament_linux.py', 'tools/ci_linux.sh') }}
+      - name: Cache Windows SDK
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: filament-windows-x86_64-${{ hashFiles('tools/fetch_filament.py') }}
+      - name: Build, repair, audit, and test wheels
+        uses: pypa/cibuildwheel@v4.2.1
+        env:
+          CIBW_BUILD: 'cp310-* cp311-* cp312-* cp313-* cp314-*'
+          CIBW_SKIP: '*-musllinux* *-win32 *-win_arm64'
+          CIBW_ARCHS_LINUX: x86_64
+          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_BEFORE_ALL_LINUX: bash {package}/tools/ci_linux.sh
+          CIBW_BEFORE_ALL_WINDOWS: python {package}/tools/fetch_filament.py
+          CIBW_ENVIRONMENT_LINUX: 'CC=clang CXX=clang++ CMAKE_ARGS="-DFILAMENT_ROOT=/project/.deps/filament-linux" LIBGL_ALWAYS_SOFTWARE=1'
+          CIBW_TEST_REQUIRES: 'pytest pillow pyglet==1.4.11'
+          CIBW_TEST_COMMAND_LINUX: 'timeout 600 xvfb-run -a python -m pytest {project}/tests -q -m "not psychopy" -o faulthandler_timeout=60'
+          # Hosted Windows runners do not supply a reliable OpenGL rendering device.
+          CIBW_TEST_COMMAND_WINDOWS: 'python -m pytest {project}/tests/test_stress.py -q'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
