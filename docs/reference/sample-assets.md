@@ -101,8 +101,8 @@ The audit also led to these corrections:
 - `CompareDispersion`: distinguish volume shaders with and without dispersion in the material
   cache. The SDK's key equality omitted that flag, which could select a shader without the required uniform.
 - `Box With Spaces` and generated Unicode-path fixtures: decode percent escapes once and load
-  external resources through Unicode filesystem paths. External buffers are embedded as data
-  URIs during preflight because the desktop SDK bypasses its URI cache for those buffers.
+  external resources through Unicode filesystem paths. The loader reads external buffers itself
+  and gives gltfio the loaded memory, because the desktop SDK bypasses its URI cache for buffers.
 
 Regression tests compare absorption with equivalent mesh, parent, and model-root scales in both
 material modes, including iridescent volume materials.

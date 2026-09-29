@@ -124,7 +124,7 @@ The C++ facade is the stable public implementation API. Its header includes neit
 
 Python must not directly manage Filament resource lifetimes.
 
-Python preflight (`filly._assets`) runs before native loading. It checks extensions, decodes data that the pinned `gltfio` cannot read, and passes tables for the features that this project adds (section 7).
+glTF preparation runs in the native core as part of loading (`native/gltf_prepare.cpp`). It checks extensions, decodes data that the pinned `gltfio` cannot read, and builds the tables for the features that this project adds (section 7). Python only binds it.
 
 ---
 
@@ -310,7 +310,7 @@ Loading from bytes is important for packaged experiment resources.
 **Decision (glTF scope).**
 
 - `gltfio` supplies core glTF 2.0 and `KHR_lights_punctual`, unlit, clearcoat, sheen, transmission, volume, IOR, specular, emissive strength, specular-glossiness, variants, dispersion, texture transforms, Basis Universal textures, mesh quantization, and Draco.
-- This project adds `KHR_materials_diffuse_transmission` (a custom material), the glTF parameters of `KHR_materials_anisotropy` and `KHR_materials_iridescence` (on Filament's own shading inputs), a tested subset of `KHR_animation_pointer`, `KHR_node_visibility`, `EXT_mesh_gpu_instancing` (expanded into nodes), `EXT_meshopt_compression` and `KHR_meshopt_compression` (meshoptimizer 1.0), and WebP through Pillow.
+- This project adds `KHR_materials_diffuse_transmission` (a custom material), the glTF parameters of `KHR_materials_anisotropy` and `KHR_materials_iridescence` (on Filament's own shading inputs), a tested subset of `KHR_animation_pointer`, `KHR_node_visibility`, `EXT_mesh_gpu_instancing` (expanded into nodes), `EXT_meshopt_compression` and `KHR_meshopt_compression` (meshoptimizer 1.0), and WebP through a libwebp 1.5.0 texture provider.
 - Volume thickness uses the complete node transform, as `KHR_materials_volume` requires; Filament 1.77.1 uses only the mesh node's scale.
 - Draft extensions were removed: `KHR_materials_volume_scatter` and `KHR_materials_retroreflection` are unknown extensions.
 - This is not a conformance claim.

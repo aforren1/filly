@@ -139,9 +139,9 @@ path and about 1 ms with color grading. CPU submission was 0.1 to 0.3 ms per cal
 | `close()` | Release the scene's models, lights, cameras, environment, and view. Repeated calls are valid. |
 | `closed` | Report whether the scene or its renderer is closed. |
 
-Byte assets must contain all resources. Path assets can use local external buffers and images.
-PNG, JPEG, and Basis Universal KTX2 textures are supported. WebP requires Pillow, available through
-`filly[images]`; conversion to PNG occurs during loading.
+Byte assets must contain all resources. Path assets can use local external buffers and images,
+also in folders with non-ASCII names. PNG, JPEG, Basis Universal KTX2, and WebP
+(`EXT_texture_webp`) textures are supported. The extension decodes WebP with libwebp 1.5.0.
 Scenes retain their loaded models, cameras, and lights.
 
 After `close()`, the scene's models, lights, and cameras report `closed=True` or raise
@@ -335,12 +335,16 @@ uses the roughest reflection level instead. Skyboxes draw the disc of a sun ligh
 
 ### Asset compatibility
 
-Unknown optional glTF extensions emit `AssetCompatibilityWarning`. Unknown required extensions
-raise `AssetError`. `strict=True` turns compatibility warnings into errors. The metadata-only
+Unknown optional glTF extensions emit `filly.AssetCompatibilityWarning`, a `UserWarning`.
+Unknown required extensions raise `AssetError`. `strict=True` turns compatibility warnings into errors. The metadata-only
 `KHR_xmp` and `KHR_xmp_json_ld` extensions are ignored without a warning. The draft
 `KHR_materials_volume_scatter` and `KHR_materials_retroreflection` extensions are unknown
 extensions; a material that uses them renders without that effect. Warnings also identify
 glass loaded without refraction. These checks are not a complete glTF validator.
+
+The native loader runs the checks and collects the warnings. `scene.load()` issues the warnings
+after the native load returns, or before it raises an error. If a warning filter turns a
+warning into an exception, the model is closed and the exception propagates.
 
 ### Texture limits
 
@@ -360,9 +364,9 @@ anisotropy, and iridescence materials are always compiled and raise `AssetError`
 The loader supports punctual lights, unlit materials, clearcoat, sheen, transmission, volume, IOR,
 specular, emissive strength, specular-glossiness, dispersion, variants, texture transforms,
 mesh quantization and Draco through Filament. Both `EXT_meshopt_compression` and
-`KHR_meshopt_compression` are decoded before native loading with meshoptimizer 1.0.
-This includes version 1 vertex data and the COLOR filter, compressed pointer accessors,
-and compressed instance attributes. Decoded views become embedded buffers during loading.
+`KHR_meshopt_compression` are decoded during loading with meshoptimizer 1.0, into the fallback
+buffers that the compressed views name. This includes version 1 vertex data and the COLOR filter,
+compressed pointer accessors, and compressed instance attributes.
 This is not a glTF conformance claim.
 `KHR_animation_pointer` has the tested subset listed below.
 Dispersion requires volume and rejects unlit or specular-glossiness combinations
@@ -635,7 +639,8 @@ instance changes all of them. Each clone has its own transform and materials.
 | `cylinder(radius=0.5, height=1, *, segments=32, caps=True)` | Cylinder on the Y axis; caps map a disc onto the UV square. |
 
 Each returns a dict with `positions`, `normals`, `uvs` (`float32`), and `indices` (`uint32`),
-centered on the origin.
+centered on the origin. The functions are native (`filly._native.shapes`); `segments` and `rings`
+must be integers.
 
 ### Animation
 
@@ -735,7 +740,7 @@ Its transform is relative to its original glTF parent.
 | `morph_target_count` | Number of morph targets. |
 | `set_morph_weights(weights)` | Set one finite weight per target. Weights are not restricted to `[0,1]`. |
 
-Nodes support `==` and `hash()`. `EXT_mesh_gpu_instancing` children, which preflight adds, have
+Nodes support `==` and `hash()`. `EXT_mesh_gpu_instancing` children, which loading adds, have
 indices after the authored nodes and no name. Each child has the mesh, so its `mesh_name` is the
 mesh name; the instancing node itself has no mesh. Use `children` of the instancing node to reach
 one instance.
@@ -988,8 +993,8 @@ fenced. Use this after a host window has closed.
 `render()`, the outermost `acquire()` enter and exit, native asset loading, environment
 filtering, `finish()`, `close()`, `Texture.update()`, texture assignment, mesh creation and
 updates, and entering `HostTexture.write()` release the GIL. Other Python threads can run during these
-calls. Python asset preflight runs before native loading. Normal rendering does not perform a
-full GPU completion wait.
+calls. Native asset loading includes the glTF checks and preparation. Normal rendering does not
+perform a full GPU completion wait.
 
 ## Host integrations
 

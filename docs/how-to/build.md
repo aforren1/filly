@@ -4,7 +4,8 @@
 
 - Windows x64 with an OpenGL driver.
 - Visual Studio 2022 with the C++ desktop workload and a Windows SDK.
-- CMake 3.24 or later. CMake 3.29 was used for the initial build.
+- CMake 3.28 or later. CMake 3.29 was used.
+- Network access for the first configure, which downloads libwebp. See [libwebp](#libwebp).
 - uv and Python 3.12 for the development environment.
 - Space for the Filament SDK. The compressed archive is about 813 MiB.
 
@@ -35,11 +36,31 @@ To use a separate SDK directory, add this argument to the install command:
 The SDK must match version 1.77.1 and contain `include` and `lib/x86_64/md`.
 The build links the release libraries with the dynamic MSVC runtime.
 
+## libwebp
+
+The Filament SDK is built without WebP, so the build adds libwebp 1.5.0 for `EXT_texture_webp`.
+CMake `FetchContent` downloads the release archive from `storage.googleapis.com/downloads.webmproject.org`
+at the first configure and checks its SHA-256 hash (`7d6fab70...c2a5c92c`, in `CMakeLists.txt`).
+The archive is signed with the WebP release key `6B0E 6B70 976D E303 EDF2 F601 F9C3 D6BD B823 2B5D`.
+Only the static decoder library (`webpdecoder`) is built, with the same MSVC runtime (`/MD`) as the
+extension on Windows and position-independent code on Linux. Its tools are not built or
+installed. The wheel includes the libwebp license and patent grant.
+
+For an offline build, extract the same release and pass its folder:
+
+```powershell
+-Ccmake.define.FETCHCONTENT_SOURCE_DIR_LIBWEBP=C:/path/to/libwebp-1.5.0
+```
+
+The hash check does not apply to a local folder. Use only the verified release.
+
 ## Build on Linux
 
-Use Linux x86_64, Python 3.12 or later for the SDK tool, Clang, CMake, Ninja, and the X11/OpenGL
-development packages. Filament 1.77.1 is built from source with libstdc++ and position-independent
-code. Reserve several GiB for source and build files. The first build can take several minutes.
+Use Linux x86_64, Python 3.12 or later for the SDK tool, Clang, CMake 3.28 or later, Ninja, and the
+X11/OpenGL development packages. Filament 1.77.1 is built from source with libstdc++ and
+position-independent code. The wrapper build downloads libwebp as on Windows. Reserve several GiB
+for source and build files. The first build can take several minutes. The native glTF
+preparation and libwebp have not been built or tested on Linux yet.
 
 On Ubuntu, install the system dependencies:
 
@@ -73,7 +94,7 @@ WSLg already supplies a display, so Xvfb is optional there. Set `LIBGL_ALWAYS_SO
 to select Mesa software rendering. Software tests do not measure GPU performance.
 
 Pyglet is needed for the shared-context tests. Install `pyglet==1.4.11` and Pillow to run all
-non-PsychoPy tests. Native Wayland, EGL-only headless rendering, macOS, and ARM builds are not implemented.
+non-PsychoPy tests; the tests use Pillow only to encode PNG fixtures. Native Wayland, EGL-only headless rendering, macOS, and ARM builds are not implemented.
 
 ## Test
 
@@ -111,7 +132,7 @@ CXX=clang++ CMAKE_ARGS="-DFILAMENT_ROOT=$PWD/.deps/filament-linux" uv build --wh
 The extension links Filament statically. The wheel does not need a separate Filament SDK at runtime.
 The host still needs an OpenGL driver and its platform runtime libraries. Windows also needs
 a compatible Microsoft C++ runtime. Linux needs X11/GLX.
-The wheel includes the Filament license.
+The wheel includes the licenses of Filament, cgltf, meshoptimizer, and libwebp.
 
 Build with Python 3.12 to produce a `cp312-abi3` wheel. This wheel supports Python 3.12 and later
 standard CPython builds. Python 3.10 and 3.11 builds produce version-specific wheels. Free-threaded

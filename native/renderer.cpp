@@ -1,7 +1,9 @@
 #include "renderer.h"
 #include "gl_interop.h"
+#include "gltf_prepare.h"
 #include "materials.h"
 #include "engine_config.h"
+#include "webp_provider.h"
 
 #include <backend/PixelBufferDescriptor.h>
 #include <filament/Camera.h>
@@ -46,6 +48,7 @@
 #include <utils/NameComponentManager.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -114,12 +117,6 @@ void clipping(double near, double far) {
     finite(near); finite(far);
     if (!(near > 0 && far > near))
         throw std::invalid_argument("Require 0 < near < far");
-}
-// Reads an unsigned integer that preflight wrote into a glTF extras object.
-size_t extras_field(const char* extras, const char* name, size_t fallback) {
-    const char* key = extras ? std::strstr(extras, name) : nullptr;
-    const char* colon = key ? std::strchr(key, ':') : nullptr;
-    return colon ? size_t(std::strtoull(colon + 1, nullptr, 10)) : fallback;
 }
 }
 
@@ -433,23 +430,20 @@ struct MeshGeometry {
     }
 };
 
-// One glTF asset and the preflight data that each instance needs. A model and its clones
+// One glTF asset and the preparation tables that each instance needs. A model and its clones
 // share it; the last one to close destroys the asset.
 struct AssetData : Resource {
     using Resource::Resource;
     g::FilamentAsset* asset = nullptr;
-    // False once the source data and preflight tables are released after the first instance.
+    // False once the source data and instance tables are released after the first instance.
     bool clonable = false;
     bool masked = false;
-    // Kept for every asset: name lookups need them, and they are small.
-    std::vector<NodeSource> nodes;
-    std::vector<DiffuseSource> diffuse;
-    std::vector<SurfaceSource> surfaces;
-    std::vector<AnimationSource> animations;
-    std::vector<CameraSource> cameras;
-    std::vector<std::vector<float>> morphs;
-    // Custom-material textures of every instance. Their material instances live until the
-    // asset is destroyed, so the textures must too.
+    // Node names stay for every asset: name lookups need them, and they are small.
+    std::shared_ptr<PreparedAsset> prepared;
+    // Buffer memory that gltfio's parse points into, until its source data is released.
+    std::shared_ptr<BufferStore> buffers;
+    // Provider-built material textures of every instance. Their material instances live until
+    // the asset is destroyed, so the textures must too.
     std::vector<f::Texture*> textures;
     // Set for generated meshes, whose renderables use these buffers instead of the asset's.
     std::unique_ptr<MeshGeometry> mesh;
@@ -460,6 +454,7 @@ struct AssetData : Resource {
             if (mesh) mesh->release(*state->engine);
         }
         asset = nullptr;
+        buffers.reset();
         textures.clear();
         mesh.reset();
     }
@@ -503,6 +498,8 @@ struct ModelData : Resource, std::enable_shared_from_this<ModelData> {
     g::Animator* animator = nullptr;
     // Entities by glTF node index; null for nodes that gltfio did not instantiate.
     std::vector<utils::Entity> nodes;
+    // (entity id, glTF node index) for this instance's node entities, sorted by entity id.
+    std::vector<std::pair<uint32_t, uint32_t>> node_indices;
     // Light and camera nodes in glTF node order.
     std::vector<utils::Entity> lights, camera_entities;
     std::vector<std::shared_ptr<CameraData>> camera_handles;
@@ -565,6 +562,7 @@ struct ModelData : Resource, std::enable_shared_from_this<ModelData> {
         rest_transforms.clear();
         rest_morphs.clear();
         nodes.clear();
+        node_indices.clear();
         lights.clear();
         camera_entities.clear();
         shared.reset();
@@ -590,10 +588,17 @@ struct ModelData : Resource, std::enable_shared_from_this<ModelData> {
         owner->dirty_bones.push_back(shared_from_this());
     }
 };
-// Preflight names, not gltfio's, which fall back to the mesh, light, or camera name.
+// The glTF node index of one of this instance's entities, or SIZE_MAX.
+size_t node_index(const ModelData& model, utils::Entity entity) {
+    const auto id = entity.getId();
+    const auto found = std::lower_bound(model.node_indices.begin(), model.node_indices.end(), std::pair<uint32_t, uint32_t>{id, 0});
+    return found != model.node_indices.end() && found->first == id ? found->second : SIZE_MAX;
+}
+// glTF names, not gltfio's, which fall back to the mesh, light, or camera name.
 const NodeSource* node_source(const ModelData& model, utils::Entity entity) {
-    const auto index = extras_field(model.asset->getExtras(entity), "\"fillyVisibility\"", SIZE_MAX);
-    return index < model.shared->nodes.size() ? &model.shared->nodes[index] : nullptr;
+    const auto index = node_index(model, entity);
+    const auto& nodes = model.shared->prepared->nodes;
+    return index < nodes.size() ? &nodes[index] : nullptr;
 }
 void initialize_visibility(ModelData& model) {
     auto& transforms = model.state->engine->getTransformManager();
@@ -601,10 +606,11 @@ void initialize_visibility(ModelData& model) {
     while (!pending.empty()) {
         const auto [entity, parent] = pending.back();
         pending.pop_back();
-        const char* extras = model.asset->getExtras(entity);
         const size_t position = model.visibility.size();
-        const bool visible = extras_field(extras, "\"fillyVisible\"", 1) != 0;
-        model.visibility.push_back({entity, extras_field(extras, "\"fillyVisibility\"", SIZE_MAX), parent, visible, visible});
+        const size_t index = node_index(model, entity);
+        const auto* source = node_source(model, entity);
+        const bool visible = !source || source->visible;
+        model.visibility.push_back({entity, index, parent, visible, visible});
         for (auto child : transforms.getChildrenRange(transforms.getInstance(entity)))
             pending.emplace_back(transforms.getEntity(child), position);
     }
@@ -761,22 +767,18 @@ void update_diffuse_environment(SceneData& scene) {
 }
 
 // Builds the per-instance tables and restores authored state. Shared by loading and cloning.
+// model.node_indices must be set.
 void initialize_model(ModelData& model, const std::vector<MaterialBinding>& bindings) {
     auto& engine = *model.state->engine;
     auto& transforms = engine.getTransformManager();
     auto& renderables = engine.getRenderableManager();
     auto& light_manager = engine.getLightManager();
-    const auto& shared = *model.shared;
+    const auto& prepared = *model.shared->prepared;
     model.animator = model.instance->getAnimator();
     model.skinned = model.instance->getSkinCount() > 0;
-    const auto* entities = model.instance->getEntities();
-    const size_t count = model.instance->getEntityCount();
-    for (size_t i = 0; i < count; ++i) {
-        const auto index = extras_field(model.asset->getExtras(entities[i]), "\"fillyVisibility\"", SIZE_MAX);
-        if (index == SIZE_MAX) continue;
-        if (index >= model.nodes.size()) model.nodes.resize(index + 1);
-        model.nodes[index] = entities[i];
-    }
+    model.nodes.assign(prepared.nodes.size(), utils::Entity{});
+    for (const auto& [entity, index] : model.node_indices)
+        if (index < model.nodes.size()) model.nodes[index] = utils::Entity::import(entity);
     for (const auto entity : model.nodes) {
         if (!entity) continue;
         if (light_manager.hasComponent(entity)) model.lights.push_back(entity);
@@ -784,8 +786,10 @@ void initialize_model(ModelData& model, const std::vector<MaterialBinding>& bind
     }
     model.camera_handles.resize(model.camera_entities.size());
     initialize_visibility(model);
-    initialize_cameras(model, shared.cameras);
-    initialize_animations(model, shared.animations, bindings);
+    initialize_cameras(model, prepared.cameras);
+    initialize_animations(model, prepared.animations, bindings);
+    const auto* entities = model.instance->getEntities();
+    const size_t count = model.instance->getEntityCount();
     for (size_t i = 0; i < count; ++i) {
         auto entity = entities[i];
         model.rest_transforms.emplace_back(entity, transforms.getTransform(transforms.getInstance(entity)));
@@ -793,13 +797,72 @@ void initialize_model(ModelData& model, const std::vector<MaterialBinding>& bind
         if (renderable && renderables.getMorphTargetCount(renderable)) {
             const auto targets = renderables.getMorphTargetCount(renderable);
             std::vector<float> weights(targets);
-            const auto index = extras_field(model.asset->getExtras(entity), "\"fillyNode\"", SIZE_MAX);
-            if (index < shared.morphs.size() && shared.morphs[index].size() == targets) weights = shared.morphs[index];
+            if (const auto* source = node_source(model, entity); source && source->weights.size() == targets)
+                weights = source->weights;
             renderables.setMorphWeights(renderable, weights.data(), weights.size());
             model.rest_morphs.emplace_back(entity, std::move(weights));
         }
     }
     model.animator->updateBoneMatrices();
+}
+
+// gltfio builds entities and material instances from its own parse and exposes no map back to
+// glTF indices. While createInstance() runs, it reads node and material extras from
+// json + offset (AssetLoader.cpp, recurseEntities() and createMaterialInstance()). Pointing those
+// ranges at index markers gives exact maps: node markers become each entity's extras, material
+// markers reach the MaterialProvider. The parse is restored before this returns. The SDK does
+// not export AssetLoader::getNodeManager(), so entity extras keep the markers; filly does not
+// expose extras.
+g::FilamentInstance* create_instance(State& state, AssetData& shared, std::vector<std::pair<uint32_t, uint32_t>>& nodes) {
+    auto* data = static_cast<cgltf_data*>(const_cast<void*>(shared.asset->getSourceAsset()));
+    if (!data) throw FillyError("Asset source data was released");
+    std::string markers;
+    std::vector<cgltf_extras> node_extras(data->nodes_count), material_extras(data->materials_count);
+    auto mark = [&](cgltf_extras& extras, cgltf_extras& saved, char kind, size_t index) {
+        saved = extras;
+        extras.start_offset = markers.size();
+        markers += '#';
+        markers += kind;
+        markers += std::to_string(index);
+        extras.end_offset = markers.size();
+    };
+    for (size_t i = 0; i < data->nodes_count; ++i) mark(data->nodes[i].extras, node_extras[i], 'n', i);
+    for (size_t i = 0; i < data->materials_count; ++i) mark(data->materials[i].extras, material_extras[i], 'm', i);
+    const char* json = data->json;
+    struct Restore {
+        cgltf_data* data; const char* json;
+        std::vector<cgltf_extras>& nodes; std::vector<cgltf_extras>& materials;
+        g::MaterialProvider* provider;
+        ~Restore() {
+            data->json = json;
+            for (size_t i = 0; i < nodes.size(); ++i) data->nodes[i].extras = nodes[i];
+            for (size_t i = 0; i < materials.size(); ++i) data->materials[i].extras = materials[i];
+            set_prepared_asset(provider, nullptr);
+        }
+    };
+    g::FilamentInstance* instance = nullptr;
+    {
+        Restore restore{data, json, node_extras, material_extras, state.materials};
+        data->json = markers.data();
+        set_prepared_asset(state.materials, shared.prepared.get());
+        instance = state.loader->createInstance(shared.asset);
+    }
+    if (!instance) return nullptr;
+    const auto* entities = instance->getEntities();
+    nodes.clear();
+    nodes.reserve(instance->getEntityCount());
+    for (size_t i = 0; i < instance->getEntityCount(); ++i) {
+        const char* marker = shared.asset->getExtras(entities[i]);
+        marker = marker ? marker : "";
+        const char* end = marker + std::strlen(marker);
+        size_t index = SIZE_MAX;
+        if (marker[0] == '#' && marker[1] == 'n') std::from_chars(marker + 2, end, index);
+        if (index >= data->nodes_count)
+            throw AssetError("gltfio created an entity without a node marker; filly needs updating for this Filament SDK");
+        nodes.emplace_back(entities[i].getId(), uint32_t(index));
+    }
+    std::sort(nodes.begin(), nodes.end());
+    return instance;
 }
 
 void State::close() noexcept {
@@ -1204,89 +1267,122 @@ void Scene::set_camera(const Camera& camera) {
 }
 
 bool Scene::precompiled_shaders() const { data_->check(); return data_->state->precompiled; }
-Model Scene::load_asset(const std::vector<uint8_t>& bytes, const std::string& path,
-        const std::vector<DiffuseSource>& diffuse, const std::vector<std::vector<float>>& morphs,
-        const std::vector<AnimationSource>& animations, const std::vector<SurfaceSource>& surfaces,
-        const std::vector<CameraSource>& cameras, const std::vector<NodeSource>& nodes,
-        bool masked, bool clonable) {
+namespace {
+// Provider-built material textures, bindings, and records from one createInstance() call. On
+// failure the textures still belong to the asset, whose material instances may use them.
+struct ProviderResults {
+    std::vector<detail::MaterialBinding> bindings;
+    std::vector<detail::MaterialRecord> records;
+    void take(g::MaterialProvider* provider, detail::AssetData& shared) {
+        auto textures = detail::take_material_textures(provider);
+        shared.textures.insert(shared.textures.end(), textures.begin(), textures.end());
+        bindings = detail::take_material_bindings(provider);
+        records = detail::take_material_records(provider);
+    }
+};
+std::filesystem::path utf8_path(const std::string& value) {
+    const auto* first = reinterpret_cast<const char8_t*>(value.data());
+    return std::filesystem::path(std::u8string(first, first + value.size()));
+}
+}
+
+Model Scene::load(const std::string& path, bool strict, bool clonable, std::vector<std::string>& warnings) {
     data_->check();
-    if (masked && data_->direct)
+    std::error_code error;
+    const auto file = std::filesystem::absolute(utf8_path(path), error);
+    if (error) throw AssetError("Could not open asset: " + path);
+    const auto utf8 = file.u8string();
+    const std::string absolute(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+    std::vector<uint8_t> bytes;
+    try {
+        bytes = detail::read_file(file);
+    } catch (const AssetError&) {
+        throw AssetError("Could not open asset: " + absolute);
+    }
+    return load_document(std::move(bytes), absolute, strict, clonable, warnings);
+}
+Model Scene::load(std::vector<uint8_t> bytes, bool strict, bool clonable, std::vector<std::string>& warnings) {
+    data_->check();
+    return load_document(std::move(bytes), std::string(), strict, clonable, warnings);
+}
+
+Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, bool strict, bool clonable,
+                           std::vector<std::string>& warnings) {
+    auto state = data_->state;
+    auto prepared = detail::prepare_asset(std::move(bytes), path,
+        {strict, data_->refraction, state->precompiled}, warnings);
+    const auto& tables = *prepared.tables;
+    if (tables.masked && data_->direct)
         throw AssetError("Asset has alphaMode MASK materials, which need color grading, but "
                          "output_path is 'direct'; set output_path = 'graded' first");
-    auto state = data_->state;
-    if (bytes.empty() || bytes.size() > std::numeric_limits<uint32_t>::max())
-        throw AssetError("Asset is empty or larger than 4 GiB");
     auto shared = state->track(std::make_shared<detail::AssetData>(state));
-    shared->diffuse = diffuse;
-    shared->surfaces = surfaces;
-    shared->animations = animations;
-    shared->cameras = cameras;
-    shared->morphs = morphs;
-    shared->nodes = nodes;
-    shared->masked = masked;
-    detail::set_diffuse_sources(state->materials, diffuse);
-    detail::set_surface_sources(state->materials, surfaces);
+    shared->prepared = prepared.tables;
+    shared->buffers = prepared.buffers;
+    shared->masked = tables.masked;
+    ProviderResults results;
+    std::vector<std::pair<uint32_t, uint32_t>> node_indices;
+    g::FilamentInstance* instance = nullptr;
     try {
-        shared->asset = state->loader->createAsset(bytes.data(), uint32_t(bytes.size()));
+        // With no instances, gltfio parses the document and builds vertex buffers but creates no
+        // material instances, so its parse can be patched and read before createInstance().
+        detail::set_prepared_asset(state->materials, prepared.tables.get());
+        g::FilamentInstance* none = nullptr;
+        shared->asset = state->loader->createInstancedAsset(prepared.bytes.data(), uint32_t(prepared.bytes.size()), &none, 0);
+        detail::set_prepared_asset(state->materials, nullptr);
+        if (!shared->asset) throw AssetError("Could not decode glTF/GLB asset");
+        auto* source = static_cast<cgltf_data*>(const_cast<void*>(shared->asset->getSourceAsset()));
+        detail::patch_source(source, prepared);
+        instance = detail::create_instance(*state, *shared, node_indices);
+        results.take(state->materials, *shared);
     } catch (...) {
-        shared->textures = detail::take_diffuse_textures(state->materials);
-        detail::take_material_bindings(state->materials);
-        detail::take_material_records(state->materials);
-        detail::set_diffuse_sources(state->materials, {});
-        detail::set_surface_sources(state->materials, {});
+        detail::set_prepared_asset(state->materials, nullptr);
+        results.take(state->materials, *shared);
         throw;
     }
-    shared->textures = detail::take_diffuse_textures(state->materials);
-    auto material_bindings = detail::take_material_bindings(state->materials);
-    auto material_records = detail::take_material_records(state->materials);
-    detail::set_diffuse_sources(state->materials, {});
-    detail::set_surface_sources(state->materials, {});
-    if (!shared->asset) throw AssetError("Could not decode glTF/GLB asset");
+    if (!instance) throw AssetError("Could not create an instance of this asset");
     auto* asset = shared->asset;
-    // Fail before resource upload, which can otherwise leave incomplete assets.
-    std::vector<std::pair<std::string, std::filesystem::path>> external_resources;
-    for (size_t i = 0; i < asset->getResourceUriCount(); ++i) {
-        const std::string uri = asset->getResourceUris()[i];
-        if (uri.starts_with("data:")) continue;
+    const auto* source = static_cast<const cgltf_data*>(asset->getSourceAsset());
+    // Buffers are already in gltfio's parse. Images still load through ResourceLoader, which
+    // would open files with narrow paths, so their bytes are read here.
+    std::vector<std::pair<std::string, std::filesystem::path>> image_files;
+    for (size_t i = 0; i < source->images_count; ++i) {
+        const char* uri = source->images[i].uri;
+        if (!uri || std::string_view(uri).starts_with("data:")) continue;
         if (path.empty()) throw AssetError("Byte assets must contain all resources");
+        const std::string_view text(uri);
         std::string decoded;
-        for (size_t j = 0; j < uri.size(); ++j) {
-            if (uri[j] != '%') { decoded += uri[j]; continue; }
+        for (size_t j = 0; j < text.size(); ++j) {
+            if (text[j] != '%') { decoded += text[j]; continue; }
             auto hex = [](char c) -> int {
                 if (c >= '0' && c <= '9') return c - '0';
                 if (c >= 'a' && c <= 'f') return c - 'a' + 10;
                 if (c >= 'A' && c <= 'F') return c - 'A' + 10;
                 return -1;
             };
-            if (j + 2 >= uri.size() || hex(uri[j+1]) < 0 || hex(uri[j+2]) < 0)
-                throw AssetError("Invalid resource URI escape: " + uri);
-            const char value = char(hex(uri[j+1]) * 16 + hex(uri[j+2]));
+            if (j + 2 >= text.size() || hex(text[j+1]) < 0 || hex(text[j+2]) < 0)
+                throw AssetError("Invalid resource URI escape: " + std::string(uri));
+            const char value = char(hex(text[j+1]) * 16 + hex(text[j+2]));
             if (!value) throw AssetError("Resource URI contains a null byte");
             decoded += value;
             j += 2;
         }
-        const auto resource = std::filesystem::u8path(path).parent_path() / std::filesystem::u8path(decoded);
-        if (!std::filesystem::is_regular_file(resource))
-            throw AssetError("Missing glTF resource: " + uri);
-        external_resources.emplace_back(uri, resource);
+        const auto resource = utf8_path(path).parent_path() / utf8_path(decoded);
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(resource, error)) throw AssetError("Missing glTF resource: " + std::string(uri));
+        image_files.emplace_back(uri, resource);
     }
     std::unique_ptr<g::TextureProvider> decoder(g::createStbProvider(state->engine));
     std::unique_ptr<g::TextureProvider> ktx(g::createKtx2Provider(state->engine));
-    std::unique_ptr<g::TextureProvider> webp(g::createWebpProvider(state->engine));
+    std::unique_ptr<g::TextureProvider> webp(detail::create_webp_provider(state->engine));
     {
         g::ResourceLoader resources({state->engine, path.empty() ? nullptr : path.c_str(), true});
-        // Supply image bytes under the original URI; gltfio's own file reads use narrow paths.
-        // Buffers never reach here: preflight packs them into the GLB binary chunk.
-        for (const auto& [uri, resource] : external_resources) {
-            std::ifstream stream(resource, std::ios::binary | std::ios::ate);
-            if (!stream) throw AssetError("Could not open glTF resource: " + uri);
-            const auto size = stream.tellg();
-            if (size <= 0 || uint64_t(size) > std::numeric_limits<uint32_t>::max())
-                throw AssetError("glTF resource is empty or larger than 4 GiB: " + uri);
-            auto bytes = std::make_unique<std::vector<uint8_t>>(size_t(size));
-            stream.seekg(0);
-            if (!stream.read(reinterpret_cast<char*>(bytes->data()), size))
+        for (const auto& [uri, file] : image_files) {
+            std::unique_ptr<std::vector<uint8_t>> bytes;
+            try {
+                bytes = std::make_unique<std::vector<uint8_t>>(detail::read_file(file));
+            } catch (const AssetError&) {
                 throw AssetError("Could not read glTF resource: " + uri);
+            }
             auto* payload = bytes.release();
             resources.addResourceData(uri.c_str(), g::ResourceLoader::BufferDescriptor(
                 payload->data(), payload->size(), [](void*, size_t, void* user) {
@@ -1296,7 +1392,7 @@ Model Scene::load_asset(const std::vector<uint8_t>& bytes, const std::string& pa
         resources.addTextureProvider("image/png", decoder.get());
         resources.addTextureProvider("image/jpeg", decoder.get());
         resources.addTextureProvider("image/ktx2", ktx.get());
-        if (webp) resources.addTextureProvider("image/webp", webp.get());
+        resources.addTextureProvider("image/webp", webp.get());
         if (!resources.loadResources(asset)) throw AssetError("Could not load glTF resources");
         // Upload lifetimes do not need this wait. It keeps the upload out of the first trial frame.
         state->engine->flushAndWait();
@@ -1305,25 +1401,57 @@ Model Scene::load_asset(const std::vector<uint8_t>& bytes, const std::string& pa
     model->scene = data_;
     model->shared = shared;
     model->asset = asset;
-    model->instance = asset->getInstance();
-    model->records = std::move(material_records);
-    detail::initialize_model(*model, material_bindings);
-    if (masked) ++data_->masked;
-    // Only AssetLoader::createInstance() reads the source data (about the file size) and the
-    // preflight tables after this point, so they are kept only for assets that clone() may copy.
+    model->instance = instance;
+    model->records = std::move(results.records);
+    model->node_indices = std::move(node_indices);
+    detail::initialize_model(*model, results.bindings);
+    if (tables.masked) ++data_->masked;
+    // Only AssetLoader::createInstance() reads the source data (about the file size), the
+    // buffers it points into, and the instance tables after this point, so they are kept only
+    // for assets that clone() may copy.
     shared->clonable = clonable;
     if (!clonable) {
         asset->releaseSourceData();
-        shared->diffuse = {};
-        shared->surfaces = {};
-        shared->animations = {};
-        shared->cameras = {};
-        shared->morphs = {};
+        shared->buffers.reset();
+        auto& kept = *shared->prepared;
+        kept.diffuse = {};
+        kept.surfaces = {};
+        kept.animations = {};
+        kept.cameras = {};
+        kept.materials = {};
     }
     data_->children.push_back(model);
     detail::update_visibility(*model);
     detail::update_diffuse_environment(*data_);
     return Model(model);
+}
+
+Model Scene::create_mesh(const MeshArrays& arrays, const MeshMaterial& material) {
+    data_->check();
+    if (!arrays.positions || !arrays.indices || arrays.vertices < 3 || arrays.triangles < 1)
+        throw std::invalid_argument("A mesh needs at least 3 positions and 1 triangle");
+    for (size_t i = 0; i < arrays.vertices * 3; ++i)
+        if (!std::isfinite(arrays.positions[i])) throw std::invalid_argument("Positions must be finite");
+    // A one-primitive glTF gives the mesh a node and the loader's own material; its geometry is
+    // then replaced, so the model behaves like any loaded asset.
+    std::array<float, 3> low, high;
+    for (int axis = 0; axis < 3; ++axis) {
+        low[axis] = high[axis] = arrays.positions[axis];
+        for (size_t i = 0; i < arrays.vertices; ++i) {
+            low[axis] = std::min(low[axis], arrays.positions[3 * i + axis]);
+            high[axis] = std::max(high[axis], arrays.positions[3 * i + axis]);
+        }
+    }
+    auto document = detail::mesh_placeholder(low, high, arrays.colors != nullptr, material);
+    std::vector<std::string> warnings;
+    Model model = load_document(std::move(document), std::string(), true, true, warnings);
+    try {
+        model.attach_mesh(arrays);
+    } catch (...) {
+        model.close();
+        throw;
+    }
+    return model;
 }
 
 Model Model::clone() {
@@ -1335,35 +1463,25 @@ Model Model::clone() {
     if (!shared.clonable)
         throw FillyError("This asset released its source data after loading; "
                             "load it with scene.load(source, clonable=True) to clone it");
-    detail::set_diffuse_sources(state->materials, shared.diffuse);
-    detail::set_surface_sources(state->materials, shared.surfaces);
+    ProviderResults results;
+    std::vector<std::pair<uint32_t, uint32_t>> node_indices;
     g::FilamentInstance* instance = nullptr;
-    std::vector<detail::MaterialBinding> bindings;
     try {
-        instance = state->loader->createInstance(shared.asset);
+        instance = detail::create_instance(*state, shared, node_indices);
     } catch (...) {
-        auto textures = detail::take_diffuse_textures(state->materials);
-        shared.textures.insert(shared.textures.end(), textures.begin(), textures.end());
-        detail::take_material_bindings(state->materials);
-        detail::take_material_records(state->materials);
-        detail::set_diffuse_sources(state->materials, {});
-        detail::set_surface_sources(state->materials, {});
+        results.take(state->materials, shared);
         throw;
     }
-    auto textures = detail::take_diffuse_textures(state->materials);
-    shared.textures.insert(shared.textures.end(), textures.begin(), textures.end());
-    bindings = detail::take_material_bindings(state->materials);
-    auto records = detail::take_material_records(state->materials);
-    detail::set_diffuse_sources(state->materials, {});
-    detail::set_surface_sources(state->materials, {});
+    results.take(state->materials, shared);
     if (!instance) throw AssetError("Could not create another instance of this asset");
     auto model = state->track(std::make_shared<detail::ModelData>(state));
     model->scene = scene;
     model->shared = data_->shared;
     model->asset = shared.asset;
     model->instance = instance;
-    model->records = std::move(records);
-    detail::initialize_model(*model, bindings);
+    model->records = std::move(results.records);
+    model->node_indices = std::move(node_indices);
+    detail::initialize_model(*model, results.bindings);
     if (shared.mesh) detail::attach_geometry(*model);
     if (shared.masked) ++scene->masked;
     scene->children.push_back(model);
@@ -1505,7 +1623,7 @@ Node Model::node(int64_t index) const {
 Node Model::node(const std::string& name) const {
     data_->check();
     std::vector<size_t> matches;
-    const auto& sources = data_->shared->nodes;
+    const auto& sources = data_->shared->prepared->nodes;
     for (size_t i = 0; i < data_->nodes.size() && i < sources.size(); ++i)
         if (data_->nodes[i] && sources[i].name == name) matches.push_back(i);
     if (matches.empty()) throw AssetError("Unknown node: " + name);
@@ -1525,7 +1643,7 @@ std::vector<Node> Model::nodes() const {
 std::vector<std::string> Model::node_names() const {
     data_->check();
     std::vector<std::string> names;
-    const auto& sources = data_->shared->nodes;
+    const auto& sources = data_->shared->prepared->nodes;
     for (size_t i = 0; i < data_->nodes.size() && i < sources.size(); ++i)
         if (data_->nodes[i] && sources[i].name) names.push_back(*sources[i].name);
     return names;

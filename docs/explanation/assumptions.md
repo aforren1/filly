@@ -229,6 +229,8 @@ Each asset is in an ASCII directory and in a directory named `Ünïcødé ❤ �
 **Verdict.** Confirmed. The SDK cannot open these buffers itself. Base64 text is not the cheapest fix.
 
 **Change.** Copy all buffers into one GLB binary chunk during preflight. cgltf reads it in place.
+Superseded when the preparation moved into C++: the loader reads each buffer once through a wide
+path and sets it in gltfio's parse, which cgltf then skips. No GLB is assembled.
 
 ## 8. `flushAndWait()` calls
 

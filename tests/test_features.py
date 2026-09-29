@@ -270,9 +270,9 @@ def test_draft_extensions_are_unsupported(renderer, scene, triangle_glb):
 @pytest.mark.parametrize("encoding", ["webp", "ktx2"])
 def test_texture_pixels(renderer,scene,triangle_glb,encoding):
     if encoding == "webp":
-        Image=pytest.importorskip("PIL.Image")
-        image=Image.new("RGBA",(4,4),(0,255,0,255)); stream=io.BytesIO();image.save(stream,format="WEBP",lossless=True)
-        payload, extension, mime = stream.getvalue(), "EXT_texture_webp", "image/webp"
+        # Decoded by libwebp in the extension.
+        payload = (Path(__file__).parent / "data" / "green.webp").read_bytes()
+        extension, mime = "EXT_texture_webp", "image/webp"
     else:
         payload = (Path(__file__).parent / "data" / "green.ktx2").read_bytes()
         extension, mime = "KHR_texture_basisu", "image/ktx2"

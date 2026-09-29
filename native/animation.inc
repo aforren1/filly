@@ -54,7 +54,8 @@ void commit_properties(ModelData& model) {
 
 void initialize_cameras(ModelData& model, const std::vector<CameraSource>& sources) {
     for (const auto entity : model.camera_entities) {
-        const auto index = extras_field(model.asset->getExtras(entity), "\"fillyCamera\"", SIZE_MAX);
+        const auto* node = node_source(model, entity);
+        const auto index = node ? node->camera : SIZE_MAX;
         if (index == SIZE_MAX) continue;
         if (index >= sources.size()) throw AssetError("Invalid imported camera index");
         const auto& source = sources[index];
@@ -103,10 +104,6 @@ void write_property(ModelData& model, const PropertyTrackSource& track,
 void initialize_animations(ModelData& model, const std::vector<AnimationSource>& sources,
                            const std::vector<MaterialBinding>& materials) {
     auto& lights = model.state->engine->getLightManager();
-    if (sources.empty()) {
-        for (size_t i = 0; i < model.animator->getAnimationCount(); ++i)
-            model.animations.push_back({model.animator->getAnimationName(i), int(i), model.animator->getAnimationDuration(i)});
-    }
     for (const auto& source : sources) {
         AnimationClip clip{source.name, source.native_index};
         if (clip.native_index >= 0) {
@@ -173,15 +170,11 @@ void initialize_animations(ModelData& model, const std::vector<AnimationSource>&
                 }
             } else {
                 for (const auto entity : model.lights) {
-                    const char* extras = model.asset->getExtras(entity);
-                    const char* key = extras ? std::strstr(extras, "\"fillyLight\"") : nullptr;
-                    const char* colon = key ? std::strchr(key, ':') : nullptr;
-                    if (!colon || std::strtoul(colon+1, nullptr, 10) != curve.index) continue;
+                    const auto* node = node_source(model, entity);
+                    if (!node || node->light != curve.index) continue;
                     PropertyTarget target;
                     target.light = entity;
-                    const char* range_key = std::strstr(extras, "\"fillyAutoRange\"");
-                    const char* range_colon = range_key ? std::strchr(range_key, ':') : nullptr;
-                    target.automatic_range = range_colon && std::strtoul(range_colon+1, nullptr, 10) != 0;
+                    target.automatic_range = node->automatic_range;
                     auto instance = lights.getInstance(entity);
                     if (curve.kind == 4) {
                         size_t index = 0;

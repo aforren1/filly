@@ -17,52 +17,6 @@ using Vec3 = std::array<float, 3>;
 using Vec4 = std::array<float, 4>;
 using Matrix = std::array<float, 16>;
 
-struct AssetTexture {
-    std::vector<uint8_t> bytes;
-    std::string mime;
-    int uv = 0;
-    std::array<float, 9> transform = {1,0,0,0,1,0,0,0,1};
-    int wrap_s = 10497, wrap_t = 10497;
-    int min_filter = 9987, mag_filter = 9729;
-};
-struct DiffuseSource {
-    float factor = 0;
-    Vec3 color = {1,1,1};
-    AssetTexture factor_texture, color_texture;
-    float thickness = 0;
-    Vec3 absorption = {};
-    AssetTexture thickness_texture;
-};
-struct SurfaceSource {
-    float anisotropy = 0, rotation = 0, iridescence = 0, ior = 1.3f, minimum = 100, maximum = 400;
-    AssetTexture anisotropy_texture, iridescence_texture, thickness_texture;
-};
-// Names from the glTF document, by node index. Missing names stay empty rather than taking
-// gltfio's fallback of the mesh, light, or camera name.
-struct NodeSource {
-    std::optional<std::string> name, mesh;
-};
-struct CameraSource {
-    bool orthographic = false;
-    // Perspective: yfov, aspect (0 = render target aspect), znear, zfar. Orthographic: xmag, ymag, znear, zfar.
-    Vec4 projection = {};
-};
-
-struct PropertyTrackSource {
-    int kind = 0;
-    size_t index = 0;
-    std::string parameter;
-    int components = 1, interpolation = 1;
-    float minimum = 0, maximum = 1;
-    std::vector<float> times, values;
-    std::vector<float> setup;
-};
-struct AnimationSource {
-    std::string name;
-    int native_index = -1;
-    std::vector<PropertyTrackSource> tracks;
-};
-
 struct FillyError : std::runtime_error { using runtime_error::runtime_error; };
 struct BackendError : FillyError { using FillyError::FillyError; };
 struct AssetError : FillyError { using FillyError::FillyError; };
@@ -101,6 +55,15 @@ struct MeshArrays {
     const float* uvs = nullptr;         // vertices x 2
     const float* colors = nullptr;      // vertices x 4
     const uint32_t* indices = nullptr;  // triangles x 3
+};
+
+// The glTF metallic-roughness material of a generated mesh. alpha_mode: opaque, mask, or blend.
+struct MeshMaterial {
+    Vec4 base_color = {1, 1, 1, 1};
+    float metallic = 0, roughness = 1;
+    Vec3 emissive = {0, 0, 0};
+    bool unlit = false, double_sided = false;
+    std::string alpha_mode = "opaque";
 };
 
 // Per-render overrides. A viewport is (x, y, width, height) from the lower-left corner.
@@ -266,14 +229,16 @@ public:
     Camera camera(const std::string& node) const;
     Camera camera(int64_t node) const;
     std::vector<Camera> cameras() const;
-    // Generated meshes only. Replaces the geometry of a placeholder asset from Scene::create_mesh.
-    void attach_mesh(const MeshArrays& arrays);
+    // Generated meshes only.
     bool is_mesh() const;
     size_t vertex_count() const;
     void update_mesh(const MeshArrays& arrays);
 private:
     Camera camera_at(size_t position) const;
+    // Replaces the geometry of the placeholder asset that Scene::create_mesh loads.
+    void attach_mesh(const MeshArrays& arrays);
     std::shared_ptr<detail::ModelData> data_;
+    friend class Scene;
 };
 
 class Scene {
@@ -284,15 +249,15 @@ public:
     Camera create_camera();
     Camera camera() const;
     void set_camera(const Camera& camera);
-    Model load_asset(const std::vector<uint8_t>& bytes, const std::string& path,
-                     const std::vector<DiffuseSource>& diffuse = {},
-                     const std::vector<std::vector<float>>& morphs = {},
-                     const std::vector<AnimationSource>& animations = {},
-                     const std::vector<SurfaceSource>& surfaces = {},
-                     const std::vector<CameraSource>& cameras = {},
-                     const std::vector<NodeSource>& nodes = {},
-                     bool masked = false,
-                     bool clonable = false);
+    // Loads a glTF or GLB file (UTF-8 path) or document bytes, which must then embed every
+    // resource. Messages about features that load but render differently are appended to
+    // warnings; with strict, the first one throws AssetError instead, as do unsupported
+    // required extensions. clonable keeps the source data that Model::clone() needs.
+    Model load(const std::string& path, bool strict, bool clonable, std::vector<std::string>& warnings);
+    Model load(std::vector<uint8_t> bytes, bool strict, bool clonable, std::vector<std::string>& warnings);
+    // A model with one node and one glTF material whose geometry is the caller's arrays.
+    // arrays.indices and arrays.triangles are required.
+    Model create_mesh(const MeshArrays& arrays, const MeshMaterial& material);
     bool precompiled_shaders() const;
     Light add_directional_light(Vec3 direction, float intensity, Vec3 color);
     Light add_sun_light(Vec3 direction, float intensity, Vec3 color, float angular_radius,
@@ -348,9 +313,22 @@ public:
     Vec4 background() const;
     void set_background(Vec4 color);
 private:
+    Model load_document(std::vector<uint8_t> bytes, const std::string& path, bool strict, bool clonable,
+                        std::vector<std::string>& warnings);
     std::shared_ptr<detail::SceneData> data_;
     friend class Renderer;
 };
+
+// Vertex arrays for simple shapes, as Scene::create_mesh takes them: positions and normals are
+// vertices x 3, uvs vertices x 2, indices triangles x 3. Front faces wind counterclockwise.
+struct ShapeArrays {
+    std::vector<float> positions, normals, uvs;
+    std::vector<uint32_t> indices;
+};
+ShapeArrays shape_plane(double width, double height, int64_t columns, int64_t rows);
+ShapeArrays shape_box(double width, double height, double depth);
+ShapeArrays shape_uv_sphere(double radius, int64_t segments, int64_t rings);
+ShapeArrays shape_cylinder(double radius, double height, int64_t segments, bool caps);
 
 // A sampled texture with pixels from the caller. Updates copy into a small ring of staging
 // buffers, so the caller's array is free again when update() returns.

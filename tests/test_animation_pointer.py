@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 import filly
-from filly._assets import prepare
 from test_features import lit, pack, unpack
 
 
@@ -268,8 +267,10 @@ def test_mixed_node_and_pointer_timeline(renderer, scene, triangle_glb):
     assert model.node("triangle").position[0] == 0
 
 
-def test_accessor_sparse_stride_external_and_data_uri(triangle_glb, tmp_path):
+@pytest.mark.gpu
+def test_accessor_sparse_stride_external_and_data_uri(scene, triangle_glb, tmp_path):
     doc, binary = unpack(triangle_glb)
+    lit(doc)
     clip = add_clip(doc, binary, "/materials/0/pbrMetallicRoughness/roughnessFactor", [0, 1])
     acc = doc["accessors"][clip["samplers"][0]["output"]]
     view = doc["bufferViews"][acc["bufferView"]]
@@ -286,12 +287,20 @@ def test_accessor_sparse_stride_external_and_data_uri(triangle_glb, tmp_path):
     for uri in ("keys.bin", "data:application/octet-stream;base64,"+base64.b64encode(binary).decode()):
         doc["buffers"][0]["uri"] = uri
         (tmp_path / "keys.bin").write_bytes(binary)
-        prepared = prepare(json.dumps(doc).encode(), str(tmp_path / "model.gltf"))
-        assert prepared[3][0][2][0][8] == [0.25, 0.75]
+        (tmp_path / "model.gltf").write_text(json.dumps(doc))
+        model = scene.load(tmp_path / "model.gltf")
+        # Strided values [0.25, 0.5], then a sparse override of the second key.
+        material = model.material("red")
+        model.apply_animation(0, 0)
+        assert material.roughness == 0.25
+        model.apply_animation(0, 2, loop=False)
+        assert material.roughness == 0.75
+        model.close()
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("failure", ["unsupported", "duplicate", "times", "count", "range", "bounds"])
-def test_pointer_validation(triangle_glb, failure):
+def test_pointer_validation(scene, triangle_glb, failure):
     doc, binary = unpack(triangle_glb)
     pointer = "/materials/0/pbrMetallicRoughness/roughnessFactor"
     if failure == "unsupported":
@@ -308,19 +317,21 @@ def test_pointer_validation(triangle_glb, failure):
     if failure == "bounds":
         doc["bufferViews"][-1]["byteLength"] = 1
     with pytest.raises(filly.AssetError):
-        prepare(pack(doc, binary), "")
+        scene.load(pack(doc, binary))
     if failure == "unsupported":
         doc["extensionsRequired"].remove("KHR_animation_pointer")
         with pytest.warns(filly.AssetCompatibilityWarning, match="target"):
-            result = prepare(pack(doc, binary), "")
-        assert result[3][0][2] == []
+            model = scene.load(pack(doc, binary))
+        # The clip remains, without a track for the unsupported target.
+        assert [(a.name, a.duration) for a in model.animations] == [("property", 0)]
         with pytest.raises(filly.AssetError, match="target"):
-            prepare(pack(doc, binary), "", strict=True)
+            scene.load(pack(doc, binary), strict=True)
 
 
-def test_dispersion_requires_volume_before_native_shader_compilation(triangle_glb):
+@pytest.mark.gpu
+def test_dispersion_requires_volume_before_native_shader_compilation(scene, triangle_glb):
     doc, binary = unpack(triangle_glb)
     lit(doc)
     doc["materials"][0]["extensions"] = {"KHR_materials_dispersion": {"dispersion": 1}}
     with pytest.raises(filly.AssetError, match="Dispersion requires"):
-        prepare(pack(doc, binary), "")
+        scene.load(pack(doc, binary))

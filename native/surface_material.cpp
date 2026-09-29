@@ -593,9 +593,7 @@ Material* createMaterial(Engine* engine, const MaterialKey& config, const UvMap&
     }
     Package pkg = builder.build(engine->getJobSystem());
     if (!pkg.isValid()) {
-        // Internal labels carry a "__fp_<kind>_<index>__" prefix before the glTF name.
-        const char* shown = std::strncmp(name, "__fp_", 5) ? nullptr : std::strstr(name + 5, "__");
-        throw filly::AssetError(std::string("Could not compile material '") + (shown ? shown + 2 : name)
+        throw filly::AssetError(std::string("Could not compile material '") + (name ? name : "material")
             + "'; lit materials support at most 8 textures, including 3 for anisotropy or iridescence");
     }
     return Material::Builder().package(pkg.getData(), pkg.getSize()).build(*engine);

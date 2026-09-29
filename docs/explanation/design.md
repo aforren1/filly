@@ -25,16 +25,16 @@ instances of it: `AssetLoader::createInstance()` adds entities, material instanc
 skins, and an animator, and reuses vertex buffers, textures, and materials. gltfio 1.77.1 has no
 way to destroy one instance, so closing a model only removes its entities from the scene; the
 asset and all its instances are destroyed when the last model closes. `createInstance()` needs
-the asset's source data, about the file size in CPU memory, and each instance needs the preflight
-tables for the custom materials, property animation, cameras, and morph weights. Cloning is
+the asset's source data, about the file size in CPU memory, and each instance needs the
+preparation tables for the custom materials, property animation, cameras, and morph weights. Cloning is
 therefore opt-in: `scene.load(..., clonable=True)` keeps them, and the default calls
 `releaseSourceData()` and drops the tables after the first instance. For DamagedHelmet
 (3.6 MiB file) this saves 3.7 MiB of private bytes per loaded asset. The process grows by
 113 MiB per loaded DamagedHelmet on the tested Intel GPU, most of it texture memory that the
 integrated GPU allocates in system memory, so the saving is small for textured assets. Name
 lookups use each instance's own node table, because gltfio's name and entity lists cover all
-instances. Node and mesh names come from preflight, which reads them from the glTF document;
-gltfio's names fall back to the mesh, light, or camera name for an unnamed node.
+instances. Node and mesh names come from the preparation, which reads them from the glTF
+document; gltfio's names fall back to the mesh, light, or camera name for an unnamed node.
 
 Node-local materials belong to the model. The first `node.material(slot)` duplicates the slot's
 material instance. A variant that maps the slot gets a fresh copy of the variant's material, so
@@ -196,7 +196,7 @@ Filament's unlit shader passes base-color alpha through for `OPAQUE` materials. 
 compiles unlit `OPAQUE` materials with its own generator, which sets the alpha to one, in both
 shader modes; the base-color alpha of an `OPAQUE` material has no other effect. `MASK` materials
 write a sharpened edge alpha that Filament computes after the material code, so the material
-cannot correct it. Preflight flags assets with `MASK` materials, and the direct path rejects
+cannot correct it. Loading flags assets with `MASK` materials, and the direct path rejects
 them. Rewriting them (for example `OPAQUE` as `MASK` with cutoff zero) was rejected: with MSAA,
 alpha to coverage would then drop samples.
 
@@ -330,15 +330,85 @@ specular, and IOR together). Those materials are compiled instead. The wheel inc
 compiler in both modes. Review the copied reductions when upgrading the SDK.
 
 A lit material at feature level 1 has 8 texture samplers. Filament's compiled provider aborts on
-a 9th; this was measured with generated assets. Python preflight counts texture slots and raises
+a 9th; this was measured with generated assets. Loading counts texture slots and raises
 `AssetError` first. With precompiled shaders such a material is reduced as the archive would reduce it, and
 a warning names it. Materials that the wrapper compiles itself raise `AssetError` from the shader
 compiler instead of aborting.
 The extension links only the selected static libraries. The SDK tools are not installed in the wheel.
 
-Python performs asset compatibility checks and optional WebP conversion before the native loader.
-Unknown optional extensions produce warnings; unsupported required extensions fail. Strict mode
-turns warnings into errors. Metadata-only XMP extensions cannot change the image and are ignored. This preflight does not replace a glTF validator.
+## glTF preparation
+
+gltfio loads what Filament supports. The rest is preparation in the native core
+(`native/gltf_prepare.cpp`), so that every frontend of the core gets the same features. Python
+only binds it: the binding converts the source, releases the GIL for the whole load, and turns the
+returned messages into `AssetCompatibilityWarning`. Unknown optional extensions produce warnings;
+unsupported required extensions fail. Strict mode turns warnings into errors. Metadata-only XMP
+extensions cannot change the image and are ignored. The checks do not replace a glTF validator.
+
+The core reads the document with cgltf. It does not compile cgltf: the header in
+`native/vendor/cgltf` is the one that Filament 1.77.1 builds into `gltfio_core`, which exports
+the functions, so both parses have the same structure layout. Accessors are read with
+`cgltf_accessor_unpack_floats`, which applies sparse values and normalization.
+
+A load has these steps:
+
+1. Parse the document, check extensions and material combinations, and count texture samplers.
+2. Load every buffer: the GLB binary chunk in place, data URIs decoded, and files read through
+   wide paths. gltfio's own buffer reads use narrow `fopen()`, which fails in folders with
+   non-ASCII names. A buffer that only meshopt-compressed views use is allocated, not read.
+3. Decode `EXT_meshopt_compression` and `KHR_meshopt_compression` views with the vendored
+   meshoptimizer 1.0 into the buffers that the views name. Filament's meshoptimizer 0.18 has no
+   version 1 vertex codec or COLOR filter, and cgltf does not know the KHR extension.
+4. Build the tables: node names, visibility, morph weights, cameras, property animation tracks,
+   and the anisotropy, iridescence, and diffuse-transmission materials with their texture bytes.
+5. `AssetLoader::createInstancedAsset()` with zero instances. gltfio parses the document and
+   builds vertex buffers, but creates no entities or material instances yet.
+6. Patch gltfio's parse (`FilamentAsset::getSourceAsset()`) by index: point its buffers at the
+   loaded memory, clear the meshopt flag of decoded views, retarget pointer channels for node
+   TRS and weights to their nodes, and let property-only samplers read a valid float accessor.
+   gltfio's animator rejects every animation of an asset if one sampler has sparse or integer
+   data. cgltf then skips the loaded buffers.
+7. `AssetLoader::createInstance()` with index markers (below), then `ResourceLoader`.
+
+The loaded buffer memory lives with the asset until gltfio releases its source data, which is
+after the first instance unless `clonable=True`.
+
+gltfio identifies nothing by glTF index. Its `MaterialProvider` callbacks get a key, a UV map, a
+label (the material name), and the extras text, and its entity lists are not in node order. While
+`createInstance()` runs, gltfio reads node and material extras as `json + offset`
+(`AssetLoader.cpp`, `recurseEntities()` and `createMaterialInstance()`). filly points these
+ranges at markers, `#n<index>` and `#m<index>`, for that call only, and then restores the parse.
+The material markers reach the provider, which picks the provider-built material and its tables
+by index and records the instance for property animation. The node markers become each
+entity's extras, which filly reads back into a node-index table and does not expose. A missing
+marker raises `AssetError`, so an SDK change that breaks this fails loudly. The previous design
+rewrote the document with `filly*` keys in extras and searched them with `strstr`, which could
+match user extras.
+
+gltfio also calls `MaterialProvider::getMaterial()` in `createAsset()`, before any instance, to
+choose each primitive's vertex layout; that call has only the key and the name. In an asset with
+provider-built materials, the provider therefore gives every material the same UV layout rule:
+the standard material's layout, then `TEXCOORD_0` and `TEXCOORD_1` in that order on the free UV
+sets. The layout then does not depend on which material the primitive has. Of the returned
+material, gltfio uses only the required attributes. The provider returns the material that the
+name identifies, and builds it then, as gltfio's own providers do. For a name that a
+provider-built material shares with another material, it returns a lit or unlit placeholder
+with the same attributes. When the marker identifies the material, the provider checks that the
+instance's layout is the one that the vertex buffers have. Other assets keep gltfio's layout.
+
+One document rewrite remains. `EXT_mesh_gpu_instancing` becomes one child node per instance.
+gltfio renders one mesh per node and has no instancing, and new nodes cannot be added to a parse
+that gltfio already holds pointers into. The core rewrites only the JSON chunk, through a small
+JSON model that keeps the source text of numbers, and parses the result again. Clips keep their
+indices.
+
+WebP images decode through a `TextureProvider` for `image/webp` built on libwebp 1.5.0
+(`native/webp_provider.cpp`), because the SDK is built without WebP. It follows gltfio's own
+WebP provider: RGBA8 texels, sRGB when requested, and a full mip chain. Provider-built materials
+use the same provider for their WebP textures. Runtime textures take pixel arrays, so they need
+no image provider.
+
+## Materials and effects beyond gltfio
 
 Filament 1.77.1 does not supply glTF diffuse transmission. A custom material adds a
 backward diffuse lobe, factor and color textures, and diffuse environment backlighting. This is a
@@ -401,9 +471,9 @@ estimated volume travel distance; it was removed because it changed perspective 
 
 External glTF resources are read through Unicode filesystem paths. Images are supplied to the
 loader's URI cache under their original names. Desktop gltfio ignores that cache for buffers and
-opens them with narrow `fopen()`, which fails for non-ASCII directories. Preflight therefore copies
-every buffer into one GLB binary chunk, which cgltf parses in place. This avoids base64 text and
-decoding. Percent escapes are decoded once when resolving local files.
+opens them with narrow `fopen()`, which fails for non-ASCII directories, so the preparation loads
+buffers itself and gives gltfio's parse the loaded memory. Nothing is copied into a new GLB.
+Percent escapes are decoded once when resolving local files.
 
 Environment loading converts a linear panorama to a cubemap and filters it for diffuse and
 specular illumination. `load_environment_ktx()` instead reads `cmgen` output: the prefiltered
@@ -422,9 +492,10 @@ cost scales with node count but makes time jumps independent of frame history. B
 follow evaluation. Imported light nodes use the same transform hierarchy as mesh nodes.
 
 Property animation uses a separate native track list for the supported `KHR_animation_pointer`
-targets. Python decodes and validates accessors during loading. Reserved extras connect glTF
-indices to native material instances, light entities, and cameras without relying on names. Clips retain
-their original indices even when all their channels are property channels. Native evaluation
+targets. The preparation reads and validates accessors during loading. The material and node
+markers described in [glTF preparation](#gltf-preparation) connect glTF indices to material
+instances, light entities, and cameras without relying on names. Clips retain their original
+indices even when all their channels are property channels. Native evaluation
 uses binary search and fixed-size output storage, and resets authored property values before
 each clip evaluation. Material writes also go to the node-local copies of the target instance;
 the scan over a model's copies allocates nothing.

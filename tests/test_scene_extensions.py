@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 
 import filly
-from filly._assets import prepare
 from filly._native import _decode_meshopt
 from test_animation_pointer import accessor, add_clip
 from test_features import lit, pack, unpack
@@ -95,13 +94,14 @@ def test_visibility_parent_animation_model_toggle_and_reset(renderer, scene, tri
     assert pixel() == hidden
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("component,interpolation", [(5126,"STEP"), (5121,"LINEAR")])
-def test_visibility_rejects_non_boolean_sampler(triangle_glb, component, interpolation):
+def test_visibility_rejects_non_boolean_sampler(scene, triangle_glb, component, interpolation):
     doc, binary = unpack(triangle_glb)
     doc["nodes"][0]["extensions"] = {"KHR_node_visibility": {}}
     add_clip(doc, binary, "/nodes/0/extensions/KHR_node_visibility/visible", [0,1], component=component, interpolation=interpolation)
     with pytest.raises(filly.AssetError):
-        prepare(pack(doc, binary), "")
+        scene.load(pack(doc, binary))
 
 
 @pytest.mark.gpu
@@ -133,13 +133,14 @@ def test_instances_match_explicit_hierarchy(renderer, scene, triangle_glb):
     np.testing.assert_array_equal(actual,target.read())
 
 
-def test_instance_counts_must_match(triangle_glb):
+@pytest.mark.gpu
+def test_instance_counts_must_match(scene, triangle_glb):
     doc, binary = unpack(triangle_glb)
     t = accessor(doc, binary, [0]*6, "VEC3")
     s = accessor(doc, binary, [1]*3, "VEC3")
     doc["nodes"][0]["extensions"] = {"EXT_mesh_gpu_instancing": {"attributes": {"TRANSLATION":t,"SCALE":s}}}
     with pytest.raises(filly.AssetError, match="counts must match"):
-        prepare(pack(doc,binary), "")
+        scene.load(pack(doc,binary))
 
 
 @pytest.mark.gpu
@@ -168,8 +169,13 @@ def test_visibility_hides_lights_but_keeps_cameras(renderer, scene, triangle_glb
     assert int(target.read()[16,16,0]) == dark
 
 
-def test_instance_normalized_sparse_rotation_and_morph_channels(triangle_glb):
-    doc,binary=unpack(triangle_glb)
+@pytest.mark.gpu
+def test_instance_normalized_sparse_rotation_and_morph_channels(renderer, scene, triangle_glb):
+    doc, binary = unpack(triangle_glb)
+    # A morph target that lifts the triangle, driven by a weights channel on the instanced node.
+    offsets = accessor(doc, binary, [0, 0.3, 0] * 3, "VEC3")
+    doc["meshes"][0]["primitives"][0]["targets"] = [{"POSITION": offsets}]
+    doc["meshes"][0]["weights"] = [0]
     # Sparse signed-byte quaternions, with default identity for the first instance.
     base=len(binary)
     binary += struct.pack("<8b",0,0,0,127,0,0,0,127)
@@ -181,15 +187,29 @@ def test_instance_normalized_sparse_rotation_and_morph_channels(triangle_glb):
     value_view=len(doc["bufferViews"])
     doc["bufferViews"].append({"buffer":0,"byteOffset":len(binary),"byteLength":4})
     binary += struct.pack("<4b",0,0,127,0)
-    doc["buffers"][0]["byteLength"] = len(binary)
     rotation=len(doc["accessors"])
     doc["accessors"].append({"bufferView":base_view,"componentType":5120,"normalized":True,"type":"VEC4","count":2,
         "sparse":{"count":1,"indices":{"bufferView":index_view,"componentType":5121},"values":{"bufferView":value_view}}})
-    doc["nodes"][0]["extensions"]={"EXT_mesh_gpu_instancing":{"attributes":{"ROTATION":rotation}}}
-    # Preflight retains ordinary weight channels on all expanded mesh nodes.
-    doc["animations"]=[{"samplers":[],"channels":[{"sampler":0,"target":{"node":0,"path":"weights"}}]}]
-    from filly._geometry import expand_instances
-    expand_instances(doc,binary,lambda _: b"")
-    assert doc["nodes"][1]["rotation"] == [0,0,0,1]
-    assert doc["nodes"][2]["rotation"] == [0,0,1,0]
-    assert [c["target"]["node"] for c in doc["animations"][0]["channels"]] == [1,2]
+    translation = accessor(doc, binary, [-0.4, 0, 0, 0.4, 0, 0], "VEC3")
+    doc["nodes"][0]["extensions"]={"EXT_mesh_gpu_instancing":{"attributes":{"ROTATION":rotation, "TRANSLATION": translation}}}
+    times = accessor(doc, binary, [0, 2])
+    weights = accessor(doc, binary, [0, 1])
+    doc["animations"]=[{"samplers":[{"input": times, "output": weights}],"channels":[{"sampler":0,"target":{"node":0,"path":"weights"}}]}]
+    model = scene.load(pack(doc, binary))
+    np.testing.assert_allclose(model.node(1).quaternion, [0, 0, 0, 1])
+    np.testing.assert_allclose(model.node(2).quaternion, [0, 0, 1, 0])
+    # Preparation retargets the weights channel to every expanded mesh node.
+    model.apply_animation(0, 2, loop=False)
+    target = renderer.create_render_target(width=64, height=64)
+    renderer.render(scene, target)
+    animated = target.read()
+    model.close()
+    doc["nodes"][0].pop("extensions")
+    doc["nodes"][0].pop("mesh")
+    doc["nodes"][0]["children"] = [1, 2]
+    doc["nodes"] += [{"mesh": 0, "translation": [-0.4, 0, 0], "weights": [1]},
+                     {"mesh": 0, "translation": [0.4, 0, 0], "rotation": [0, 0, 1, 0], "weights": [1]}]
+    doc.pop("animations")
+    scene.load(pack(doc, binary))
+    renderer.render(scene, target)
+    np.testing.assert_array_equal(animated, target.read())

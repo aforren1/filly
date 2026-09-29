@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24...3.31)
+cmake_minimum_required(VERSION 3.28...3.31)
 project(filly VERSION 0.1.0 LANGUAGES CXX)
 
 find_package(Python 3.10 REQUIRED COMPONENTS Interpreter Development.Module OPTIONAL_COMPONENTS Development.SABIModule)
@@ -37,10 +37,50 @@ foreach(name IN LISTS FILAMENT_LIBRARIES)
   list(APPEND FILAMENT_LINK_TARGETS filament_sdk_${name})
 endforeach()
 
-add_library(filly_core STATIC native/renderer.cpp native/gl_interop.cpp native/materials.cpp native/surface_material.cpp)
+# libwebp decodes EXT_texture_webp images; the Filament SDK is built without it. The release
+# archive is pinned by SHA-256 (signed by the WebP release key 6B0E6B70976DE303EDF2F601F9C3D6BDB8232B5D).
+# Offline builds can set FETCHCONTENT_SOURCE_DIR_LIBWEBP to an extracted copy of the same release.
+include(FetchContent)
+set(FILLY_LIBWEBP_URL "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.5.0.tar.gz"
+  CACHE STRING "libwebp 1.5.0 release archive")
+FetchContent_Declare(libwebp
+  URL "${FILLY_LIBWEBP_URL}"
+  URL_HASH SHA256=7d6fab70cf844bf6769077bd5d7a74893f8ffd4dfb42861745750c63c2a5c92c
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  EXCLUDE_FROM_ALL)
+set(WEBP_LINK_STATIC ON CACHE BOOL "" FORCE)
+set(WEBP_BUILD_ANIM_UTILS OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_CWEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_DWEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_GIF2WEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_IMG2WEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_VWEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_WEBPINFO OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_LIBWEBPMUX OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_WEBPMUX OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_EXTRAS OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_WEBP_JS OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_FUZZTEST OFF CACHE BOOL "" FORCE)
+# The core links it into a shared module; libwebp's own CMake predates CMP0091.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
+set(BUILD_SHARED_LIBS OFF)
+if(NOT WIN32)
+  # libwebp marks its API visibility("default"); keep it out of the module's exported symbols
+  # so that another libwebp in the process, such as Pillow's, cannot bind to this copy.
+  set(CMAKE_C_VISIBILITY_PRESET hidden)
+  add_compile_definitions(WEBP_EXTERN=extern)
+endif()
+FetchContent_MakeAvailable(libwebp)
+
+add_library(filly_core STATIC native/renderer.cpp native/gl_interop.cpp native/materials.cpp native/surface_material.cpp
+  native/gltf_prepare.cpp native/json.cpp native/shapes.cpp native/webp_provider.cpp
+  native/vendor/meshoptimizer/vertexcodec.cpp native/vendor/meshoptimizer/indexcodec.cpp
+  native/vendor/meshoptimizer/vertexfilter.cpp)
 target_compile_features(filly_core PUBLIC cxx_std_20)
 set_target_properties(filly_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(filly_core PUBLIC native PRIVATE "${FILAMENT_ROOT}/include")
+target_include_directories(filly_core PUBLIC native PRIVATE "${FILAMENT_ROOT}/include" "${libwebp_SOURCE_DIR}/src")
+target_link_libraries(filly_core PRIVATE webpdecoder)
 if(MSVC)
   target_compile_options(filly_core PRIVATE /Zc:__cplusplus /bigobj /EHsc)
   target_link_libraries(filly_core PRIVATE ${FILAMENT_LINK_TARGETS} opengl32 gdi32 user32 shlwapi ws2_32)
@@ -51,10 +91,11 @@ else()
   target_compile_options(filly_core PRIVATE -fvisibility=hidden)
 endif()
 
-nanobind_add_module(_native STABLE_ABI NOSTRIP native/bindings.cpp
-  native/vendor/meshoptimizer/vertexcodec.cpp native/vendor/meshoptimizer/indexcodec.cpp
-  native/vendor/meshoptimizer/vertexfilter.cpp)
+nanobind_add_module(_native STABLE_ABI NOSTRIP native/bindings.cpp)
 target_link_libraries(_native PRIVATE filly_core)
 install(TARGETS _native LIBRARY DESTINATION filly RUNTIME DESTINATION filly)
 install(FILES "${FILAMENT_ROOT}/LICENSE" DESTINATION filly/licenses RENAME Filament.txt)
 install(FILES native/vendor/meshoptimizer/LICENSE.md DESTINATION filly/licenses RENAME meshoptimizer.txt)
+install(FILES native/vendor/cgltf/LICENSE DESTINATION filly/licenses RENAME cgltf.txt)
+install(FILES "${libwebp_SOURCE_DIR}/COPYING" DESTINATION filly/licenses RENAME libwebp.txt)
+install(FILES "${libwebp_SOURCE_DIR}/PATENTS" DESTINATION filly/licenses RENAME libwebp-PATENTS.txt)

@@ -1,4 +1,5 @@
 #include "materials.h"
+#include "webp_provider.h"
 #include <filament/Engine.h>
 #include <filament/Material.h>
 #include <filament/MaterialInstance.h>
@@ -9,6 +10,7 @@
 #include <math/mat3.h>
 #include <uberz/ReadableArchive.h>
 #include <algorithm>
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -217,12 +219,34 @@ bool reduce_for_archive(g::MaterialKey& k) {
         || original.hasSpecularColorTexture != k.hasSpecularColorTexture;
 }
 
+// Maps TEXCOORD_0 and TEXCOORD_1, when unmapped, to the free UV sets in that order. In assets with
+// provider-built materials every material uses this, so that the vertex layout gltfio builds in
+// createAsset (before a material can be identified) serves whichever material the primitive has.
+void extend_uvmap(g::UvMap& uv) {
+    for (int texcoord = 0; texcoord < 2; ++texcoord) {
+        if (uv[texcoord] != g::UvSet::UNUSED) continue;
+        const auto maximum = *std::max_element(uv.begin(), uv.end());
+        if (int(maximum) >= 2) return;
+        uv[texcoord] = static_cast<g::UvSet>(int(maximum) + 1);
+    }
+}
+
+// The glTF material index that load_asset() put in a material's extras while gltfio created the
+// instance; SIZE_MAX for gltfio's default material and for runtime requests.
+size_t material_marker(const char* extras) {
+    if (!extras || extras[0] != '#' || extras[1] != 'm') return SIZE_MAX;
+    const char* end = extras + std::strlen(extras);
+    size_t index = SIZE_MAX;
+    const auto result = std::from_chars(extras + 2, end, index);
+    return result.ec == std::errc() && result.ptr == end ? index : SIZE_MAX;
+}
+
 class Provider final : public g::MaterialProvider {
 public:
     f::Engine* engine;
     g::MaterialProvider* delegate;
-    std::vector<DiffuseSource> sources;
-    std::vector<SurfaceSource> surfaces;
+    // The asset being created or cloned; null otherwise.
+    const PreparedAsset* asset = nullptr;
     struct SurfaceCache { g::MaterialKey key; g::UvMap uv; bool extended; f::Material* material; };
     std::vector<SurfaceCache> surface_cache;
     std::vector<f::Texture*> textures;
@@ -232,6 +256,7 @@ public:
     f::Texture* dummy;
     f::Texture* dummy_cube;
     std::unique_ptr<ArchiveSpecs> archive;
+    std::unique_ptr<g::TextureProvider> stb, ktx2, webp;
     explicit Provider(f::Engine* e, bool compiled) : engine(e) {
         if (!compiled) archive = std::make_unique<ArchiveSpecs>(UBERARCHIVE_DEFAULT_DATA, UBERARCHIVE_DEFAULT_SIZE);
         // The material compiler has a reference-counted process-wide initialization.
@@ -243,46 +268,22 @@ public:
         dummy->setImage(*e, 0, f::Texture::PixelBufferDescriptor(pixel, 4, f::Texture::Format::RGBA, f::Texture::Type::UBYTE));
     }
     ~Provider() override {
+        stb.reset(); ktx2.reset(); webp.reset();
         for (auto* texture : textures) engine->destroy(texture);
         engine->destroy(dummy); engine->destroy(dummy_cube); delete delegate;
         filamat::MaterialBuilder::shutdown();
     }
-    int index(const char* label) const {
-        constexpr char prefix[] = "__fp_diffuse_";
-        if (!label || std::strncmp(label, prefix, sizeof(prefix)-1)) return -1;
-        char* end = nullptr; const long i = std::strtol(label+sizeof(prefix)-1, &end, 10);
-        if (i < 0 || size_t(i) >= sources.size() || std::strncmp(end,"__",2)) throw AssetError("Invalid diffuse material identifier");
-        return int(i);
-    }
-    int surface_index(const char* label) const {
-        if (!label || std::strncmp(label, "__fp_surface_", 13)) return -1;
-        char* end = nullptr;
-        const auto i = std::strtoul(label+13, &end, 10);
-        if (i >= surfaces.size() || std::strncmp(end, "__", 2)) throw AssetError("Invalid surface material identifier");
-        return int(i);
-    }
-    void map_uv(g::MaterialKey* config, g::UvMap* uvmap, const DiffuseSource& data) {
-        g::constrainMaterial(config, uvmap);
-        for (auto* texture : {&data.factor_texture, &data.color_texture, &data.thickness_texture}) {
-            if (texture->bytes.empty()) continue;
-            auto& mapped = uvmap->at(texture->uv);
-            if (!mapped) {
-                const auto maximum = *std::max_element(uvmap->begin(), uvmap->end());
-                if (maximum >= 2) throw AssetError("Diffuse material needs more than two UV sets");
-                mapped = static_cast<g::UvSet>(int(maximum) + 1);
-            }
-        }
-    }
-    // Returns true for materials that the wrapper's generator must build. In fast mode it can
-    // also reduce *config, as Filament's precompiled materials would, when the complete
-    // material needs more samplers than a lit material has.
-    bool generated(g::MaterialKey& config, const g::UvMap& uvmap, const char* label) const {
-        if (surface_index(label) >= 0 || config.hasVolume || config.hasTransmission) return true;
+    bool extended() const { return asset && asset->custom_materials(); }
+    // Returns true for standard glTF materials that the wrapper's generator must build. In fast
+    // mode it can also reduce *config, as Filament's precompiled materials would, when the
+    // complete material needs more samplers than a lit material has.
+    bool generated(g::MaterialKey& config, const char* label) const {
+        if (config.hasVolume || config.hasTransmission) return true;
         // Only the wrapper's generator stores alpha one for unlit OPAQUE; see shaderFromKey().
-        if (config.unlit && config.alphaMode == g::AlphaMode::OPAQUE && index(label) < 0) return true;
-        if (!archive || index(label) >= 0) return false;
+        if (config.unlit && config.alphaMode == g::AlphaMode::OPAQUE) return true;
+        if (!archive) return false;
         auto key = config;
-        auto uv = uvmap;
+        g::UvMap uv{};
         const bool reduced = reduce_for_archive(key);
         g::constrainMaterial(&key, &uv);
         if (!reduced && archive->supports(key)) return false;
@@ -295,39 +296,81 @@ public:
         if (!key.hasVolume) key.hasVolumeThicknessTexture = false;
         if (!key.hasTransmission) key.hasTransmissionTexture = false;
         if (texture_count(key) > max_lit_textures)
-            throw AssetError(std::string("Material '") + label + "' needs more than 8 textures in fast mode");
+            throw AssetError(std::string("Material '") + (label ? label : "material") + "' needs more than 8 textures in fast mode");
         config = key;
         auto check = config;
-        uv = uvmap;
+        uv = {};
         g::constrainMaterial(&check, &uv);
         return !archive->supports(check);
     }
-    f::Material* getMaterial(g::MaterialKey* config, g::UvMap* uvmap, const char* label) override {
-        const int surface = surface_index(label);
-        if (generated(*config, *uvmap, label)) {
+    // The UV layout that a standard material with this key gets, without building it: the
+    // generator and the JIT provider constrain the key as is, the ubershader provider after
+    // its prepareConfig(), which reduce_for_archive() copies.
+    g::UvMap standard_uvmap(g::MaterialKey key, const char* label) const {
+        g::UvMap uv{};
+        if (!generated(key, label) && archive) reduce_for_archive(key);
+        g::constrainMaterial(&key, &uv);
+        if (extended()) extend_uvmap(uv);
+        return uv;
+    }
+    f::Material* generated_material(g::MaterialKey* config, g::UvMap* uvmap, const char* label, bool surface) {
+        for (const auto& cached : surface_cache)
+            // Filament 1.77.1's equality operator omits the dispersion bit.
+            if (cached.key == *config && cached.key.hasDispersion == config->hasDispersion
+                    && cached.uv == *uvmap && cached.extended == surface) return cached.material;
+        auto* material = create_surface_material(engine, *config, *uvmap, label, surface);
+        surface_cache.push_back({*config, *uvmap, surface, material});
+        return material;
+    }
+    f::Material* standard_material(g::MaterialKey* config, g::UvMap* uvmap, const char* label) {
+        if (generated(*config, label)) {
             g::constrainMaterial(config, uvmap);
-            if (surface >= 0) for (const auto* texture : {&surfaces[surface].anisotropy_texture,
-                    &surfaces[surface].iridescence_texture, &surfaces[surface].thickness_texture}) {
-                if (texture->bytes.empty()) continue;
-                auto& mapped = uvmap->at(texture->uv);
-                if (!mapped) {
-                    auto maximum = *std::max_element(uvmap->begin(), uvmap->end());
-                    if (maximum >= 2) throw AssetError("Surface material needs more than two UV sets");
-                    mapped = static_cast<g::UvSet>(int(maximum)+1);
-                }
-            }
-            for (const auto& cached : surface_cache)
-                // Filament 1.77.1's equality operator omits the dispersion bit.
-                if (cached.key == *config && cached.key.hasDispersion == config->hasDispersion
-                        && cached.uv == *uvmap && cached.extended == (surface >= 0)) return cached.material;
-            auto* material = create_surface_material(engine, *config, *uvmap, label, surface >= 0);
-            surface_cache.push_back({*config, *uvmap, surface >= 0, material});
-            return material;
+            return generated_material(config, uvmap, label, false);
         }
-        const int idx = index(label);
-        if (idx < 0) return delegate->getMaterial(config, uvmap, label);
-        map_uv(config, uvmap, sources[idx]);
-        size_t mode = size_t(config->alphaMode);
+        return delegate->getMaterial(config, uvmap, label);
+    }
+    f::Material* getMaterial(g::MaterialKey* config, g::UvMap* uvmap, const char* label) override {
+        if (!extended()) return standard_material(config, uvmap, label);
+        // gltfio asks while it builds vertex buffers in createAsset, before filly can tell which
+        // glTF material this is; label is only its name. The UV layout rule does not depend on
+        // the material. The returned material only supplies required attributes, so a match by
+        // name is enough, and a placeholder with the same attributes covers shared names.
+        *uvmap = standard_uvmap(*config, label);
+        const MaterialSource* match = nullptr;
+        size_t matches = 0;
+        bool custom_match = false;
+        for (const auto& source : asset->materials) {
+            if (source.root_label != label) continue;
+            match = &source;
+            ++matches;
+            custom_match = custom_match || source.kind != MaterialKind::standard;
+        }
+        auto key = *config;
+        g::UvMap uv{};
+        if (!custom_match) return standard_material(&key, &uv, label);
+        if (matches == 1 && match->kind == MaterialKind::diffuse) return diffuse_material(config->alphaMode);
+        if (matches == 1) {
+            // Built as surface_instance() builds it, so the instance reuses this material.
+            g::constrainMaterial(&key, &uv);
+            extend_uvmap(uv);
+            return generated_material(&key, &uv, match->label.c_str(), true);
+        }
+        g::MaterialKey placeholder{};
+        placeholder.unlit = config->unlit;
+        return delegate->getMaterial(&placeholder, &uv, "filly placeholder");
+    }
+    // Checks that an instance's UV layout is the one its vertex buffers were built with.
+    void check_layout(const g::MaterialKey& original, const g::UvMap& uvmap, const char* label) const {
+        if (extended() && standard_uvmap(original, label) != uvmap)
+            throw AssetError(std::string("Material '") + (label ? label : "material")
+                             + "' needs a different UV layout than its vertex buffers");
+    }
+    void map_custom(const g::UvMap& uvmap, const AssetTexture& texture) const {
+        if (!texture.bytes.empty() && uvmap.at(size_t(texture.uv)) == g::UvSet::UNUSED)
+            throw AssetError("Material needs more than two UV sets");
+    }
+    f::Material* diffuse_material(g::AlphaMode alpha) {
+        const size_t mode = size_t(alpha);
         if (custom.size() <= mode) custom.resize(mode+1);
         if (custom[mode]) return custom[mode];
         using B = filamat::MaterialBuilder;
@@ -352,8 +395,8 @@ public:
         builder.parameter("volumeThicknessIndex",B::UniformType::INT);
         builder.parameter("volumeThicknessUvMatrix",B::UniformType::MAT3);
         builder.parameter("volumeThicknessMap",B::SamplerType::SAMPLER_2D);
-        builder.blending(config->alphaMode == g::AlphaMode::MASK ? B::BlendingMode::MASKED :
-                         config->alphaMode == g::AlphaMode::BLEND ? B::BlendingMode::FADE : B::BlendingMode::OPAQUE);
+        builder.blending(alpha == g::AlphaMode::MASK ? B::BlendingMode::MASKED :
+                         alpha == g::AlphaMode::BLEND ? B::BlendingMode::FADE : B::BlendingMode::OPAQUE);
         for (const char* p : {"metallicFactor","roughnessFactor","normalScale","aoStrength","reflectance","diffuseFactor","backlightIntensity","emissiveStrength"}) builder.parameter(p,B::UniformType::FLOAT);
         for (const char* p : {"emissiveFactor","diffuseColor"}) builder.parameter(p,B::UniformType::FLOAT3);
         builder.parameter("baseColorFactor",B::UniformType::FLOAT4);
@@ -367,18 +410,24 @@ public:
         if (!custom[mode]) throw AssetError("Could not create diffuse transmission material");
         return custom[mode];
     }
+    g::TextureProvider* decoder(const std::string& mime) {
+        auto& slot = mime == "image/ktx2" ? ktx2 : mime == "image/webp" ? webp : stb;
+        if (!slot) slot.reset(mime == "image/ktx2" ? g::createKtx2Provider(engine)
+                              : mime == "image/webp" ? create_webp_provider(engine) : g::createStbProvider(engine));
+        return slot.get();
+    }
     f::Texture* decode(const AssetTexture& data, bool srgb) {
         if (data.bytes.empty()) return dummy;
-        std::unique_ptr<g::TextureProvider> decoder(data.mime == "image/ktx2" ? g::createKtx2Provider(engine) : g::createStbProvider(engine));
-        auto* texture = decoder->pushTexture(data.bytes.data(),data.bytes.size(),data.mime.c_str(),
+        auto* provider = decoder(data.mime);
+        auto* texture = provider->pushTexture(data.bytes.data(),data.bytes.size(),data.mime.c_str(),
             srgb ? g::TextureProvider::TextureFlags::sRGB : g::TextureProvider::TextureFlags::NONE);
-        if (!texture) throw AssetError("Could not decode diffuse transmission texture");
+        if (!texture) throw AssetError("Could not decode material texture");
         textures.push_back(texture);
-        decoder->waitForCompletion(); decoder->updateQueue(); decoder->popTexture();
-        if (const char* error = decoder->getPopMessage()) throw AssetError(error);
+        provider->waitForCompletion(); provider->updateQueue(); provider->popTexture();
+        if (const char* error = provider->getPopMessage()) throw AssetError(error);
         return texture;
     }
-    void upload(f::MaterialInstance* mi, const char* parameter, const AssetTexture& texture) {
+    static f::TextureSampler sampler_for(const AssetTexture& texture) {
         using S = f::TextureSampler;
         auto wrap = [](int mode) { return mode == 33071 ? S::WrapMode::CLAMP_TO_EDGE : mode == 33648 ? S::WrapMode::MIRRORED_REPEAT : S::WrapMode::REPEAT; };
         S sampler;
@@ -387,56 +436,52 @@ public:
                                        S::MinFilter::NEAREST_MIPMAP_LINEAR, S::MinFilter::LINEAR_MIPMAP_LINEAR};
         sampler.setMinFilter(texture.min_filter == 9728 ? S::MinFilter::NEAREST : texture.min_filter == 9729 ? S::MinFilter::LINEAR : filters[texture.min_filter-9984]);
         sampler.setMagFilter(texture.mag_filter == 9728 ? S::MagFilter::NEAREST : S::MagFilter::LINEAR);
-        mi->setParameter(parameter, decode(texture, false), sampler);
+        return sampler;
     }
-    f::MaterialInstance* createMaterialInstance(g::MaterialKey* config, g::UvMap* uvmap, const char* label, const char* extras) override {
-        // Texture assignment needs each instance's key to request a variant with a new slot.
-        auto record = [&](f::MaterialInstance* instance, bool standard = true) {
-            records.push_back({instance, *config, !standard});
-            if (extras) {
-                if (const char* key = std::strstr(extras, "\"fillyMaterial\"")) {
-                    if (const char* colon = std::strchr(key, ':'))
-                        bindings.emplace_back(std::strtoul(colon+1, nullptr, 10), instance);
-                }
-            }
-            return instance;
-        };
-        const int surface = surface_index(label);
-        if (surface >= 0) {
-            auto* material = getMaterial(config, uvmap, label);
-            auto* mi = material->createInstance(std::strstr(label+13, "__")+2);
-            const auto& data = surfaces[surface];
-            mi->setParameter("anisotropyStrength", data.anisotropy);
-            mi->setParameter("anisotropyRotation", data.rotation);
-            mi->setParameter("iridescenceFactor", data.iridescence);
-            mi->setParameter("iridescenceIor", data.ior);
-            mi->setParameter("iridescenceThicknessMinimum", data.minimum);
-            mi->setParameter("iridescenceThicknessMaximum", data.maximum);
-            const AssetTexture* textures[] = {&data.anisotropy_texture, &data.iridescence_texture, &data.thickness_texture};
-            const char* prefixes[] = {"anisotropy", "iridescence", "iridescenceThickness"};
-            for (int i=0; i<3; ++i) {
-                const auto& texture = *textures[i];
-                const std::string prefix = prefixes[i];
-                mi->setParameter((prefix+"Index").c_str(), texture.bytes.empty() ? -1 : int(uvmap->at(texture.uv))-1);
-                m::mat3f matrix;
-                for (int col=0; col<3; ++col) for (int row=0; row<3; ++row) matrix[col][row] = texture.transform[col*3+row];
-                mi->setParameter((prefix+"UvMatrix").c_str(), matrix);
-                upload(mi, (prefix+"Map").c_str(), texture);
-            }
-            return record(mi, false);
+    static m::mat3f matrix(const std::array<float,9>& values) {
+        m::mat3f result;
+        for (int col=0; col<3; ++col) for (int row=0; row<3; ++row) result[col][row]=values[col*3+row];
+        return result;
+    }
+    f::MaterialInstance* surface_instance(g::MaterialKey* config, g::UvMap* uvmap, const MaterialSource& source) {
+        const auto original = *config;
+        g::constrainMaterial(config, uvmap);
+        extend_uvmap(*uvmap);
+        check_layout(original, *uvmap, source.label.c_str());
+        const auto& data = asset->surfaces[source.source];
+        const AssetTexture* sources[] = {&data.anisotropy_texture, &data.iridescence_texture, &data.thickness_texture};
+        for (const auto* texture : sources) map_custom(*uvmap, *texture);
+        auto* mi = generated_material(config, uvmap, source.label.c_str(), true)->createInstance(source.label.c_str());
+        mi->setParameter("anisotropyStrength", data.anisotropy);
+        mi->setParameter("anisotropyRotation", data.rotation);
+        mi->setParameter("iridescenceFactor", data.iridescence);
+        mi->setParameter("iridescenceIor", data.ior);
+        mi->setParameter("iridescenceThicknessMinimum", data.minimum);
+        mi->setParameter("iridescenceThicknessMaximum", data.maximum);
+        const char* prefixes[] = {"anisotropy", "iridescence", "iridescenceThickness"};
+        for (int i=0; i<3; ++i) {
+            const auto& texture = *sources[i];
+            const std::string prefix = prefixes[i];
+            mi->setParameter((prefix+"Index").c_str(), texture.bytes.empty() ? -1 : int(uvmap->at(size_t(texture.uv)))-1);
+            mi->setParameter((prefix+"UvMatrix").c_str(), matrix(texture.transform));
+            mi->setParameter((prefix+"Map").c_str(), decode(texture, false), sampler_for(texture));
         }
-        int idx = index(label);
-        // Both material modes need the orthographic refraction filter.
-        if (idx < 0 && generated(*config, *uvmap, label))
-            return record(getMaterial(config, uvmap, label)->createInstance(label));
-        if (idx < 0) return record(delegate->createMaterialInstance(config,uvmap,label,extras));
-        const auto& data = sources[idx];
-        auto* material = getMaterial(config,uvmap,label);
-        const char* name = std::strstr(label+13,"__")+2;
-        auto* mi = material->createInstance(name);
+        return mi;
+    }
+    f::MaterialInstance* diffuse_instance(g::MaterialKey* config, g::UvMap* uvmap, const MaterialSource& source) {
+        const auto original = *config;
+        g::constrainMaterial(config, uvmap);
+        extend_uvmap(*uvmap);
+        check_layout(original, *uvmap, source.label.c_str());
+        // This material has its own volume inputs; gltfio would otherwise set the glTF volume
+        // and dispersion parameters and bind the thickness texture a second time.
+        config->hasVolume = config->hasVolumeThicknessTexture = config->hasDispersion = false;
+        const auto& data = asset->diffuse[source.source];
+        for (const auto* texture : {&data.factor_texture, &data.color_texture, &data.thickness_texture}) map_custom(*uvmap, *texture);
+        auto* mi = diffuse_material(config->alphaMode)->createInstance(source.label.c_str());
         mi->setDoubleSided(config->doubleSided);
         mi->setCullingMode(config->doubleSided ? f::MaterialInstance::CullingMode::NONE : f::MaterialInstance::CullingMode::BACK);
-        auto mapped = [&](bool present,int uv) { return present ? int(uvmap->at(uv))-1 : -1; };
+        auto mapped = [&](bool present,int uv) { return present ? int(uvmap->at(size_t(uv)))-1 : -1; };
         mi->setParameter("baseColorIndex",mapped(config->hasBaseColorTexture,config->baseColorUV));
         mi->setParameter("normalIndex",mapped(config->hasNormalTexture,config->normalUV));
         mi->setParameter("metallicRoughnessIndex",mapped(config->hasMetallicRoughnessTexture,config->metallicRoughnessUV));
@@ -445,11 +490,6 @@ public:
         mi->setParameter("diffuseIndex",mapped(!data.factor_texture.bytes.empty(),data.factor_texture.uv));
         mi->setParameter("diffuseColorIndex",mapped(!data.color_texture.bytes.empty(),data.color_texture.uv));
         for (const char* p : {"baseColorUvMatrix","normalUvMatrix","metallicRoughnessUvMatrix","occlusionUvMatrix","emissiveUvMatrix","backlightRotation"}) mi->setParameter(p,m::mat3f{});
-        auto matrix = [](const std::array<float,9>& values) {
-            m::mat3f result;
-            for (int col=0; col<3; ++col) for (int row=0; row<3; ++row) result[col][row]=values[col*3+row];
-            return result;
-        };
         mi->setParameter("diffuseUvMatrix",matrix(data.factor_texture.transform));
         mi->setParameter("diffuseColorUvMatrix",matrix(data.color_texture.transform));
         mi->setParameter("diffuseFactor",data.factor);
@@ -462,19 +502,46 @@ public:
         f::TextureSampler sampler(f::TextureSampler::MinFilter::LINEAR_MIPMAP_LINEAR,f::TextureSampler::MagFilter::LINEAR);
         for (const char* p : {"baseColorMap","normalMap","metallicRoughnessMap","occlusionMap","emissiveMap"}) mi->setParameter(p,dummy,sampler);
         mi->setParameter("backlightIrradiance",dummy_cube,sampler);
-        auto upload = [&](const char* parameter, const AssetTexture& texture, bool srgb) {
-            auto wrap = [](int mode) { return mode == 33071 ? f::TextureSampler::WrapMode::CLAMP_TO_EDGE : mode == 33648 ? f::TextureSampler::WrapMode::MIRRORED_REPEAT : f::TextureSampler::WrapMode::REPEAT; };
-            sampler.setWrapModeS(wrap(texture.wrap_s)); sampler.setWrapModeT(wrap(texture.wrap_t));
-            using Min = f::TextureSampler::MinFilter;
-            const Min filters[] = {Min::NEAREST_MIPMAP_NEAREST, Min::LINEAR_MIPMAP_NEAREST,
-                                   Min::NEAREST_MIPMAP_LINEAR, Min::LINEAR_MIPMAP_LINEAR};
-            sampler.setMinFilter(texture.min_filter == 9728 ? Min::NEAREST : texture.min_filter == 9729 ? Min::LINEAR : filters[texture.min_filter-9984]);
-            sampler.setMagFilter(texture.mag_filter == 9728 ? f::TextureSampler::MagFilter::NEAREST : f::TextureSampler::MagFilter::LINEAR);
-            mi->setParameter(parameter,decode(texture,srgb),sampler);
+        mi->setParameter("diffuseMap",decode(data.factor_texture,false),sampler_for(data.factor_texture));
+        mi->setParameter("diffuseColorMap",decode(data.color_texture,true),sampler_for(data.color_texture));
+        mi->setParameter("volumeThicknessMap",decode(data.thickness_texture,false),sampler_for(data.thickness_texture));
+        return mi;
+    }
+    f::MaterialInstance* createMaterialInstance(g::MaterialKey* config, g::UvMap* uvmap, const char* label, const char* extras) override {
+        const size_t index = material_marker(extras);
+        const MaterialSource* source = asset && index < asset->materials.size() ? &asset->materials[index] : nullptr;
+        // Texture assignment needs each instance's key to request a variant with a new slot.
+        auto record = [&](f::MaterialInstance* instance, bool custom_material) {
+            records.push_back({instance, *config, custom_material});
+            if (source) bindings.emplace_back(index, instance);
+            return instance;
         };
-        upload("diffuseMap",data.factor_texture,false); upload("diffuseColorMap",data.color_texture,true);
-        upload("volumeThicknessMap",data.thickness_texture,false);
-        return record(mi, false);
+        if (source && source->kind == MaterialKind::surface) return record(surface_instance(config, uvmap, *source), true);
+        if (source && source->kind == MaterialKind::diffuse) return record(diffuse_instance(config, uvmap, *source), true);
+        const auto original = *config;
+        // gltfio names an unnamed material "material" when it asks for it in createAsset, and
+        // an instance without a name takes its material's name. Materials first built here, as
+        // in assets with provider-built materials, get the same name.
+        const char* material_label = label ? label : "material";
+        f::MaterialInstance* instance;
+        // Both material modes need the orthographic refraction filter.
+        if (generated(*config, label)) {
+            g::constrainMaterial(config, uvmap);
+            instance = generated_material(config, uvmap, material_label, false)->createInstance(label);
+        } else {
+            if (!label && extended()) {
+                auto key = *config;
+                g::UvMap uv{};
+                delegate->getMaterial(&key, &uv, material_label);
+            }
+            // The marker is filly's; gltfio's providers do not read extras.
+            instance = delegate->createMaterialInstance(config, uvmap, label, nullptr);
+        }
+        if (instance && extended()) {
+            extend_uvmap(*uvmap);
+            check_layout(original, *uvmap, label);
+        }
+        return instance ? record(instance, false) : nullptr;
     }
     const f::Material* const* getMaterials() const noexcept override { return delegate->getMaterials(); }
     size_t getMaterialsCount() const noexcept override { return delegate->getMaterialsCount(); }
@@ -491,9 +558,8 @@ public:
 };
 }
 g::MaterialProvider* create_material_provider(f::Engine* engine,bool compiled) { return new Provider(engine,compiled); }
-void set_diffuse_sources(g::MaterialProvider* provider,const std::vector<DiffuseSource>& sources) { static_cast<Provider*>(provider)->sources=sources; }
-void set_surface_sources(g::MaterialProvider* provider,const std::vector<SurfaceSource>& sources) { static_cast<Provider*>(provider)->surfaces=sources; }
-std::vector<f::Texture*> take_diffuse_textures(g::MaterialProvider* provider) { return std::exchange(static_cast<Provider*>(provider)->textures,{}); }
+void set_prepared_asset(g::MaterialProvider* provider, const PreparedAsset* asset) { static_cast<Provider*>(provider)->asset = asset; }
+std::vector<f::Texture*> take_material_textures(g::MaterialProvider* provider) { return std::exchange(static_cast<Provider*>(provider)->textures,{}); }
 std::vector<MaterialBinding> take_material_bindings(g::MaterialProvider* provider) { return std::exchange(static_cast<Provider*>(provider)->bindings,{}); }
 std::vector<MaterialRecord> take_material_records(g::MaterialProvider* provider) { return std::exchange(static_cast<Provider*>(provider)->records,{}); }
 f::MaterialInstance* create_material_instance(g::MaterialProvider* provider, g::MaterialKey& key, const char* label) {

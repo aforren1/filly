@@ -9,6 +9,7 @@ The renderer and shared-texture adapter were tested on September 25 through 29, 
 | Platform | Windows x64 |
 | Python | CPython 3.11.15 and 3.12.11 |
 | Filament | 1.77.1, official Windows release SDK |
+| libwebp | 1.5.0 release archive, built by CMake (from September 29) |
 | Compiler | MSVC 19.44.35214, Visual Studio 2022 |
 | CMake | 3.29.2 |
 | nanobind | 3.1.0 |
@@ -20,6 +21,74 @@ The renderer and shared-texture adapter were tested on September 25 through 29, 
 | OpenGL driver | 4.5.0, build 32.0.101.7088 |
 
 ## Results
+
+### Native glTF preparation (September 29)
+
+This revision moves the glTF preparation from Python into the C++ core and decodes WebP with
+libwebp 1.5.0. See [glTF preparation](../explanation/design.md#gltf-preparation). All 420
+non-PsychoPy tests passed on Windows Python 3.12 in 131 seconds (2 skipped, as before). The
+count includes new tests for WebP texels, a Unicode folder with an external buffer and image,
+native shapes, and a check that no Python preparation module exists or loads. Tests that called
+the Python preflight directly now load through `Scene.load()`. All 23 PsychoPy tests passed on
+Python 3.11. Linux was not built or tested.
+
+A baseline was recorded before the change and compared after it:
+
+- Sample audit, 150 Khronos assets: 149 rendered and 1 error before and after
+  (AnimationPointerUVs, "Invalid glTF asset: Duplicate animation pointer target"). Status,
+  error text, warnings, clip names and durations, and variants were identical for every asset.
+- Pixels: each asset in its own process, 256 x 256, a camera fitted to the bounds, a directional
+  light and a fixed panorama. Animated assets also at 25% and 50% of clip 0. The inputs were the
+  150 assets, generated triangles with `EXT_meshopt_compression` and `KHR_meshopt_compression`,
+  generated WebP quads (lossless and lossy), and Suzanne and Box With Spaces copied into a folder
+  named `ünïcødé ассет`. All 205 frames of the 155 loading inputs were byte-identical, including
+  SheenWoodLeatherSofa (WebP), MeshoptCubeTest, SimpleInstancing, the visibility and
+  `KHR_animation_pointer` assets, and the anisotropy, iridescence, and diffuse-transmission assets.
+  Pillow 11.3, which converted WebP before, bundles the same libwebp release.
+- Names: node names, clip names, and variants were identical. One material name changed:
+  Unicode❤♻Test reported `Unicode\u2764\u267bMaterial`, because the Python rewrite escaped
+  non-ASCII text and gltfio keeps JSON escapes; it now reports `Unicode❤♻Material`.
+- Reference comparison against `gltf_viewer`, studio environment: DamagedHelmet and
+  TransmissionTest both MAE 0 and maximum error 0.
+
+Preparation time, median of five loads in one process. Python is the removed preflight, run
+from a copy against the same files; native is the time in `prepare_asset()`. Both read external
+buffers but not the main file. Native reads files with unbuffered `fread`; with `std::ifstream`
+Sponza took 13.4 ms.
+
+| Asset | Python (ms) | Native (ms) |
+| --- | ---: | ---: |
+| Sponza (glTF, 9.5 MB buffer) | 14.8 | 6.8 |
+| FlightHelmet (glTF) | 4.8 | 2.3 |
+| ABeautifulGame | 48.6 | 2.1 |
+| CarConcept | 18.7 | 3.0 |
+| ChronographWatch | 11.2 | 0.9 |
+| DiffuseTransmissionPlant | 9.1 | 0.7 |
+| SheenWoodLeatherSofa (WebP) | 1835.3 | 0.4 |
+| PotOfCoalsAnimationPointer | 13.8 | 0.3 |
+| MeshoptCubeTest | 3.3 | 1.6 |
+| SimpleInstancing (rewrite) | 1.9 | 1.3 |
+
+The Python times exclude the copies between Python and C++ that the old binding made. WebP
+decoding now happens with the other textures in `ResourceLoader`.
+
+Cold `scene.load()` time in a fresh process, median of three: before, then the final build.
+These include shader compilation and GPU upload. In seven runs of the final build, the slowest
+run took 19 to 59% longer than the fastest (CarConcept 916 to 1180 ms), so only
+SheenWoodLeatherSofa differs beyond noise.
+
+| Asset | Before (ms) | After (ms) |
+| --- | ---: | ---: |
+| Sponza | 578 | 608 |
+| FlightHelmet | 597 | 617 |
+| ABeautifulGame | 866 | 856 |
+| SunglassesKhronos | 373 | 398 |
+| CarConcept | 959 | 1057 |
+| ChronographWatch | 566 | 587 |
+| DiffuseTransmissionPlant | 349 | 390 |
+| SheenWoodLeatherSofa | 2128 | 450 |
+| MeshoptCubeTest | 271 | 283 |
+| SimpleInstancing | 163 | 185 |
 
 ### Output path and rename revision (September 29)
 

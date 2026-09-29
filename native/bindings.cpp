@@ -1,5 +1,5 @@
 #include "renderer.h"
-#include "vendor/meshoptimizer/meshoptimizer.h"
+#include "gltf_prepare.h"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
@@ -10,8 +10,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <filesystem>
-#include <fstream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -73,92 +71,61 @@ template <class ByName, class ByIndex> auto by_key(nb::handle key, ByName by_nam
         throw nb::type_error("Key must be a name (str) or an index (int)");
     return by_index(nb::cast<int64_t>(nb::int_(key)));
 }
-Model load(Scene& scene, nb::object source, bool strict, bool clonable) {
-    std::vector<uint8_t> bytes;
-    std::string path;
-    if (nb::isinstance<nb::bytes>(source)) {
-        const auto blob = nb::cast<nb::bytes>(source);
-        const auto* first = reinterpret_cast<const uint8_t*>(blob.c_str());
-        bytes.assign(first, first + blob.size());
-    } else {
-        auto os = nb::module_::import_("os");
-        path = nb::cast<std::string>(os.attr("fsdecode")(os.attr("fspath")(source)));
-    }
-    if (!path.empty()) {
-        nb::gil_scoped_release release;
-        const auto file = std::filesystem::absolute(std::filesystem::u8path(path));
-        const auto utf8 = file.u8string();
-        path.assign(reinterpret_cast<const char*>(utf8.data()), utf8.size());
-        std::ifstream stream(file, std::ios::binary | std::ios::ate);
-        if (!stream) throw AssetError("Could not open asset: " + path);
-        auto size = stream.tellg();
-        if (size <= 0 || uint64_t(size) > std::numeric_limits<uint32_t>::max())
-            throw AssetError("Asset is empty or larger than 4 GiB");
-        bytes.resize(size_t(size));
-        stream.seekg(0);
-        if (!stream.read(reinterpret_cast<char*>(bytes.data()), size))
-            throw AssetError("Could not read asset: " + path);
-    }
-    // Preflight detects GLB by its magic, so the file name and source type do not matter.
-    auto prepared = nb::module_::import_("filly._assets").attr("prepare")(
-        nb::bytes(reinterpret_cast<const char*>(bytes.data()), bytes.size()), path,
-        "strict"_a=strict, "refraction"_a=scene.refraction(), "precompiled"_a=scene.precompiled_shaders());
-    auto normalized = nb::cast<nb::bytes>(prepared[0]);
-    bytes.assign(reinterpret_cast<const uint8_t*>(normalized.c_str()), reinterpret_cast<const uint8_t*>(normalized.c_str())+normalized.size());
-    auto texture = [](nb::handle value) {
-        auto record = nb::borrow<nb::tuple>(value);
-        AssetTexture result;
-        auto data = nb::cast<nb::bytes>(record[0]);
-        result.bytes.assign(reinterpret_cast<const uint8_t*>(data.c_str()), reinterpret_cast<const uint8_t*>(data.c_str())+data.size());
-        result.mime = nb::cast<std::string>(record[1]); result.uv = nb::cast<int>(record[2]);
-        result.transform = nb::cast<std::array<float,9>>(record[3]);
-        result.wrap_s = nb::cast<int>(record[4]); result.wrap_t = nb::cast<int>(record[5]);
-        result.min_filter = nb::cast<int>(record[6]); result.mag_filter = nb::cast<int>(record[7]);
-        return result;
-    };
-    std::vector<DiffuseSource> diffuse;
-    for (auto item : nb::borrow<nb::iterable>(prepared[1])) {
-        auto record = nb::borrow<nb::tuple>(item);
-        diffuse.push_back({nb::cast<float>(record[0]),nb::cast<Vec3>(record[1]),texture(record[2]),texture(record[3]),
-            nb::cast<float>(record[4]), nb::cast<Vec3>(record[5]), texture(record[6])});
-    }
-    auto morphs = nb::cast<std::vector<std::vector<float>>>(prepared[2]);
-    std::vector<AnimationSource> animations;
-    for (auto item : nb::borrow<nb::iterable>(prepared[3])) {
-        auto record = nb::borrow<nb::tuple>(item);
-        AnimationSource animation;
-        animation.name = nb::cast<std::string>(record[0]);
-        animation.native_index = nb::cast<int>(record[1]);
-        for (auto value : nb::borrow<nb::iterable>(record[2])) {
-            auto track = nb::borrow<nb::tuple>(value);
-            animation.tracks.push_back({nb::cast<int>(track[0]), nb::cast<size_t>(track[1]),
-                nb::cast<std::string>(track[2]), nb::cast<int>(track[3]), nb::cast<int>(track[4]),
-                nb::cast<float>(track[5]), nb::cast<float>(track[6]),
-                nb::cast<std::vector<float>>(track[7]), nb::cast<std::vector<float>>(track[8]), nb::cast<std::vector<float>>(track[9])});
+// filly.AssetCompatibilityWarning, created in the module initializer.
+PyObject* compatibility_warning = nullptr;
+
+std::string fs_path(nb::handle path) {
+    auto os = nb::module_::import_("os");
+    return nb::cast<std::string>(os.attr("fsdecode")(os.attr("fspath")(path)));
+}
+
+// Loads with the GIL released for the whole native load, including preparation. Messages
+// become AssetCompatibilityWarning; if the warning filter turns one into an error, the model
+// is closed, as the load would not have happened when preparation raised the warning itself.
+Model load(Scene& scene, nb::handle source, bool strict, bool clonable) {
+    std::vector<std::string> warnings;
+    std::optional<Model> model;
+    auto warn = [&] {
+        for (const auto& message : warnings) {
+            if (PyErr_WarnEx(compatibility_warning, message.c_str(), 1) == 0) continue;
+            if (model) model->close();
+            throw nb::python_error();
         }
-        animations.push_back(std::move(animation));
+    };
+    try {
+        if (nb::isinstance<nb::bytes>(source)) {
+            const auto blob = nb::borrow<nb::bytes>(source);
+            const auto* first = reinterpret_cast<const uint8_t*>(blob.c_str());
+            std::vector<uint8_t> bytes(first, first + blob.size());
+            nb::gil_scoped_release release;
+            model = scene.load(std::move(bytes), strict, clonable, warnings);
+        } else {
+            const auto path = fs_path(source);
+            nb::gil_scoped_release release;
+            model = scene.load(path, strict, clonable, warnings);
+        }
+    } catch (...) {
+        // Warnings raised before the error still reach the caller, as they did from Python.
+        warn();
+        throw;
     }
-    std::vector<SurfaceSource> surfaces;
-    for (auto value : nb::borrow<nb::iterable>(prepared[4])) {
-        auto record = nb::borrow<nb::tuple>(value);
-        const auto factors = nb::cast<std::array<float,6>>(record[0]);
-        surfaces.push_back({factors[0], factors[1], factors[2], factors[3], factors[4], factors[5],
-                           texture(record[1]), texture(record[2]), texture(record[3])});
-    }
-    std::vector<CameraSource> cameras;
-    for (auto value : nb::borrow<nb::iterable>(prepared[5])) {
-        auto record = nb::borrow<nb::tuple>(value);
-        cameras.push_back({nb::cast<bool>(record[0]), nb::cast<Vec4>(record[1])});
-    }
-    std::vector<NodeSource> nodes;
-    for (auto value : nb::borrow<nb::iterable>(prepared[6])) {
-        auto record = nb::borrow<nb::tuple>(value);
-        nodes.push_back({nb::cast<std::optional<std::string>>(record[0]), nb::cast<std::optional<std::string>>(record[1])});
-    }
-    const bool masked = nb::cast<bool>(prepared[7]);
-    nb::gil_scoped_release release;
-    return scene.load_asset(bytes, path, diffuse, morphs, animations, surfaces, cameras, nodes,
-                            masked, clonable);
+    warn();
+    return *model;
+}
+
+nb::dict shape_dict(ShapeArrays&& shape) {
+    auto array = [](auto&& values, size_t columns) {
+        using T = typename std::decay_t<decltype(values)>::value_type;
+        auto* owned = new std::vector<T>(std::move(values));
+        nb::capsule owner(owned, [](void* p) noexcept { delete static_cast<std::vector<T>*>(p); });
+        return nb::ndarray<nb::numpy, T>(owned->data(), {owned->size() / columns, columns}, owner);
+    };
+    nb::dict result;
+    result["positions"] = array(std::move(shape.positions), 3);
+    result["normals"] = array(std::move(shape.normals), 3);
+    result["uvs"] = array(std::move(shape.uvs), 2);
+    result["indices"] = array(std::move(shape.indices), 3);
+    return result;
 }
 
 // Context manager returned by ImportedTarget.acquire(). It holds the Python object so that
@@ -233,31 +200,11 @@ RenderOptions render_options(const std::optional<Camera>& camera, nb::handle vie
 }
 
 NB_MODULE(_native, module) {
+    // For tests of the decoder that preparation uses for EXT_ and KHR_meshopt_compression.
     module.def("_decode_meshopt", [](nb::bytes source, size_t count, size_t stride,
                                       const std::string& mode, const std::string& filter) {
-        if (!count || !stride || stride > 256 || count > (size_t(512) << 20) / stride)
-            throw AssetError("Invalid meshopt decoded size");
-        if ((mode == "ATTRIBUTES" && stride % 4) ||
-                ((mode == "TRIANGLES" || mode == "INDICES") && stride != 2 && stride != 4) ||
-                (mode == "TRIANGLES" && count % 3) || (mode != "ATTRIBUTES" && filter != "NONE"))
-            throw AssetError("Invalid meshopt mode or stride");
-        if ((filter == "OCTAHEDRAL" || filter == "COLOR") && stride != 4 && stride != 8)
-            throw AssetError("Invalid meshopt filter stride");
-        if (filter == "QUATERNION" && stride != 8) throw AssetError("Invalid quaternion stride");
-        if (filter == "EXPONENTIAL" && stride % 4) throw AssetError("Invalid exponential stride");
-        std::vector<unsigned char> output(count * stride);
-        const auto* input = reinterpret_cast<const unsigned char*>(source.c_str());
-        int status;
-        if (mode == "ATTRIBUTES") status = fp_meshopt_decodeVertexBuffer(output.data(), count, stride, input, source.size());
-        else if (mode == "TRIANGLES") status = fp_meshopt_decodeIndexBuffer(output.data(), count, stride, input, source.size());
-        else if (mode == "INDICES") status = fp_meshopt_decodeIndexSequence(output.data(), count, stride, input, source.size());
-        else throw AssetError("Unknown meshopt mode");
-        if (status) throw AssetError("Invalid meshopt bitstream");
-        if (filter == "OCTAHEDRAL") fp_meshopt_decodeFilterOct(output.data(), count, stride);
-        else if (filter == "QUATERNION") fp_meshopt_decodeFilterQuat(output.data(), count, stride);
-        else if (filter == "EXPONENTIAL") fp_meshopt_decodeFilterExp(output.data(), count, stride);
-        else if (filter == "COLOR") fp_meshopt_decodeFilterColor(output.data(), count, stride);
-        else if (filter != "NONE") throw AssetError("Unknown meshopt filter");
+        const auto output = detail::decode_meshopt(reinterpret_cast<const uint8_t*>(source.c_str()), source.size(),
+                                                   count, stride, mode, filter);
         return nb::bytes(output.data(), output.size());
     });
     module.def("set_log_level", &set_log_level, "level"_a,
@@ -273,6 +220,38 @@ NB_MODULE(_native, module) {
     nb::exception<BackendError>(module, "BackendError", error.ptr());
     nb::exception<AssetError>(module, "AssetError", error.ptr());
     nb::exception<InteropError>(module, "InteropError", error.ptr());
+    compatibility_warning = PyErr_NewExceptionWithDoc("filly.AssetCompatibilityWarning",
+        "An optional asset feature cannot be reproduced by this renderer.", PyExc_UserWarning, nullptr);
+    if (!compatibility_warning) throw nb::python_error();
+    module.attr("AssetCompatibilityWarning") = nb::handle(compatibility_warning);
+
+    auto shapes = module.def_submodule("shapes",
+        "Vertex arrays for simple shapes, for ``Scene.create_mesh(**shape)``.\n\n"
+        "Each function returns a dict with ``positions`` (N x 3), ``normals`` (N x 3), ``uvs`` (N x 2),\n"
+        "all float32, and ``indices`` (M x 3, uint32). Front faces wind counterclockwise, as in glTF.\n"
+        "UVs follow glTF: (0, 0) is the top-left corner of an image. Units are scene units.");
+    shapes.def("plane", [](double width, double height, std::array<int64_t, 2> segments) {
+        return shape_dict(shape_plane(width, height, segments[0], segments[1]));
+    }, "width"_a = 1.0, "height"_a = 1.0, nb::kw_only(), "segments"_a = std::array<int64_t, 2>{1, 1},
+       "A rectangle in the XY plane, centered on the origin, facing +Z.\n\n"
+       "``segments`` is (columns, rows). More segments let ``Model.update_mesh()`` deform it.");
+    shapes.def("box", [](double width, double height, double depth) {
+        return shape_dict(shape_box(width, height, depth));
+    }, "width"_a = 1.0, "height"_a = 1.0, "depth"_a = 1.0,
+       "An axis-aligned box centered on the origin. Each face has its own vertices and full UVs.");
+    shapes.def("uv_sphere", [](double radius, int64_t segments, int64_t rings) {
+        return shape_dict(shape_uv_sphere(radius, segments, rings));
+    }, "radius"_a = 0.5, nb::kw_only(), "segments"_a = 32, "rings"_a = 16,
+       "A sphere centered on the origin with poles on the Y axis.\n\n"
+       "U runs once around from +Z, V from the top pole (0) to the bottom pole (1). The seam and the\n"
+       "poles have duplicate vertices so the UVs stay continuous.");
+    shapes.def("cylinder", [](double radius, double height, int64_t segments, bool caps) {
+        return shape_dict(shape_cylinder(radius, height, segments, caps));
+    }, "radius"_a = 0.5, "height"_a = 1.0, nb::kw_only(), "segments"_a = 32, "caps"_a = true,
+       "A cylinder centered on the origin with its axis on Y.\n\n"
+       "The side has U around from +Z and V from top (0) to bottom (1). Caps map a disc onto the\n"
+       "unit UV square.");
+    shapes.attr("__all__") = nb::make_tuple("box", "cylinder", "plane", "uv_sphere");
 
     nb::class_<Stats>(module, "Stats")
         .def_ro("cpu_submit_ms", &Stats::cpu_submit_ms)
@@ -444,9 +423,7 @@ NB_MODULE(_native, module) {
         .def_prop_ro("closed", &Scene::closed)
         .def("create_camera", &Scene::create_camera)
         .def_prop_rw("camera", &Scene::camera, &Scene::set_camera)
-        .def("load", [](Scene& self, nb::object source, bool strict, bool clonable) {
-            return load(self, source, strict, clonable);
-        }, "source"_a, nb::kw_only(), "strict"_a = false, "clonable"_a = false)
+        .def("load", &load, "source"_a, nb::kw_only(), "strict"_a = false, "clonable"_a = false)
         .def("add_directional_light", &Scene::add_directional_light, nb::kw_only(),
              "direction"_a, "intensity"_a = 50000.0f, "color"_a = Vec3{1, 1, 1})
         .def("add_sun_light", &Scene::add_sun_light, nb::kw_only(),
@@ -485,48 +462,20 @@ NB_MODULE(_native, module) {
             auto arrays = mesh_arrays(positions.shape(0), positions, normals, uvs, colors);
             arrays.indices = indices.data();
             arrays.triangles = indices.shape(0);
-            if (arrays.vertices < 3 || arrays.triangles < 1)
-                throw std::invalid_argument("A mesh needs at least 3 positions and 1 triangle");
-            for (size_t i = 0; i < arrays.vertices * 3; ++i)
-                if (!std::isfinite(positions.data()[i])) throw std::invalid_argument("Positions must be finite");
-            // A one-primitive glTF gives the mesh a node and the loader's own material; its
-            // geometry is then replaced, so the model behaves like any loaded asset.
-            float low[3], high[3];
-            for (int axis = 0; axis < 3; ++axis) {
-                low[axis] = high[axis] = positions.data()[axis];
-                for (size_t i = 0; i < arrays.vertices; ++i) {
-                    low[axis] = std::min(low[axis], positions.data()[3 * i + axis]);
-                    high[axis] = std::max(high[axis], positions.data()[3 * i + axis]);
-                }
-            }
-            auto document = nb::module_::import_("filly._mesh").attr("placeholder")(
-                std::array<float, 3>{low[0], low[1], low[2]}, std::array<float, 3>{high[0], high[1], high[2]},
-                "colors"_a = bool(colors), "base_color"_a = base_color, "metallic"_a = metallic,
-                "roughness"_a = roughness, "emissive"_a = emissive, "unlit"_a = unlit,
-                "double_sided"_a = double_sided, "alpha_mode"_a = alpha_mode);
-            Model model = load(self, document, true, true);
-            try {
-                nb::gil_scoped_release release;
-                model.attach_mesh(arrays);
-            } catch (...) {
-                model.close();
-                throw;
-            }
-            return model;
+            const MeshMaterial material{base_color, metallic, roughness, emissive, unlit, double_sided, alpha_mode};
+            nb::gil_scoped_release release;
+            return self.create_mesh(arrays, material);
         }, "positions"_a, "indices"_a, nb::kw_only(), "normals"_a.none() = nb::none(), "uvs"_a.none() = nb::none(),
            "colors"_a.none() = nb::none(), "base_color"_a = Vec4{1, 1, 1, 1}, "metallic"_a = 0.0f,
            "roughness"_a = 1.0f, "emissive"_a = Vec3{0, 0, 0}, "unlit"_a = false, "double_sided"_a = false,
            "alpha_mode"_a = "opaque")
         .def("load_environment", [](Scene& self, nb::object path, float intensity, float rotation) {
-            auto os = nb::module_::import_("os");
-            auto filename = nb::cast<std::string>(os.attr("fsdecode")(os.attr("fspath")(path)));
+            const auto filename = fs_path(path);
             nb::gil_scoped_release release; self.load_environment(filename, intensity, rotation);
         }, "path"_a, nb::kw_only(), "intensity"_a = 30000.0f, "rotation_deg"_a = 0.0f)
         .def("load_environment_ktx", [](Scene& self, nb::object ibl, nb::object skybox, float intensity, float rotation) {
-            auto os = nb::module_::import_("os");
-            auto name = [&](nb::object path) { return nb::cast<std::string>(os.attr("fsdecode")(os.attr("fspath")(path))); };
-            const auto ibl_path = name(ibl);
-            const auto skybox_path = skybox.is_none() ? std::string() : name(skybox);
+            const auto ibl_path = fs_path(ibl);
+            const auto skybox_path = skybox.is_none() ? std::string() : fs_path(skybox);
             nb::gil_scoped_release release; self.load_environment_ktx(ibl_path, skybox_path, intensity, rotation);
         }, "ibl_path"_a, "skybox_path"_a.none() = nb::none(), nb::kw_only(), "intensity"_a = 30000.0f, "rotation_deg"_a = 0.0f)
         .def("set_environment", [](Scene& self, nb::ndarray<nb::numpy, const float, nb::shape<-1,-1,3>, nb::c_contig> pixels, float intensity, float rotation) {

@@ -11,7 +11,8 @@ import numpy as np
 import pytest
 
 import filly
-from filly._assets import MAX_LIT_TEXTURES, prepare
+# Filament 1.77.1 lit materials have 8 texture samplers; see gltf_prepare.cpp.
+MAX_LIT_TEXTURES = 8
 
 pytestmark = pytest.mark.gpu
 
@@ -101,11 +102,13 @@ def test_compiled_texture_limit_is_measured(count):
 
 
 def test_preflight_names_material_and_suggests_precompiled_shaders():
-    with pytest.raises(filly.AssetError, match=r"Material 'rough coat' uses 9 textures.*precompiled_shaders=True"):
-        prepare(textured_asset(9, name="rough coat"), "", precompiled=False)
+    with filly.Renderer() as renderer:
+        with pytest.raises(filly.AssetError, match=r"Material 'rough coat' uses 9 textures.*precompiled_shaders=True"):
+            renderer.create_scene().load(textured_asset(9, name="rough coat"))
     # Filament's precompiled materials drop sheen for clearcoat, so precompiled shaders can render it.
-    with pytest.warns(filly.AssetCompatibilityWarning, match="without some of its features"):
-        prepare(textured_asset(9), "", precompiled=True)
+    with filly.Renderer(precompiled_shaders=True) as renderer:
+        with pytest.warns(filly.AssetCompatibilityWarning, match="without some of its features"):
+            renderer.create_scene().load(textured_asset(9))
 
 
 @pytest.mark.parametrize("count", [9, 11])

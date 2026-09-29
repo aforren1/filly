@@ -1,7 +1,10 @@
 """A small 3D renderer for psychophysics stimuli, built on Google Filament."""
 
+import sys
+
 from ._native import (
     AnimationInfo,
+    AssetCompatibilityWarning,
     AssetError,
     BackendError,
     Camera,
@@ -20,9 +23,11 @@ from ._native import (
     Texture,
     current_gl_context,
     set_log_level,
+    shapes,
 )
-from ._assets import AssetCompatibilityWarning
-from . import shapes
+
+# The shape functions are native; this keeps `import filly.shapes` working.
+sys.modules[__name__ + ".shapes"] = shapes
 
 __version__ = "0.1.0.dev0"
 __all__ = [

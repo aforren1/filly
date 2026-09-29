@@ -29,7 +29,12 @@ Animation includes supported material factors, light color/intensity/range and s
 texture transforms through `KHR_animation_pointer`.
 The loader also supports node visibility, modern meshopt data, and instance transforms.
 A PsychoPy adapter renders into a shared GPU texture while PsychoPy controls the display flip.
-It uses nanobind and a C++ interface that has no Python dependencies.
+It uses nanobind and a C++ interface that has no Python dependencies. glTF checks and
+preparation run in that C++ core, so another frontend gets the same loader.
+
+The only runtime dependency is NumPy. The extension links Filament, libwebp 1.5.0 (for WebP
+textures), and a meshoptimizer 1.0 decoder statically. Pillow is needed only for the examples
+and some tests, which encode PNG images.
 
 ![Suzanne rendered with filly](docs/images/suzanne.png)
 

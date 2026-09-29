@@ -288,8 +288,7 @@ def test_surface_fast_mode_compiles_extension_combinations(triangle_glb):
 
 
 @pytest.mark.parametrize("invalid", ["camera_far", "camera_near", "anisotropy", "iridescence", "uv"])
-def test_invalid_surface_camera_preflight(triangle_glb, invalid):
-    from filly._assets import prepare
+def test_invalid_surface_camera_preflight(scene, triangle_glb, invalid):
     doc, binary = camera_asset(triangle_glb, False)
     lit(doc)
     if invalid == "camera_far":
@@ -305,4 +304,4 @@ def test_invalid_surface_camera_preflight(triangle_glb, invalid):
         doc["extensionsUsed"] = [name]
         doc["materials"][0]["extensions"] = {name: {"anisotropyStrength": 2} if invalid == "anisotropy" else {"iridescenceIor": 0}}
     with pytest.raises(filly.AssetError, match="Invalid"):
-        prepare(pack(doc, binary), "")
+        scene.load(pack(doc, binary))
