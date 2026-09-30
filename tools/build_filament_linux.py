@@ -14,6 +14,9 @@ VERSION = "1.77.1"
 SOURCE_SHA256 = "c55e2f99fd5e8840f132d03f1b019bc820c37d9df6d2c2ce2f3930367b081a45"
 SDK_SHA256 = "ec0f5287a3a2fb801a93fd7b0ffd80c894aac980716d6f91ec48e5370d2d0674"
 LIBRARIES = "gltfio gltfio_core filamat shaders uberarchive filament-iblprefilter filament backend filabridge filaflat geometry ibl utils bluegl smol-v stb dracodec meshoptimizer mikktspace uberzlib zstd basis_transcoder ktxreader image abseil".split()
+# Host tools for filly's material archive (CMake FILLY_MATERIALS=archive). The release archive's
+# tools need a newer glibc than manylinux_2_28, so they are built here with the libraries.
+TOOLS = ["matc", "uberz", "matinfo"]
 
 
 def fetch(url, path, expected):
@@ -60,11 +63,16 @@ def main():
     if not (source / "CMakeLists.txt").exists():
         with tarfile.open(source_archive) as bundle:
             bundle.extractall(work, filter="data")
-    # Zero-timeout GPU fence polling must not enter a condition-variable wait.
-    # The libstdc++ build can stall here when the producer has no more commands.
+    # Fence waits in the manylinux libstdc++ build. glibc 2.28 lacks pthread_cond_clockwait, so
+    # wait_until() converts the steady-clock deadline to the system clock. A zero timeout can
+    # then stall when the producer has no more commands, and the time_point::max() deadline of
+    # FENCE_WAIT_FOR_EVER overflows: wait_until() returns at once, and the waiting thread spins
+    # on the fence mutex and starves the driver thread that would signal the fence.
     fence_header = source / "filament/backend/src/DriverBase.h"
     original = "if (mFenceCondition.wait_until(lock, until) == std::cv_status::timeout) {"
-    patched = ("if (std::chrono::steady_clock::now() >= until ||\n"
+    patched = ("if (until == std::chrono::steady_clock::time_point::max()) {\n"
+               "                mFenceCondition.wait(lock);\n"
+               "            } else if (std::chrono::steady_clock::now() >= until ||\n"
                "                    mFenceCondition.wait_until(lock, until) == std::cv_status::timeout) {")
     replace_once(fence_header, original, patched)
     # Mesa shared contexts must use the host's display connection and driver screen.
@@ -95,7 +103,7 @@ def main():
                     "-DFILAMENT_SUPPORTS_XCB=OFF", "-DFILAMENT_SUPPORTS_XLIB=ON",
                     "-DFILAMENT_SUPPORTS_EGL_ON_LINUX=OFF",
                     "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"], check=True)
-    targets = ["filament-abseil" if name == "abseil" else name for name in LIBRARIES]
+    targets = ["filament-abseil" if name == "abseil" else name for name in LIBRARIES] + TOOLS
     subprocess.run(["cmake", "--build", str(build), "--parallel", str(args.jobs), "--target", *targets], check=True)
     # The release archive supplies public headers only. All linked libraries are built above.
     sdk = fetch(f"https://github.com/google/filament/releases/download/v{VERSION}/filament-v{VERSION}-linux.tgz",
@@ -113,12 +121,19 @@ def main():
             raise RuntimeError(f"Expected one archive for {name}, found: {matches}")
         shutil.copy2(matches[0], library_dir / f"lib{name}.a")
     shutil.copy2(build / "libs/gltfio/materials/uberarchive.h", output / "include/gltfio/materials/uberarchive.h")
+    tool_dir = output / "bin"
+    tool_dir.mkdir(parents=True, exist_ok=True)
+    for name in TOOLS:
+        matches = [path for path in build.rglob(name) if path.is_file() and path.parent.name == name]
+        if len(matches) != 1:
+            raise RuntimeError(f"Expected one {name} executable, found: {matches}")
+        shutil.copy2(matches[0], tool_dir / name)
     shutil.copy2(glx_header, output / "include/backend/platforms/PlatformGLX.h")
     # PlatformGLX's public header includes BlueGL, which the release SDK omits.
     shutil.copytree(source / "libs/bluegl/include/bluegl", output / "include/bluegl", dirs_exist_ok=True)
     (output / "build-info.json").write_text(json.dumps({"version": VERSION, "source_sha256": SOURCE_SHA256,
-        "headers_sha256": SDK_SHA256, "backend": "OpenGL/GLX", "cxx_runtime": "libstdc++",
-        "patches": ["nonblocking-expired-fence-wait", "borrow-host-glx-display", "close-display-after-driver-thread"],
+        "headers_sha256": SDK_SHA256, "backend": "OpenGL/GLX", "cxx_runtime": "libstdc++", "tools": TOOLS,
+        "patches": ["nonblocking-expired-fence-wait", "untimed-unbounded-fence-wait","borrow-host-glx-display", "close-display-after-driver-thread"],
         "compiler": subprocess.check_output(["clang++", "--version"], text=True)}, indent=2))
 
 

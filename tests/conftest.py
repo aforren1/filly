@@ -1,4 +1,5 @@
 import json
+import os
 import struct
 import sys
 
@@ -39,6 +40,11 @@ def _unregister_pyglet_window_classes():
 
 
 _unregister_pyglet_window_classes()
+
+# Importing pyglet.gl opens an X display, so these modules cannot be collected without one.
+# Offscreen tests still run on headless EGL.
+if sys.platform == "linux" and not os.environ.get("DISPLAY"):
+    collect_ignore = ["test_gl_hosts.py", "test_host_texture.py"]
 
 
 @pytest.fixture

@@ -1,0 +1,156 @@
+// filly's material for KHR_materials_diffuse_transmission. materials.cmake writes one file per
+// blending mode. The runtime material path builds the same material in native/materials.cpp.
+// Surface shading is custom: light from behind the sheet passes through it, tinted and
+// attenuated by the volume. An irradiance cubemap supplies the environment behind the sheet.
+material {
+    name : @NAME@,
+    requires : [ uv0, uv1, color ],
+    shadingModel : lit,
+    blending : @BLENDING@,
+    postLightingBlending : opaque,
+    flipUV : false,
+    customSurfaceShading : true,
+    doubleSided : true,
+    variables : [ volumeScale ],
+    parameters : [
+        { type : float, name : volumeThicknessFactor },
+        { type : float, name : dispersion },
+        { type : float, name : metallicFactor },
+        { type : float, name : roughnessFactor },
+        { type : float, name : normalScale },
+        { type : float, name : aoStrength },
+        { type : float, name : reflectance },
+        { type : float, name : diffuseFactor },
+        { type : float, name : backlightIntensity },
+        { type : float, name : emissiveStrength },
+        { type : float3, name : volumeAbsorption },
+        { type : float3, name : emissiveFactor },
+        { type : float3, name : diffuseColor },
+        { type : float4, name : baseColorFactor },
+        { type : int, name : volumeThicknessIndex },
+        { type : int, name : baseColorIndex },
+        { type : int, name : normalIndex },
+        { type : int, name : metallicRoughnessIndex },
+        { type : int, name : aoIndex },
+        { type : int, name : emissiveIndex },
+        { type : int, name : diffuseIndex },
+        { type : int, name : diffuseColorIndex },
+        { type : mat3, name : volumeThicknessUvMatrix },
+        { type : mat3, name : baseColorUvMatrix },
+        { type : mat3, name : normalUvMatrix },
+        { type : mat3, name : metallicRoughnessUvMatrix },
+        { type : mat3, name : occlusionUvMatrix },
+        { type : mat3, name : emissiveUvMatrix },
+        { type : mat3, name : diffuseUvMatrix },
+        { type : mat3, name : diffuseColorUvMatrix },
+        { type : mat3, name : backlightRotation },
+        { type : sampler2d, name : volumeThicknessMap },
+        { type : sampler2d, name : baseColorMap },
+        { type : sampler2d, name : normalMap },
+        { type : sampler2d, name : metallicRoughnessMap },
+        { type : sampler2d, name : occlusionMap },
+        { type : sampler2d, name : emissiveMap },
+        { type : sampler2d, name : diffuseMap },
+        { type : sampler2d, name : diffuseColorMap },
+        { type : samplerCubemap, name : backlightIrradiance }
+    ],
+}
+vertex {
+    void materialVertex(inout MaterialVertexInputs material) {
+        highp mat4 world = getWorldFromModelMatrix();
+        material.volumeScale = vec4((length(world[0].xyz)+length(world[1].xyz)+length(world[2].xyz))/3.0);
+    }
+}
+fragment {
+// Filament's program cache key is a hash of the user shader code only, without blending or
+// other material properties, so each package's code names its entry and blending mode.
+#define FILLY_ENTRY_@NAME@
+
+vec2 uvAt(int index, mat3 transform) {
+    // gltfio supplies transposed matrices for its standard material parameters.
+    return (vec3(index == 1 ? getUV1() : getUV0(), 1.0) * transform).xy;
+}
+vec2 diffuseUvAt(int index, mat3 transform) {
+    return (transform * vec3(index == 1 ? getUV1() : getUV0(), 1.0)).xy;
+}
+float diffuseAmount() {
+    float factor = materialParams.diffuseFactor;
+    if (materialParams.diffuseIndex >= 0)
+        factor *= texture(materialParams_diffuseMap, diffuseUvAt(materialParams.diffuseIndex, materialParams.diffuseUvMatrix)).a;
+    return factor;
+}
+vec3 diffuseTint() {
+    vec3 color = materialParams.diffuseColor;
+    if (materialParams.diffuseColorIndex >= 0)
+        color *= texture(materialParams_diffuseColorMap, diffuseUvAt(materialParams.diffuseColorIndex, materialParams.diffuseColorUvMatrix)).rgb;
+    return color;
+}
+float volumeThickness() {
+    float thickness = materialParams.volumeThicknessFactor * variable_volumeScale.x;
+    if (materialParams.volumeThicknessIndex >= 0)
+        thickness *= texture(materialParams_volumeThicknessMap, uvAt(materialParams.volumeThicknessIndex, materialParams.volumeThicknessUvMatrix)).g;
+    return thickness;
+}
+vec3 transmittance() {
+    return exp(-materialParams.volumeAbsorption * volumeThickness());
+}
+void material(inout MaterialInputs material) {
+    if (materialParams.normalIndex >= 0) {
+        material.normal = texture(materialParams_normalMap, uvAt(materialParams.normalIndex, materialParams.normalUvMatrix)).xyz * 2.0 - 1.0;
+        material.normal.xy *= materialParams.normalScale;
+    }
+    prepareMaterial(material);
+    material.baseColor = materialParams.baseColorFactor * getColor();
+    if (materialParams.baseColorIndex >= 0)
+        material.baseColor *= texture(materialParams_baseColorMap, uvAt(materialParams.baseColorIndex, materialParams.baseColorUvMatrix));
+    material.metallic = materialParams.metallicFactor;
+    material.roughness = materialParams.roughnessFactor;
+    if (materialParams.metallicRoughnessIndex >= 0) {
+        vec4 mr = texture(materialParams_metallicRoughnessMap, uvAt(materialParams.metallicRoughnessIndex, materialParams.metallicRoughnessUvMatrix));
+        material.metallic *= mr.b; material.roughness *= mr.g;
+    }
+    material.reflectance = materialParams.reflectance;
+    material.specularFactor = 1.0;
+    material.specularColorFactor = vec3(1.0);
+    // The reflected diffuse lobe loses the energy transmitted through the sheet.
+    material.baseColor.rgb *= 1.0 - diffuseAmount() * (1.0 - material.metallic);
+    if (materialParams.aoIndex >= 0)
+        material.ambientOcclusion = mix(1.0, texture(materialParams_occlusionMap, uvAt(materialParams.aoIndex, materialParams.occlusionUvMatrix)).r, materialParams.aoStrength);
+    // w = 0: glTF emission is not scaled by the camera exposure, as in the other lit materials.
+    material.emissive = vec4(materialParams.emissiveFactor * materialParams.emissiveStrength, 0.0);
+    if (materialParams.emissiveIndex >= 0)
+        material.emissive.rgb *= texture(materialParams_emissiveMap, uvAt(materialParams.emissiveIndex, materialParams.emissiveUvMatrix)).rgb;
+    if (materialParams.backlightIntensity > 0.0) {
+        vec3 n = materialParams.backlightRotation * -getWorldNormalVector();
+        material.emissive.rgb += texture(materialParams_backlightIrradiance, n).rgb * materialParams.backlightIntensity
+            * diffuseAmount() * diffuseTint() * transmittance() * (1.0 - material.metallic)
+            * ((1.0 - 0.16 * material.reflectance * material.reflectance) / 3.14159265)
+            // Light from the environment is exposed like Filament's IBL; emissive.w is 0.
+            * getExposure();
+    }
+}
+vec3 surfaceShading(const MaterialInputs inputs, const ShadingData shading, const LightData light) {
+    vec3 n = getWorldNormalVector();
+    vec3 v = getWorldViewVector();
+    float nl = dot(n, light.l);
+    float nv = max(abs(dot(n, v)), 0.0001);
+    vec3 result;
+    if (nl > 0.0) {
+        vec3 h = normalize(v + light.l);
+        float nh = max(dot(n, h), 0.0);
+        float vh = max(dot(v, h), 0.0);
+        float a2 = max(shading.roughness * shading.roughness, 0.00001);
+        float d = a2 / (3.14159265 * pow(nh * nh * (a2 - 1.0) + 1.0, 2.0));
+        float gv = nl * sqrt(nv * nv * (1.0-a2) + a2);
+        float gl = nv * sqrt(nl * nl * (1.0-a2) + a2);
+        vec3 fresnel = shading.f0 + (1.0 - shading.f0) * pow(1.0-vh, 5.0);
+        vec3 specular = d * 0.5 / max(gv+gl, 0.0001) * fresnel;
+        result = (shading.diffuseColor * (1.0-fresnel) / 3.14159265 + specular) * nl;
+    } else {
+        vec3 fresnel = shading.f0 + (1.0-shading.f0) * pow(1.0-nv, 5.0);
+        result = diffuseAmount() * diffuseTint() * transmittance() * (1.0-inputs.metallic) * (1.0-fresnel) * (-nl / 3.14159265);
+    }
+    return result * light.colorIntensity.rgb * light.colorIntensity.w * light.attenuation * light.visibility;
+}
+
+}

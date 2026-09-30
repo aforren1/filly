@@ -1,0 +1,202 @@
+// filly's lit and refractive glTF materials. materials.cmake writes one file per archive entry
+// and blending mode from this template. Its #define lines select the lobes and inputs.
+// The shader code follows native/surface_material.cpp, which the runtime material path uses, so
+// that both paths compute the same values for the same glTF material.
+//
+// Texture roles:
+// - The five core roles use gltfio's sampler names, so gltfio binds their glTF textures.
+//   xxxIndex is the UV set, or -1 for no texture.
+// - Extension roles share the generic samplers ext0 to extN. xxxSlot selects one of them, or -1
+//   for no texture; xxxIndex is the UV set. A uniform branch selects the sampler, which is valid
+//   in GLSL ES 3.00 and keeps the entry within the sampler budget of feature level 1.
+// - UV matrices are transposed (uv * M) as gltfio sets them, except for anisotropy and
+//   iridescence, which keep filly's column order (M * uv) as in the runtime path.
+material {
+    name : @NAME@,
+    requires : [ uv0, uv1, color, tangents ],
+    shadingModel : lit,
+    blending : @BLENDING@,
+    // An explicit value gives instances the double-sided capability.
+    doubleSided : false,
+    transparency : default,
+    flipUV : false,
+    specularAmbientOcclusion : simple,
+    specularAntiAliasing : true,
+    clearCoatIorChange : false,
+    // filly never enables screen-space reflections. Without that sampler, non-refractive entries
+    // have a ninth user sampler.
+    reflections : default,
+@OPTICS@
+    parameters : [
+@PARAMETERS@
+    ],
+}
+
+@VERTEX_BLOCK@
+
+fragment {
+// Filament's program cache key is a hash of the user shader code only, without blending or
+// other material properties, so each package's code names its entry and blending mode.
+#define FILLY_ENTRY_@NAME@
+@DEFINES@
+@REFRACTION_PREFIX@
+    highp vec2 fillyUv(int index, highp mat3 transform) {
+        highp vec2 uv = index == 1 ? getUV1() : getUV0();
+        return (vec3(uv, 1.0) * transform).xy;
+    }
+    highp vec2 fillyColumnUv(int index, highp mat3 transform) {
+        highp vec2 uv = index == 1 ? getUV1() : getUV0();
+        return (transform * vec3(uv, 1.0)).xy;
+    }
+#if FILLY_EXT_SLOTS > 0
+    vec4 fillyExt(int slot, highp vec2 uv) {
+#if FILLY_EXT_SLOTS > 3
+        if (slot == 3) return texture(materialParams_ext3, uv);
+#endif
+#if FILLY_EXT_SLOTS > 2
+        if (slot == 2) return texture(materialParams_ext2, uv);
+#endif
+        if (slot == 1) return texture(materialParams_ext1, uv);
+        return texture(materialParams_ext0, uv);
+    }
+#endif
+
+    void material(inout MaterialInputs material) {
+        if (materialParams.normalIndex > -1) {
+            highp vec2 uv = fillyUv(materialParams.normalIndex, materialParams.normalUvMatrix);
+            material.normal = texture(materialParams_normalMap, uv).xyz * 2.0 - 1.0;
+            material.normal.xy *= materialParams.normalScale;
+        }
+#if defined(FILLY_CLEARCOAT)
+        if (materialParams.clearCoatNormalSlot > -1) {
+            highp vec2 uv = fillyUv(materialParams.clearCoatNormalIndex, materialParams.clearCoatNormalUvMatrix);
+            material.clearCoatNormal = fillyExt(materialParams.clearCoatNormalSlot, uv).xyz * 2.0 - 1.0;
+            material.clearCoatNormal.xy *= materialParams.clearCoatNormalScale;
+        }
+#endif
+        prepareMaterial(material);
+
+        material.baseColor = materialParams.baseColorFactor;
+        if (materialParams.baseColorIndex > -1) {
+            highp vec2 uv = fillyUv(materialParams.baseColorIndex, materialParams.baseColorUvMatrix);
+            material.baseColor *= texture(materialParams_baseColorMap, uv);
+        }
+#if defined(BLEND_MODE_FADE)
+        material.baseColor.rgb *= material.baseColor.a;
+#endif
+        // Loaders supply white where the glTF primitive has no colors.
+        material.baseColor *= getColor();
+
+        material.roughness = materialParams.roughnessFactor;
+        material.metallic = materialParams.metallicFactor;
+        material.emissive = vec4(materialParams.emissiveStrength * materialParams.emissiveFactor.rgb, 0.0);
+        if (materialParams.metallicRoughnessIndex > -1) {
+            highp vec2 uv = fillyUv(materialParams.metallicRoughnessIndex, materialParams.metallicRoughnessUvMatrix);
+            vec4 mr = texture(materialParams_metallicRoughnessMap, uv);
+            material.roughness *= mr.g;
+            material.metallic *= mr.b;
+        }
+        if (materialParams.aoIndex > -1) {
+            highp vec2 uv = fillyUv(materialParams.aoIndex, materialParams.occlusionUvMatrix);
+            float occlusion = texture(materialParams_occlusionMap, uv).r;
+            material.ambientOcclusion = 1.0 + materialParams.aoStrength * (occlusion - 1.0);
+        }
+        if (materialParams.emissiveIndex > -1) {
+            highp vec2 uv = fillyUv(materialParams.emissiveIndex, materialParams.emissiveUvMatrix);
+            material.emissive.rgb *= texture(materialParams_emissiveMap, uv).rgb;
+        }
+#if defined(FILLY_TRANSMISSION)
+        material.transmission = materialParams.transmissionFactor;
+        if (materialParams.transmissionSlot > -1) {
+            highp vec2 uv = fillyUv(materialParams.transmissionIndex, materialParams.transmissionUvMatrix);
+            material.transmission *= fillyExt(materialParams.transmissionSlot, uv).r;
+        }
+#endif
+#if defined(FILLY_CLEARCOAT)
+        material.clearCoat = materialParams.clearCoatFactor;
+        material.clearCoatRoughness = materialParams.clearCoatRoughnessFactor;
+        if (materialParams.clearCoatSlot > -1) {
+            highp vec2 uv = fillyUv(materialParams.clearCoatIndex, materialParams.clearCoatUvMatrix);
+            material.clearCoat *= fillyExt(materialParams.clearCoatSlot, uv).r;
+        }
+        if (materialParams.clearCoatRoughnessSlot > -1) {
+            highp vec2 uv = fillyUv(materialParams.clearCoatRoughnessIndex, materialParams.clearCoatRoughnessUvMatrix);
+            material.clearCoatRoughness *= fillyExt(materialParams.clearCoatRoughnessSlot, uv).g;
+        }
+#endif
+#if defined(FILLY_SHEEN)
+        material.sheenColor = materialParams.sheenColorFactor;
+        material.sheenRoughness = materialParams.sheenRoughnessFactor;
+        if (materialParams.sheenColorSlot > -1) {
+            highp vec2 uv = fillyUv(materialParams.sheenColorIndex, materialParams.sheenColorUvMatrix);
+            material.sheenColor *= fillyExt(materialParams.sheenColorSlot, uv).rgb;
+        }
+        if (materialParams.sheenRoughnessSlot > -1) {
+            highp vec2 uv = fillyUv(materialParams.sheenRoughnessIndex, materialParams.sheenRoughnessUvMatrix);
+            material.sheenRoughness *= fillyExt(materialParams.sheenRoughnessSlot, uv).a;
+        }
+#endif
+#if defined(FILLY_VOLUME)
+        material.absorption = materialParams.volumeAbsorption;
+        // KHR_materials_volume scales thickness by the complete node transform.
+        material.thickness = materialParams.volumeThicknessFactor * variable_volumeScale.x;
+        if (materialParams.volumeThicknessSlot > -1) {
+            highp vec2 uv = fillyUv(materialParams.volumeThicknessIndex, materialParams.volumeThicknessUvMatrix);
+            material.thickness *= fillyExt(materialParams.volumeThicknessSlot, uv).g;
+        }
+#endif
+#if defined(FILLY_DISPERSION)
+        // Filament takes its four-sample refraction path for any material with dispersion.
+        material.dispersion = materialParams.dispersion;
+#endif
+        // With no KHR_materials_ior, the provider sets 1.5, which gives the default reflectance.
+        material.ior = materialParams.ior;
+#if defined(FILLY_SPECULAR)
+        // With these inputs, Filament's isotropic lobe uses the specular F90 of glTF (1 for
+        // specular 1) instead of its own F90 from F0, which is lower on dark metals and at low
+        // IOR. Only the entries for KHR_materials_specular and the anisotropic entries, whose
+        // lobe ignores F90, have them; see docs/explanation/material-precompilation.md.
+        material.specularFactor = materialParams.specularStrength;
+        material.specularColorFactor = materialParams.specularColorFactor;
+        if (materialParams.specularSlot > -1) {
+            highp vec2 uv = fillyUv(materialParams.specularIndex, materialParams.specularUvMatrix);
+            material.specularFactor *= fillyExt(materialParams.specularSlot, uv).a;
+        }
+        if (materialParams.specularColorSlot > -1) {
+            highp vec2 uv = fillyUv(materialParams.specularColorIndex, materialParams.specularColorUvMatrix);
+            material.specularColorFactor *= fillyExt(materialParams.specularColorSlot, uv).rgb;
+        }
+#endif
+#if defined(FILLY_ANISOTROPY)
+        float a = materialParams.anisotropyStrength;
+        vec2 direction = vec2(1.0, 0.0);
+        if (materialParams.anisotropySlot > -1) {
+            highp vec2 uv = fillyColumnUv(materialParams.anisotropyIndex, materialParams.anisotropyUvMatrix);
+            vec3 sampleValue = fillyExt(materialParams.anisotropySlot, uv).rgb;
+            direction = sampleValue.rg * 2.0 - 1.0;
+            direction = length(direction) > 0.00001 ? normalize(direction) : vec2(1.0, 0.0);
+            a *= sampleValue.b;
+        }
+        float c = cos(materialParams.anisotropyRotation), s = sin(materialParams.anisotropyRotation);
+        material.anisotropy = a;
+        material.anisotropyDirection = vec3(c * direction.x - s * direction.y, s * direction.x + c * direction.y, 0.0);
+#endif
+#if defined(FILLY_IRIDESCENCE)
+        material.iridescence = materialParams.iridescenceFactor;
+        if (materialParams.iridescenceSlot > -1) {
+            highp vec2 uv = fillyColumnUv(materialParams.iridescenceIndex, materialParams.iridescenceUvMatrix);
+            material.iridescence *= fillyExt(materialParams.iridescenceSlot, uv).r;
+        }
+        material.iridescenceIor = materialParams.iridescenceIor;
+        float thickness = 1.0;
+        if (materialParams.iridescenceThicknessSlot > -1) {
+            highp vec2 uv = fillyColumnUv(materialParams.iridescenceThicknessIndex, materialParams.iridescenceThicknessUvMatrix);
+            thickness = fillyExt(materialParams.iridescenceThicknessSlot, uv).g;
+        }
+        material.iridescenceThickness = mix(materialParams.iridescenceThicknessMinimum,
+                materialParams.iridescenceThicknessMaximum, thickness);
+#endif
+@REFRACTION_MATERIAL@
+    }
+@REFRACTION_SUFFIX@
+}

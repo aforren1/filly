@@ -16,12 +16,12 @@ import filly
 from filly._memory import MEMORY_COLUMNS, MemorySampler
 from filly._stress import FRAME_COLUMNS, memory_trend, summarize_frames
 from filly.benchmark import positive_int
-from screenshot import suzanne_glb
+from screenshot import HORSE
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("assets", nargs="*", type=Path, help="Alternate these local glTF/GLB assets; default: Suzanne")
+    parser.add_argument("assets", nargs="*", type=Path, help="Alternate these local glTF/GLB assets; default: the wooden horse")
     parser.add_argument("--cycles", type=positive_int, default=30)
     parser.add_argument("--frames", type=positive_int, default=600, help="Measured frames per cycle")
     parser.add_argument("--warmup", type=positive_int, default=60, help="Unmeasured frames after each load")
@@ -42,15 +42,14 @@ def main():
     for path in args.assets:
         if not path.is_file():
             parser.error(f"Asset not found: {path}")
-    # Fetch the default asset before opening the window or measuring anything.
-    sources = [p.resolve() for p in args.assets] or [suzanne_glb()]
+    sources = [p.resolve() for p in args.assets] or [HORSE]
     output = args.output or Path(".deps") / datetime.now(timezone.utc).strftime("stress-%Y%m%dT%H%M%S%fZ")
     if output.exists():
         parser.error(f"Report directory already exists: {output}")
     output.mkdir(parents=True)
     report = {"schema_version": 1, "started_utc": datetime.now(timezone.utc).isoformat(),
               "settings": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items() if key != "assets"},
-              "assets": [str(p) for p in args.assets] or ["Suzanne"],
+              "assets": [str(p) for p in sources],
               "environment": {"python": platform.python_version(), "platform": platform.platform(),
                               **{name: version(name) for name in ("filly", "psychopy-lib", "pyglet", "numpy")}},
               "cycles": [], "aborted": False, "error": None}
@@ -68,7 +67,7 @@ def run(args, sources, output, report):
     from psychopy import event, visual
     from pyglet import gl
     from filly.integrations.psychopy import SharedTarget, create_renderer
-    from psychopy_shared import studio_environment
+    from screenshot import studio_environment
 
     win = renderer = target = model = None
     sampler = MemorySampler()
@@ -120,6 +119,8 @@ def run(args, sources, output, report):
             scene.antialiasing = "fxaa"
             scene.transparent = args.transparent
             camera = scene.create_camera()
+            # frame() sets the height and the clipping planes for each asset.
+            camera.set_orthographic(height=1, near=1, far=2)
             scene.camera = camera
             light = scene.add_directional_light(direction=(-1, -1, -2), intensity=100000)
             scene.set_environment(studio_environment(), intensity=30000)
@@ -133,17 +134,14 @@ def run(args, sources, output, report):
                 source = sources[cycle % len(sources)]
                 load_started = perf_counter()
                 model = scene.load(source)
-                bounds = np.asarray(model.bounds)
-                center = bounds.mean(axis=0)
-                radius = float(np.linalg.norm(bounds[1]-bounds[0])/2)
-                if not np.isfinite(radius) or radius <= 0:
-                    raise ValueError("The asset must have finite, nonzero geometry bounds")
-                half_height = radius * 1.15 * max(1, args.height / args.width)
-                half_width = half_height * args.width / args.height
-                camera.set_orthographic(left=-half_width, right=half_width, bottom=-half_height, top=half_height,
-                                        near=max(radius*0.001, 0.0001), far=radius*10)
-                camera.position = (0, 0, radius*3)
-                camera.look_at((0, 0, 0))
+                center = np.asarray(model.bounds).mean(axis=0)
+                # The frame loop keeps the center at the origin while the model spins; frame it
+                # there. The bounding sphere spans 87% of the narrower axis at every rotation.
+                model.position = -center
+                try:
+                    camera.frame(model, fill=1 / 1.15, direction=(0, 0, -1), aspect=args.width / args.height)
+                except ValueError as error:
+                    raise ValueError("The asset must have finite, nonzero geometry bounds") from error
                 authored = bool(model.lights)
                 light.intensity = 0 if authored else 100000
                 camera.exposure = 0 if authored else 15
@@ -172,7 +170,7 @@ def run(args, sources, output, report):
                         break
                     begin = perf_counter()
                     seconds = (frame+args.warmup)/refresh_hz
-                    model.rotation_euler_deg = (8, -24+seconds*30, 0) if not args.assets else (0, 0, 0)
+                    model.rotation_euler_deg = (0, seconds*30, 0) if not args.assets else (0, 0, 0)
                     model.position = -model.transform[:3, :3] @ center
                     if clips:
                         model.apply_animation(0, seconds)
@@ -202,7 +200,7 @@ def run(args, sources, output, report):
                 closed = sample(cycle, "closed")
                 clean = all(closed[key] == baseline[key] for key in ("live_models", "live_lights", "material_copies"))
                 result = summarize_frames(rows[:count], refresh_hz, observed_hz)
-                result.update(cycle=cycle, asset=str(source) if isinstance(source, Path) else "Suzanne",
+                result.update(cycle=cycle, asset=str(source),
                               load_ms=load_ms, close_ms=close_ms, resources_restored=clean)
                 report["cycles"].append(result)
                 writer.writerows(rows[:count]); frame_file.flush()

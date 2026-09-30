@@ -13,6 +13,11 @@ import pytest
 import filly
 # Filament 1.77.1 lit materials have 8 texture samplers; see gltf_prepare.cpp.
 MAX_LIT_TEXTURES = 8
+# The archive material path has no per-material sampler rules: extension textures share the
+# generic samplers of an archive entry. See docs/explanation/material-precompilation.md.
+ARCHIVE = filly._native._materials == "archive"
+runtime_only = pytest.mark.skipif(ARCHIVE, reason="texture-count rules of the runtime material path")
+archive_only = pytest.mark.skipif(not ARCHIVE, reason="extension texture slots of the archive material path")
 
 pytestmark = pytest.mark.gpu
 
@@ -26,28 +31,36 @@ SLOTS = [
 ]
 
 
-def textured_asset(count, extensions=None, name="many"):
-    """A lit triangle whose material samples one PNG in `count` texture slots."""
+def textured_asset(count, extensions=None, name="many", slots=None, distinct=False):
+    """A lit triangle whose material samples one PNG in `count` texture slots, or a separate
+    PNG in each slot with `distinct`."""
     def chunk(kind, data):
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
-    image = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
-             + chunk(b"IDAT", zlib.compress(b"\x00\xc0\x80\x40\xff")) + chunk(b"IEND", b""))
+    def png(value):
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(bytes([0, 0xc0, 0x80, value, 0xff]))) + chunk(b"IEND", b""))
+    slots = SLOTS[:count] if slots is None else slots
+    images = [png(0x40 + i) for i in range(len(slots) if distinct else 1)]
     geometry = struct.pack("<9f", -0.6, -0.4, 0, 0.6, -0.4, 0, 0, 0.8, 0) + struct.pack("<9f", *(0, 0, 1) * 3)
     geometry += struct.pack("<6f", 0, 0, 1, 0, 0.5, 1)
-    binary = geometry + image + b"\0" * (-len(image) % 4)
+    binary = geometry
+    views = [{"buffer": 0, "byteOffset": 0, "byteLength": 36}, {"buffer": 0, "byteOffset": 36, "byteLength": 36},
+             {"buffer": 0, "byteOffset": 72, "byteLength": 24}]
+    for image in images:
+        views.append({"buffer": 0, "byteOffset": len(binary), "byteLength": len(image)})
+        binary += image + b"\0" * (-len(image) % 4)
     material = {"name": name, "pbrMetallicRoughness": {"metallicFactor": 0, "roughnessFactor": 0.5},
                 "extensions": {key: dict(value) for key, value in (extensions or {}).items()}}
-    for parent, key in SLOTS[:count]:
+    for i, (parent, key) in enumerate(slots):
         node = material if parent is None else (material["pbrMetallicRoughness"] if parent == "pbrMetallicRoughness"
                                                 else material["extensions"].setdefault(parent, {}))
-        node[key] = {"index": 0}
+        node[key] = {"index": i if distinct else 0}
     doc = {"asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
            "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2}, "material": 0}]}],
-           "materials": [material], "textures": [{"source": 0}],
-           "images": [{"bufferView": 3, "mimeType": "image/png"}], "buffers": [{"byteLength": len(binary)}],
-           "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36}, {"buffer": 0, "byteOffset": 36, "byteLength": 36},
-                           {"buffer": 0, "byteOffset": 72, "byteLength": 24},
-                           {"buffer": 0, "byteOffset": 96, "byteLength": len(image)}],
+           "materials": [material], "textures": [{"source": i} for i in range(len(images))],
+           "images": [{"bufferView": 3 + i, "mimeType": "image/png"} for i in range(len(images))],
+           "buffers": [{"byteLength": len(binary)}],
+           "bufferViews": views,
            "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
                           "min": [-0.6, -0.4, 0], "max": [0.6, 0.8, 0]},
                          {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"},
@@ -92,7 +105,7 @@ def render_in_subprocess(asset, mode, strict=False):
     return result.stdout.decode().strip()
 
 
-@pytest.mark.parametrize("count", [MAX_LIT_TEXTURES, MAX_LIT_TEXTURES + 1])
+@pytest.mark.parametrize("count", [MAX_LIT_TEXTURES, pytest.param(MAX_LIT_TEXTURES + 1, marks=runtime_only)])
 def test_compiled_texture_limit_is_measured(count):
     output = render_in_subprocess(textured_asset(count), "compiled")
     if count <= MAX_LIT_TEXTURES:
@@ -101,6 +114,7 @@ def test_compiled_texture_limit_is_measured(count):
         assert "'many' uses 9 textures" in output and "precompiled_shaders=True" in output
 
 
+@runtime_only
 def test_preflight_names_material_and_suggests_precompiled_shaders():
     with filly.Renderer() as renderer:
         with pytest.raises(filly.AssetError, match=r"Material 'rough coat' uses 9 textures.*precompiled_shaders=True"):
@@ -121,6 +135,7 @@ def test_precompiled_shaders_renders_materials_over_the_limit(count):
     {"KHR_materials_iridescence": {"iridescenceFactor": 1}},
 ])
 @pytest.mark.parametrize("mode", ["compiled", "precompiled"])
+@runtime_only
 def test_generated_materials_report_the_limit(extensions, mode):
     iridescent = "KHR_materials_iridescence" in extensions
     allowed = MAX_LIT_TEXTURES - 3 if iridescent else MAX_LIT_TEXTURES
@@ -153,3 +168,40 @@ def test_precompiled_shaders_compiles_archive_gaps(extensions):
             images[mode] = target.read()
     assert images["compiled"][16, 16, :3].max() > 20
     np.testing.assert_allclose(images["precompiled"], images["compiled"], atol=1)
+
+CLEARCOAT_SHEEN = [(None, "normalTexture"),
+                   ("KHR_materials_clearcoat", "clearcoatTexture"), ("KHR_materials_clearcoat", "clearcoatRoughnessTexture"),
+                   ("KHR_materials_clearcoat", "clearcoatNormalTexture"),
+                   ("KHR_materials_sheen", "sheenColorTexture"), ("KHR_materials_sheen", "sheenRoughnessTexture")]
+
+
+@archive_only
+@pytest.mark.parametrize("extensions", [
+    {"KHR_materials_iridescence": {"iridescenceFactor": 1}},
+    {"KHR_materials_transmission": {"transmissionFactor": 1}},
+])
+def test_archive_roles_that_share_a_texture_share_a_sampler(extensions):
+    """11 texture slots of one image need 2 extension samplers (linear and sRGB)."""
+    assert render_in_subprocess(textured_asset(11, extensions), "compiled", strict=True) == "rendered"
+
+
+@archive_only
+@pytest.mark.parametrize("extensions, capacity", [
+    ({"KHR_materials_clearcoat": {"clearcoatFactor": 1}, "KHR_materials_sheen": {"sheenColorFactor": [1, 1, 1]}}, 4),
+    ({"KHR_materials_clearcoat": {"clearcoatFactor": 1}, "KHR_materials_sheen": {"sheenColorFactor": [1, 1, 1]},
+      "KHR_materials_transmission": {"transmissionFactor": 1}}, 3),
+])
+def test_archive_drops_the_least_important_extension_textures(extensions, capacity):
+    """Five distinct extension textures: sheen roughness and clearcoat normal go first."""
+    asset = textured_asset(0, extensions, name="coat", slots=CLEARCOAT_SHEEN, distinct=True)
+    dropped = "clearcoatNormalTexture" if capacity == 4 else "sheenRoughnessTexture, clearcoatNormalTexture"
+    message = f"Material 'coat' has 5 extension textures, but its shader has {capacity} extension texture samplers; " \
+              f"it renders without its {dropped}"
+    with filly.Renderer() as renderer:
+        scene = renderer.create_scene()
+        scene.refraction = True
+        with pytest.warns(filly.AssetCompatibilityWarning, match=message):
+            scene.load(asset)
+        with pytest.raises(filly.AssetError, match="renders without its"):
+            scene.load(asset, strict=True)
+    assert render_in_subprocess(asset, "compiled") == "rendered"

@@ -29,14 +29,7 @@ def main():
         scene.antialiasing = "fxaa"
         scene.tone_mapping = "aces_legacy"
         model = scene.load(args.asset)
-        bounds = np.asarray(model.bounds)
-        center = bounds.mean(axis=0)
-        radius = np.linalg.norm(bounds[1] - bounds[0]) / 2
-        if not np.isfinite(radius) or radius <= 0:
-            parser.error("Asset must have finite nonzero bounds")
         camera = scene.create_camera()
-        camera.position = center + (0, 0, radius * 3)
-        camera.look_at(center)
         camera.exposure = 15
         scene.camera = camera
         scene.add_directional_light(direction=(-1, -1, -2), intensity=100000)
@@ -49,12 +42,19 @@ def main():
                   "warmup": args.warmup, "runs": {}}
         samples = np.empty((args.frames, 2))
         for projection in ("orthographic", "perspective"):
+            # The perspective view sees the bounding sphere from 3 radii; the orthographic view
+            # is as high as the perspective view at the sphere's center.
+            tan_half = np.tan(np.deg2rad(45 / 2))
             if projection == "orthographic":
-                half = radius * 3 * np.tan(np.deg2rad(45 / 2))
-                camera.set_orthographic(left=-half, right=half, bottom=-half, top=half,
-                                        near=max(radius * 0.001, 1e-6), far=radius * 10)
+                camera.set_orthographic(height=1, near=1, far=2)
+                fill = 1 / (3 * tan_half)
             else:
-                camera.set_perspective(fov_y=45, aspect=1, near=max(radius * 0.001, 1e-6), far=radius * 10)
+                camera.set_perspective(fov_y=45, aspect=1, near=1, far=2)
+                fill = np.tan(np.arcsin(1 / 3)) / tan_half
+            try:
+                camera.frame(model, fill=fill, direction=(0, 0, -1), aspect=1)
+            except ValueError:
+                parser.error("Asset must have finite nonzero bounds")
             for _ in range(args.warmup):
                 renderer.render(scene, target)
             renderer.finish()

@@ -43,7 +43,7 @@ def square_columns(image, row=HEIGHT // 2):
     return np.flatnonzero(image[row, :, 0] == 255)
 
 
-@pytest.mark.parametrize("path", ["direct", "grading"])
+@pytest.mark.parametrize("path", ["direct", "exact"])
 def test_two_eyes_land_in_their_halves(renderer, path):
     scene, (left, right) = stereo_scene(renderer, path)
     target = renderer.create_render_target(width=WIDTH, height=HEIGHT)
@@ -59,7 +59,7 @@ def test_two_eyes_land_in_their_halves(renderer, path):
     target.close()
 
 
-@pytest.mark.parametrize("path", ["direct", "grading"])
+@pytest.mark.parametrize("path", ["direct", "exact"])
 def test_clear_false_keeps_the_rest_and_fills_the_viewport(renderer, path):
     scene, (left, right) = stereo_scene(renderer, path)
     target = renderer.create_render_target(width=WIDTH, height=HEIGHT)

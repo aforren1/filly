@@ -182,3 +182,31 @@ def test_scene_close_releases_contents(renderer, scene, triangle_glb):
         third.camera
     renderer.render(other, target)
     assert target.read()[8, 8, 0] == 255 and not kept.closed
+
+
+def test_many_renderers_close_cleanly():
+    """Renderer teardown must not leave callbacks that outlive the material provider. The removed
+    material warmup had one: Filament ran its compile callback at engine shutdown, after the
+    provider was freed (heap-use-after-free under ASan; crashes in about 1 of 5 runs of 42
+    renderers on Windows)."""
+    import subprocess
+    import sys
+    import textwrap
+    script = textwrap.dedent("""
+        import filly
+        filly.set_log_level("off")
+        shape = filly.shapes.uv_sphere(0.5, segments=16, rings=8)
+        for _ in range(40):
+            with filly.Renderer() as renderer:
+                scene = renderer.create_scene()
+                camera = scene.create_camera()
+                camera.position = (0, 0, 3)
+                camera.look_at((0, 0, 0))
+                scene.camera = camera
+                scene.create_mesh(**shape, base_color=(0.5, 0.5, 0.5, 1))
+                target = renderer.create_render_target(width=8, height=8)
+                renderer.render(scene, target)
+        print("ok")
+    """)
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=300)
+    assert result.returncode == 0 and result.stdout.decode().strip() == "ok", result.stderr.decode(errors="replace")[-400:]

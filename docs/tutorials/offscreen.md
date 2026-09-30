@@ -1,6 +1,6 @@
 # Render an image
 
-First, [build the package](../how-to/build.md). Select a small GLB with its geometry near the origin.
+First, [build the package](../how-to/build.md). Select a GLB file.
 
 ```python
 import numpy as np
@@ -11,15 +11,14 @@ with filly.Renderer() as renderer:
     scene.refraction = True
     scene.antialiasing = "fxaa"
     camera = scene.create_camera()
-    # The width follows the aspect ratio of the render target.
-    camera.set_orthographic(height=6, near=0.01, far=100)
-    camera.position = (0, 0, 10)
-    camera.look_at((0, 0, 0))
+    # The width follows the aspect ratio of the render target. frame() sets the height.
+    camera.set_orthographic(height=1, near=1, far=2)
     scene.camera = camera
     scene.add_directional_light(direction=(-1, -1, -1), intensity=50000)
 
     model = scene.load("stimulus.glb")
-    model.position = (0, 0, 0)
+    # Look along -Z at the model's center; its bounding sphere spans 80% of the image.
+    camera.frame(model, fill=0.8, direction=(0, 0, -1), aspect=1)
     target = renderer.create_render_target(width=1024, height=1024)
     renderer.render(scene, target)
     image = target.read()
@@ -63,3 +62,7 @@ model.transform = np.array([
 
 Run this code while the renderer is open. Matrix getters return copies.
 Assign the matrix back to the property after changing it.
+
+`camera.frame()` places the camera once, for the model's transform at that time. After you move
+or rotate the model, call it again, or rotate the model about its center as
+`examples/screenshot.py` does. See [framing](../reference/api.md#framing).

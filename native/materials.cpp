@@ -79,14 +79,17 @@ void material(inout MaterialInputs material) {
     material.baseColor.rgb *= 1.0 - diffuseAmount() * (1.0 - material.metallic);
     if (materialParams.aoIndex >= 0)
         material.ambientOcclusion = mix(1.0, texture(materialParams_occlusionMap, uvAt(materialParams.aoIndex, materialParams.occlusionUvMatrix)).r, materialParams.aoStrength);
-    material.emissive.rgb = materialParams.emissiveFactor * materialParams.emissiveStrength;
+    // w = 0: glTF emission is not scaled by the camera exposure, as in the other lit materials.
+    material.emissive = vec4(materialParams.emissiveFactor * materialParams.emissiveStrength, 0.0);
     if (materialParams.emissiveIndex >= 0)
         material.emissive.rgb *= texture(materialParams_emissiveMap, uvAt(materialParams.emissiveIndex, materialParams.emissiveUvMatrix)).rgb;
     if (materialParams.backlightIntensity > 0.0) {
         vec3 n = materialParams.backlightRotation * -getWorldNormalVector();
         material.emissive.rgb += texture(materialParams_backlightIrradiance, n).rgb * materialParams.backlightIntensity
             * diffuseAmount() * diffuseTint() * transmittance() * (1.0 - material.metallic)
-            * ((1.0 - 0.16 * material.reflectance * material.reflectance) / 3.14159265);
+            * ((1.0 - 0.16 * material.reflectance * material.reflectance) / 3.14159265)
+            // Light from the environment is exposed like Filament's IBL; emissive.w is 0.
+            * getExposure();
     }
 }
 vec3 surfaceShading(const MaterialInputs inputs, const ShadingData shading, const LightData light) {
@@ -131,8 +134,24 @@ public:
         if (!filament::uberz::convertOffsetsToPointers(archive_, size_t(length)))
             throw AssetError("Invalid material archive");
     }
-    // Mirrors UbershaderProvider::getMaterial() and ArchiveCache::getMaterial() in Filament 1.77.1.
+    // Whether the archive has a material for this key that draws it as the key describes. The
+    // first matching spec decides. A spec with transmission or volume would draw a key without
+    // them as a refractive object in the extra refraction pass; with the 1.77.1 archive order,
+    // specular-only materials match the transmission spec first.
     bool supports(const g::MaterialKey& key) const {
+        const auto* spec = match(key);
+        if (!spec) return false;
+        if (key.hasTransmission || key.hasVolume) return true;
+        for (uint16_t j = 0; j < spec->flagsCount; ++j) {
+            const auto& flag = spec->flags[j];
+            if ((!std::strcmp(flag.name, "Transmission") || !std::strcmp(flag.name, "Volume"))
+                    && flag.value != filament::uberz::ArchiveFeature::UNSUPPORTED) return false;
+        }
+        return true;
+    }
+private:
+    // Mirrors UbershaderProvider::getMaterial() and ArchiveCache::getMaterial() in Filament 1.77.1.
+    const filament::uberz::ArchiveSpec* match(const g::MaterialKey& key) const {
         using namespace filament::uberz;
         const auto shading = key.unlit ? f::Shading::UNLIT
             : key.useSpecularGlossiness ? f::Shading::SPECULAR_GLOSSINESS : f::Shading::LIT;
@@ -175,11 +194,10 @@ public:
                     [&](const auto& item) { return !std::strcmp(item.first, spec.flags[j].name); });
                 suitable = match != std::end(required) && match->second;
             }
-            if (suitable) return true;
+            if (suitable) return &spec;
         }
-        return false;
+        return nullptr;
     }
-private:
     std::vector<uint64_t> storage_;
     filament::uberz::ReadableArchive* archive_ = nullptr;
 };
@@ -247,7 +265,7 @@ public:
     g::MaterialProvider* delegate;
     // The asset being created or cloned; null otherwise.
     const PreparedAsset* asset = nullptr;
-    struct SurfaceCache { g::MaterialKey key; g::UvMap uv; bool extended; f::Material* material; };
+    struct SurfaceCache { g::MaterialKey key; g::UvMap uv; unsigned lobes; f::Material* material; };
     std::vector<SurfaceCache> surface_cache;
     std::vector<f::Texture*> textures;
     std::vector<MaterialBinding> bindings;
@@ -313,19 +331,19 @@ public:
         if (extended()) extend_uvmap(uv);
         return uv;
     }
-    f::Material* generated_material(g::MaterialKey* config, g::UvMap* uvmap, const char* label, bool surface) {
+    f::Material* generated_material(g::MaterialKey* config, g::UvMap* uvmap, const char* label, unsigned lobes) {
         for (const auto& cached : surface_cache)
             // Filament 1.77.1's equality operator omits the dispersion bit.
             if (cached.key == *config && cached.key.hasDispersion == config->hasDispersion
-                    && cached.uv == *uvmap && cached.extended == surface) return cached.material;
-        auto* material = create_surface_material(engine, *config, *uvmap, label, surface);
-        surface_cache.push_back({*config, *uvmap, surface, material});
+                    && cached.uv == *uvmap && cached.lobes == lobes) return cached.material;
+        auto* material = create_surface_material(engine, *config, *uvmap, label, lobes);
+        surface_cache.push_back({*config, *uvmap, lobes, material});
         return material;
     }
     f::Material* standard_material(g::MaterialKey* config, g::UvMap* uvmap, const char* label) {
         if (generated(*config, label)) {
             g::constrainMaterial(config, uvmap);
-            return generated_material(config, uvmap, label, false);
+            return generated_material(config, uvmap, label, 0);
         }
         return delegate->getMaterial(config, uvmap, label);
     }
@@ -353,7 +371,7 @@ public:
             // Built as surface_instance() builds it, so the instance reuses this material.
             g::constrainMaterial(&key, &uv);
             extend_uvmap(uv);
-            return generated_material(&key, &uv, match->label.c_str(), true);
+            return generated_material(&key, &uv, match->label.c_str(), surface_lobes(asset->surfaces[match->source]));
         }
         g::MaterialKey placeholder{};
         placeholder.unlit = config->unlit;
@@ -451,7 +469,7 @@ public:
         const auto& data = asset->surfaces[source.source];
         const AssetTexture* sources[] = {&data.anisotropy_texture, &data.iridescence_texture, &data.thickness_texture};
         for (const auto* texture : sources) map_custom(*uvmap, *texture);
-        auto* mi = generated_material(config, uvmap, source.label.c_str(), true)->createInstance(source.label.c_str());
+        auto* mi = generated_material(config, uvmap, source.label.c_str(), surface_lobes(data))->createInstance(source.label.c_str());
         mi->setParameter("anisotropyStrength", data.anisotropy);
         mi->setParameter("anisotropyRotation", data.rotation);
         mi->setParameter("iridescenceFactor", data.iridescence);
@@ -527,7 +545,7 @@ public:
         // Both material modes need the orthographic refraction filter.
         if (generated(*config, label)) {
             g::constrainMaterial(config, uvmap);
-            instance = generated_material(config, uvmap, material_label, false)->createInstance(label);
+            instance = generated_material(config, uvmap, material_label, 0)->createInstance(label);
         } else {
             if (!label && extended()) {
                 auto key = *config;
@@ -558,6 +576,9 @@ public:
 };
 }
 g::MaterialProvider* create_material_provider(f::Engine* engine,bool compiled) { return new Provider(engine,compiled); }
+unsigned surface_lobes(const SurfaceSource& source) {
+    return (source.has_anisotropy ? surface_anisotropy : 0u) | (source.has_iridescence ? surface_iridescence : 0u);
+}
 void set_prepared_asset(g::MaterialProvider* provider, const PreparedAsset* asset) { static_cast<Provider*>(provider)->asset = asset; }
 std::vector<f::Texture*> take_material_textures(g::MaterialProvider* provider) { return std::exchange(static_cast<Provider*>(provider)->textures,{}); }
 std::vector<MaterialBinding> take_material_bindings(g::MaterialProvider* provider) { return std::exchange(static_cast<Provider*>(provider)->bindings,{}); }

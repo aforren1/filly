@@ -346,63 +346,77 @@ struct LinearOutput final : f::ToneMapper {
     bool isLDR() const noexcept override { return inner->isLDR(); }
     std::unique_ptr<f::ToneMapper> inner;
 };
-// Color grading applies the tone mapper and the output transfer function in one pass.
-void apply_grading(detail::SceneData& data, const std::string& encoding, const std::string& tone_mapping) {
-    if (encoding != "srgb" && encoding != "linear")
-        throw std::invalid_argument("encoding must be 'srgb' or 'linear', got '" + encoding + "'");
+// Filament's color grading runs only when the scene uses its postprocessing. It applies the tone
+// mapper and writes into filly's RGBA16F buffer; filly's encode pass then rounds, dithers, and
+// sets alpha. Per-channel tone mappers (linear, filmic, generic) write scene-linear color and
+// filly applies the transfer function exactly.
+void apply_grading(detail::SceneData& data, const std::string& tone_mapping) {
     std::unique_ptr<f::ToneMapper> mapper = tone_mapper(tone_mapping);
-    detail::require_graded(data, tone_mapping != "linear", "tone_mapping '" + tone_mapping + "'");
-    // Three-dimensional tone mappers run in Rec.2020 between gamut matrices, where the wrapper
-    // would be wrong; they keep Filament's own linear output.
-    const bool wrapped = encoding == "linear" && mapper->isOneDimensional();
-    if (wrapped) mapper = std::make_unique<LinearOutput>(std::move(mapper));
+    detail::require_exact(data, tone_mapping != "linear", "tone_mapping '" + tone_mapping + "'");
+    // Tone mappers that mix channels run in Rec.2020 between gamut matrices, where the wrapper
+    // would be wrong, so they go through Filament's 32^3 3D LUT. Its linear output, encoded by
+    // filly, differed from gltf_viewer by up to 3 levels (DamagedHelmet, ACES legacy); its sRGB
+    // output is what gltf_viewer writes. With sRGB encoding, Filament therefore encodes.
+    const bool per_channel = mapper->isOneDimensional();
+    const bool filament_encodes = !per_channel && data.encoding == "srgb";
+    if (per_channel) mapper = std::make_unique<LinearOutput>(std::move(mapper));
     using namespace f::color;
     auto* grading = f::ColorGrading::Builder().toneMapper(mapper.get())
-        .outputColorSpace(encoding == "linear" && !wrapped ? Rec709-Linear-D65 : Rec709-sRGB-D65)
+        .outputColorSpace(per_channel || filament_encodes ? Rec709-sRGB-D65 : Rec709-Linear-D65)
         .build(*data.state->engine);
     if (!grading) throw FillyError("Could not create color grading");
     data.view->setColorGrading(grading);
     if (data.grading) data.state->engine->destroy(data.grading);
     data.grading = grading;
-    data.encoding = encoding;
     data.tone_mapping = tone_mapping;
+    data.channel_mixing = !per_channel;
+    data.filament_encodes = filament_encodes;
+    detail::update_postprocessing(data);
+    detail::update_dithering(data);
 }
 }
 std::string Scene::encoding() const { data_->check(); return data_->encoding; }
 void Scene::set_encoding(const std::string& value) {
     data_->check();
-    if (value != data_->encoding) apply_grading(*data_, value, data_->tone_mapping);
+    if (value != "srgb" && value != "linear")
+        throw std::invalid_argument("encoding must be 'srgb' or 'linear', got '" + value + "'");
+    const bool changed = value != data_->encoding;
+    data_->encoding = value;
+    // A channel-mixing tone mapper's output color space follows the encoding.
+    if (changed && data_->channel_mixing) apply_grading(*data_, data_->tone_mapping);
 }
 std::string Scene::tone_mapping() const { data_->check(); return data_->tone_mapping; }
 void Scene::set_tone_mapping(const std::string& value) {
     data_->check();
-    if (value != data_->tone_mapping || !data_->grading) apply_grading(*data_, data_->encoding, value);
+    if (value != data_->tone_mapping || !data_->grading) apply_grading(*data_, value);
 }
-std::string Scene::output_path() const { data_->check(); return data_->direct ? "direct" : "graded"; }
+std::string Scene::output_path() const { data_->check(); return data_->direct ? "direct" : "exact"; }
 void Scene::set_output_path(const std::string& value) {
     data_->check();
-    if (value != "graded" && value != "direct")
-        throw std::invalid_argument("output_path must be 'graded' or 'direct', got '" + value + "'");
+    if (value != "exact" && value != "direct")
+        throw std::invalid_argument("output_path must be 'exact' or 'direct', got '" + value + "'");
     const bool direct = value == "direct";
     if (direct) {
         const auto conflicts = detail::direct_conflicts(*data_);
         if (!conflicts.empty())
-            throw std::invalid_argument("output_path 'direct' skips color grading, which these "
-                                        "settings need: " + conflicts);
+            throw std::invalid_argument("output_path 'direct' skips filly's encode pass and Filament's "
+                                        "postprocessing, which these settings need: " + conflicts);
         if (data_->masked)
             throw std::invalid_argument("output_path 'direct' cannot render alphaMode MASK materials, "
                                         "and a model in the scene has one");
     }
-    data_->view->setPostProcessingEnabled(!direct);
     data_->direct = direct;
+    detail::update_postprocessing(*data_);
 }
 std::string Scene::antialiasing() const { data_->check(); return data_->antialiasing; }
 void Scene::set_antialiasing(const std::string& value) {
     data_->check();
     if (value != "none" && value != "fxaa")
         throw std::invalid_argument("antialiasing must be 'none' or 'fxaa', got '" + value + "'");
-    detail::require_graded(*data_, value != "none", "antialiasing '" + value + "'");
-    data_->view->setAntiAliasing(value == "fxaa" ? f::View::AntiAliasing::FXAA : f::View::AntiAliasing::NONE);
+    detail::require_exact(*data_, value != "none", "antialiasing '" + value + "'");
+    // filly runs FXAA on the encoded image; Filament's FXAA stays off. Compiling the pass here
+    // keeps that cost out of the first frame.
+    if (value == "fxaa") detail::output_pass(*data_->state, data_->state->fxaa, detail::PassKind::fxaa);
     data_->antialiasing = value;
 }
 int Scene::msaa() const { data_->check(); return data_->msaa; }
@@ -410,7 +424,7 @@ void Scene::set_msaa(int value) {
     data_->check();
     if (value != 1 && value != 2 && value != 4 && value != 8)
         throw std::invalid_argument("msaa must be 1, 2, 4, or 8, got " + std::to_string(value));
-    detail::require_graded(*data_, value != 1, "msaa " + std::to_string(value));
+    detail::require_exact(*data_, value != 1, "msaa " + std::to_string(value));
     f::MultiSampleAntiAliasingOptions options;
     options.enabled = value > 1; options.sampleCount = uint8_t(value);
     options.customResolve = false;
@@ -421,12 +435,12 @@ bool Scene::shadows() const { data_->check(); return data_->shadows; }
 void Scene::set_shadows(bool value) { data_->check(); data_->view->setShadowingEnabled(value); data_->shadows = value; }
 bool Scene::refraction() const { data_->check(); return data_->refraction; }
 void Scene::set_refraction(bool value) {
-    data_->check(); detail::require_graded(*data_, value, "refraction");
+    data_->check(); detail::require_exact(*data_, value, "refraction");
     data_->view->setScreenSpaceRefractionEnabled(value); data_->refraction = value;
 }
 bool Scene::transparent() const { data_->check(); return data_->transparent; }
 void Scene::set_transparent(bool value) {
-    data_->check(); detail::require_graded(*data_, value, "transparent");
+    data_->check(); detail::require_exact(*data_, value, "transparent");
     data_->view->setBlendMode(value ? f::View::BlendMode::TRANSLUCENT : f::View::BlendMode::OPAQUE);
     data_->transparent = value;
 }
@@ -434,13 +448,16 @@ void Scene::set_transparent(bool value) {
 // accumulates history; dithering noise still changes on every frame.
 bool Scene::dithering() const { data_->check(); return data_->dithering; }
 void Scene::set_dithering(bool value) {
-    data_->check(); detail::require_graded(*data_, value, "dithering");
-    data_->view->setDithering(value ? f::View::Dithering::TEMPORAL : f::View::Dithering::NONE);
+    // The encode pass dithers after the transfer function, where one level of noise is one
+    // 8-bit level; Filament's dithering would add it to linear color. Filament's runs only when
+    // its color grading writes sRGB (see apply_grading()).
+    data_->check(); detail::require_exact(*data_, value, "dithering");
     data_->dithering = value;
+    detail::update_dithering(*data_);
 }
 bool Scene::ssao() const { data_->check(); return data_->ssao; }
 void Scene::set_ssao(bool value) {
-    data_->check(); detail::require_graded(*data_, value, "ssao");
+    data_->check(); detail::require_exact(*data_, value, "ssao");
     f::AmbientOcclusionOptions ao;
     ao.enabled = value;
     data_->view->setAmbientOcclusionOptions(ao);
@@ -448,11 +465,12 @@ void Scene::set_ssao(bool value) {
 }
 bool Scene::bloom() const { data_->check(); return data_->bloom; }
 void Scene::set_bloom(bool value) {
-    data_->check(); detail::require_graded(*data_, value, "bloom");
+    data_->check(); detail::require_exact(*data_, value, "bloom");
     f::BloomOptions glow;
     glow.enabled = value;
     data_->view->setBloomOptions(glow);
     data_->bloom = value;
+    detail::update_postprocessing(*data_);
 }
 void Scene::clear_environment() {
     data_->check(); auto& engine = *data_->state->engine;
@@ -712,7 +730,7 @@ void Scene::set_fog_options(Vec3 color, float density, float start) {
 }
 bool Scene::depth_of_field() const { data_->check(); return data_->depth_of_field; }
 void Scene::set_depth_of_field(bool value) {
-    data_->check(); detail::require_graded(*data_, value, "depth_of_field");
+    data_->check(); detail::require_exact(*data_, value, "depth_of_field");
     data_->depth_of_field = value;
     data_->dof_scale = NAN;
     if (!value) {
@@ -720,14 +738,16 @@ void Scene::set_depth_of_field(bool value) {
         off.enabled = false;
         data_->view->setDepthOfFieldOptions(off);
     }
+    detail::update_postprocessing(*data_);
 }
 bool Scene::vignette() const { data_->check(); return data_->vignette; }
 void Scene::set_vignette(bool value) {
-    data_->check(); detail::require_graded(*data_, value, "vignette");
+    data_->check(); detail::require_exact(*data_, value, "vignette");
     auto options = data_->view->getVignetteOptions();
     options.enabled = value;
     data_->view->setVignetteOptions(options);
     data_->vignette = value;
+    detail::update_postprocessing(*data_);
 }
 void Scene::set_vignette_options(float midpoint, float roundness, float feather, Vec3 color) {
     data_->check(); unit_interval(midpoint); unit_interval(roundness); light_color(color); finite(feather);

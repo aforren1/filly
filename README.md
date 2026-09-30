@@ -1,114 +1,130 @@
 # filly
 
-filly is a small Python 3D renderer for psychophysics stimuli, built on Google Filament. See
-[spec.md](spec.md) for the project requirements.
+filly is a Python 3D renderer for glTF scenes, built on
+[Google Filament](https://github.com/google/filament).
 
-The current build targets Windows and Linux x86_64 with OpenGL. It provides GLB/glTF loading,
-perspective, lens, and orthographic cameras, model and node transforms, animation, material
-variants, editable directional, sun, point, and spot lights, HDR panorama and prefiltered KTX
-environment lighting, glass refraction, diffuse transmission, anisotropy, iridescence,
-offscreen targets, and NumPy readback. Output is sRGB-encoded by default, or linear on request,
-for offscreen and shared textures alike. Color grading encodes by default; an explicit opt-in lets
-the GPU encode instead, which saves about 0.5 ms per 1080p frame and rejects options that need
-color grading. The default tone mapper keeps neutral colors neutral.
-All of Filament's tone mappers, FXAA, MSAA, SSAO, bloom, dithering, fog, depth of field, and
-vignette are available as scene properties; each effect is off until requested, and none reads
-earlier frames.
-`model.clone()` makes more instances of an asset loaded with `clonable=True`; they share its
-geometry and shaders.
-Textures from NumPy arrays, updated in place for per-frame stimuli such as noise masks and
-gratings, go into the base color or emissive slot of any glTF or generated material, with UV
-transforms for drifting. A host OpenGL texture can be a material input without a copy.
-Meshes come from NumPy arrays, with helpers for planes, boxes, spheres, and cylinders, and deform
-in place. Each `render()` call can take its own camera and viewport, so two eyes render side by
-side into one target.
-Core glTF materials and Filament's glass match Filament's `gltf_viewer` to within two 8-bit levels
-in the [reference comparison](docs/how-to/reference-comparison.md). Volumes under scaled parent
-nodes differ on purpose: filly applies the parent scale, as `KHR_materials_volume` requires.
-Animation includes supported material factors, light color/intensity/range and spot cones, camera projections, and
-texture transforms through `KHR_animation_pointer`.
-The loader also supports node visibility, modern meshopt data, and instance transforms.
-A PsychoPy adapter renders into a shared GPU texture while PsychoPy controls the display flip.
-It uses nanobind and a C++ interface that has no Python dependencies. glTF checks and
-preparation run in that C++ core, so another frontend gets the same loader.
+Load a glTF model, light it, pose it, and render it. You get the result as a NumPy image, or
+filly draws it into an OpenGL texture that your own window shows. Your program keeps control of
+the window and of frame timing, so filly fits into applications that already own a display loop,
+such as PsychoPy experiments or pyglet, moderngl, and zengl programs.
 
-The only runtime dependency is NumPy. The extension links Filament, libwebp 1.5.0 (for WebP
-textures), and a meshoptimizer 1.0 decoder statically. Pillow is needed only for the examples
-and some tests, which encode PNG images.
+![A wooden playground horse rocking on its spring, rendered with filly](docs/images/horse.gif)
 
-![Suzanne rendered with filly](docs/images/suzanne.png)
+*"Wooden Playground Horse" by [Batuhan13](https://sketchfab.com/Batuhan13),
+[CC BY 4.0](http://creativecommons.org/licenses/by/4.0/). See [attribution](examples/assets/ATTRIBUTION.md).*
 
-Generate this image after building the package and installing Pillow:
+## Install
 
-```powershell
-uv run --no-sync python examples/screenshot.py
+filly is not on PyPI yet. [Build it from source](docs/how-to/build.md).
+
+It needs Python 3.10 or later, Windows or Linux on x86_64, and an OpenGL 4.1 driver. On Linux,
+offscreen rendering works without a display. macOS is not supported.
+
+## Render an image
+
+```python
+import filly
+from PIL import Image  # only to save the image
+
+with filly.Renderer() as renderer:
+    scene = renderer.create_scene()
+    horse = scene.load("examples/assets/wooden_playground_horse.glb")
+    horse.apply_animation(0, 1.25)  # a pose from its spring animation
+
+    camera = scene.create_camera()
+    camera.set_perspective(fov_y=30, near=0.1, far=100)
+    camera.frame(horse, direction=(-1, -0.3, -1), aspect=800 / 600)
+    scene.camera = camera
+    scene.add_directional_light(direction=(-1, -1, -2), intensity=100_000)
+
+    target = renderer.create_render_target(width=800, height=600)
+    renderer.render(scene, target)
+    Image.fromarray(target.read()).save("horse.png")  # (600, 800, 4) uint8 RGBA
 ```
 
-The script downloads a pinned CC0 Suzanne mesh on first use and checks its hash.
-See [asset details](docs/images/README.md) for credits.
+## Draw in a PsychoPy window
 
-With `psychopy-lib` installed, run the shared-texture example:
+filly renders into a texture that PsychoPy draws directly, with no copy through the CPU.
+PsychoPy still flips the window.
 
-```powershell
-uv run --no-sync python examples/psychopy_shared.py --frames 300
+```python
+from psychopy import core, visual
+from filly.integrations.psychopy import SharedTarget, create_renderer
+
+win = visual.Window((1024, 768), units="pix")
+renderer = create_renderer(win)  # shares the window's OpenGL context
+scene = renderer.create_scene()
+horse = scene.load("examples/assets/wooden_playground_horse.glb")
+camera = scene.create_camera()
+camera.set_perspective(fov_y=30, near=0.1, far=100)
+camera.frame(horse, aspect=1)
+scene.camera = camera
+scene.add_directional_light(direction=(-1, -1, -2), intensity=100_000)
+
+target = SharedTarget(renderer, win, 512, 512)
+stim = target.as_psychopy_texture()  # an ImageStim: position, size, masks, and opacity work
+clock = core.Clock()
+while clock.getTime() < 3:
+    horse.apply_animation(0, clock.getTime())
+    renderer.render(scene, target)
+    stim.draw()
+    win.flip()
+
+target.close()
+renderer.close()
+win.close()
 ```
 
-Pass a glTF or GLB path to display your own model:
+Close the target, then the renderer, then the window. The same pattern works with a
+[pyglet, moderngl, or zengl window](docs/how-to/gl-hosts.md).
 
-```powershell
-uv run --no-sync python examples/psychopy_shared.py "C:/models/stimulus.glb" --frames 600
-```
+## Features
 
-The demo uses the first unambiguous imported camera when available, otherwise it fits the model without
-changing its physical scale. Use `--fit-camera` to fit all geometry, including ground planes.
-The demo plays the first
-animation and uses authored lights when present. The overlay shows the file stem.
-Omit the path to use Suzanne. Press Escape to stop. Use `--no-animation` to stop playback,
-`--time 4` to inspect a pose, `--variant "Khronos Red"` to select a material variant, or
-`--exposure 0` to brighten a dim asset. Run with `--help` for lighting and environment options.
-Use `--camera "CameraNode"` to select an imported camera by its node name.
-Authored-light scenes do not get an extra environment by default. Use `--environment-intensity`
-to add one. This preserves lighting tests such as TrafficCone's reflective bands.
-Use `--transparent` to draw over a regular PsychoPy grating. Add `--profile timing.csv`
-to record CPU submission, shared-texture handoff, drawing, and flip timings.
-Use `--shadows --shadow-map-size 1024` for shadow maps, including point lights. Add
-`--show-environment --environment-rotation 45` to show and rotate the environment panorama.
-The skybox is opaque; omit `--show-environment` when using `--transparent`.
-Use `--lighting environment --view 35 22` to inspect iridescent materials with panorama lighting
-and an angled camera. See the [dielectric sphere comparison](docs/reference/sample-assets.md#dielectric-iridescence).
+- **glTF 2.0:** GLB and glTF files, skinning, morph targets, animation, material variants, and
+  the common material extensions, such as clearcoat, sheen, transmission, and iridescence.
+  See [asset compatibility](docs/reference/api.md#asset-compatibility).
+- **Cameras and lights:** perspective and orthographic cameras, camera framing, and directional,
+  sun, point, and spot lights with optional shadows. Image-based lighting comes from an HDR
+  panorama or prefiltered KTX files.
+- **Stimuli from arrays:** textures and meshes from NumPy arrays, updated in place each frame,
+  for gratings, noise, or deforming shapes.
+- **Predictable output:** sRGB by default, or linear on request. Effects such as antialiasing,
+  fog, and bloom are off until you enable them. With default settings, the same scene gives the
+  same pixels on every frame.
+- **Several views per frame:** each `render()` call can take its own camera and viewport, for
+  example for side-by-side stereo.
 
-More examples: `examples/drifting_grating.py` (a per-frame texture on a tilted plane),
-`examples/stereo.py` (side-by-side stereo in a pyglet window), and `examples/shapes.py`
-(generated and deforming meshes, offscreen). Each takes `--frames`.
+## Examples
 
-For repeated asset loading, frame timing, and process/GPU memory reports:
+Each example is in `examples/` and runs with `python examples/<name>.py`.
 
-```powershell
-uv run --no-sync python examples/psychopy_stress.py --cycles 30 --frames 600 --transparent
-```
-
-See [stress testing](docs/how-to/stress-test.md) for refresh-rate checks and longer runs.
-
-See [asset compatibility](docs/reference/api.md#asset-compatibility) for supported extensions and limits.
-
-See [PsychoPy setup](docs/how-to/psychopy.md) for the Python 3.11 setup, which uses a prebuilt
-Windows input-hook wheel. The full PsychoPy Builder package is not required.
-
-The [wheel workflow](.github/workflows/wheels.yml) builds Windows and manylinux_2_28 wheels.
-Python 3.12 and later share a `cp312-abi3` wheel; Python 3.10 and 3.11 have separate wheels.
-Linux uses GLX and requires an X11 display, including XWayland, WSLg, or Xvfb.
-See the [Linux and WSL setup](docs/how-to/build.md#build-on-linux) before running there.
-See the [Khronos sample compatibility audit](docs/reference/sample-assets.md) for tested assets and remaining gaps.
-PTB integration, macOS, native Wayland/EGL, and experimental display-timing validation remain future work.
+| Example | Shows |
+| --- | --- |
+| `screenshot.py` | The animation above (`--gif`), or a still image, rendered offscreen. |
+| `psychopy_shared.py` | A model in a PsychoPy window. Pass your own GLB path. |
+| `pyglet_shared.py`, `moderngl_shared.py`, `zengl_shared.py` | The same in other OpenGL hosts. |
+| `drifting_grating.py` | A texture updated every frame on a tilted plane. |
+| `stereo.py` | Two cameras side by side in one window. |
+| `shapes.py` | Generated and deforming meshes. |
 
 ## Documentation
 
-- [Build and test](docs/how-to/build.md)
-- [Render an image](docs/tutorials/offscreen.md)
-- [Use PsychoPy and shared textures](docs/how-to/psychopy.md)
-- [Use pyglet, moderngl, or zengl with shared textures](docs/how-to/gl-hosts.md)
-- [Measure timing and resource stability](docs/how-to/stress-test.md)
-- [Compare with Filament's gltf_viewer](docs/how-to/reference-comparison.md)
-- [API reference](docs/reference/api.md)
-- [Validation results](docs/reference/validation.md)
-- [Design and current limits](docs/explanation/design.md)
+- Tutorial: [render an image](docs/tutorials/offscreen.md)
+- How-to guides: [build and test](docs/how-to/build.md),
+  [use PsychoPy](docs/how-to/psychopy.md), [use other OpenGL hosts](docs/how-to/gl-hosts.md),
+  [measure timing](docs/how-to/stress-test.md), [profile a frame](docs/how-to/profile.md),
+  [compare with Filament's viewer](docs/how-to/reference-comparison.md)
+- Reference: [API](docs/reference/api.md), [performance](docs/reference/performance.md),
+  [validation](docs/reference/validation.md), [sample assets](docs/reference/sample-assets.md)
+- Explanation: [design and limits](docs/explanation/design.md),
+  [tested assumptions](docs/explanation/assumptions.md),
+  [material precompilation](docs/explanation/material-precompilation.md)
+
+## License
+
+filly is released under the [MIT License](LICENSE).
+
+It links [Filament](https://github.com/google/filament) (Apache 2.0),
+[meshoptimizer](https://github.com/zeux/meshoptimizer) (MIT),
+[libwebp](https://chromium.googlesource.com/webm/libwebp) (BSD), and
+[cgltf](https://github.com/jkuhlmann/cgltf) (MIT). Their licenses are installed with the package.

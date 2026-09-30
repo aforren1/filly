@@ -20,6 +20,8 @@ const MaterialRecord& record_of(const ModelData& model, const f::MaterialInstanc
 namespace {
 constexpr const char* texture_maps[2] = {"baseColorMap", "emissiveMap"};
 constexpr const char* texture_matrices[2] = {"baseColorUvMatrix", "emissiveUvMatrix"};
+constexpr const char* texture_indices[2] = {"baseColorIndex", "emissiveIndex"};
+#if !FILLY_MATERIALS_ARCHIVE
 bool same_key(const g::MaterialKey& a, const g::MaterialKey& b) {
     // Filament 1.77.1's equality operator omits the dispersion bit.
     return a == b && a.hasDispersion == b.hasDispersion;
@@ -46,6 +48,7 @@ g::MaterialKey desired_key(const g::MaterialKey& base, const Assignment& a) {
         key.hasTextureTransforms = true;
     return key;
 }
+#endif
 // Copies factors and render state. Texture indices come from the provider's key, and the slot
 // matrices belong to the runtime textures, so neither is copied.
 void carry(const f::MaterialInstance* from, f::MaterialInstance* to) {
@@ -93,10 +96,40 @@ void bind(f::MaterialInstance* instance, const Assignment& a) {
         instance->setParameter(texture_maps[slot], a.textures[slot]->texture, a.textures[slot]->sampler);
         if (instance->getMaterial()->hasParameter(texture_matrices[slot]))
             instance->setParameter(texture_matrices[slot], a.transforms[slot]);
+        // Archive entries select the UV set with a uniform; runtime textures use TEXCOORD_0.
+        if (FILLY_MATERIALS_ARCHIVE) instance->setParameter(texture_indices[slot], 0);
     }
 }
 }
 
+#if FILLY_MATERIALS_ARCHIVE
+// Assigns or removes (null) the runtime texture of one material handle. Every archive entry has
+// base color and emissive samplers, so a handle with runtime textures shows a copy of its glTF
+// instance with changed parameters. A removal starts again from a copy of the glTF instance,
+// which still has the glTF texture of that slot, and the factors carry over.
+void assign_texture(ModelData& model, size_t index, int slot, std::shared_ptr<TextureData> texture) {
+    auto& engine = *model.state->engine;
+    const size_t count = model.instance->getMaterialInstanceCount();
+    if (index >= count + model.locals.size()) throw AssetError("Invalid material index");
+    LocalMaterial* local = index >= count ? &model.locals[index - count] : nullptr;
+    f::MaterialInstance* base = local ? local->source : model.instance->getMaterialInstances()[index];
+    SharedOverride* entry = nullptr;
+    if (!local) for (auto& item : model.overrides) if (item.source == base) entry = &item;
+    f::MaterialInstance* current = local ? local->copy : entry ? entry->current : base;
+    const auto& record = record_of(model, base);
+    const std::string name = base->getName() ? base->getName() : "";
+    if (slot == 1 && record.key.unlit) throw AssetError("Unlit material '" + name + "' has no emissive input");
+    const Assignment previous = local ? local->assignment : entry ? entry->assignment : Assignment{};
+    if (previous.textures[slot] == texture) return;
+    Assignment next = previous;
+    next.textures[slot] = texture;
+    if (!texture) next.transforms[slot] = m::mat3f{};
+    f::MaterialInstance* replacement = current;
+    if (!local && !next.any()) replacement = base;
+    else if (!texture || current == base) replacement = f::MaterialInstance::duplicate(base, name.c_str());
+    if (replacement != current) carry(current, replacement);
+    bind(replacement, next);
+#else
 // Assigns or removes (null) the runtime texture of one material handle. A handle whose glTF
 // material already has the slot shows a copy of it; otherwise the provider supplies the
 // material for a key with the slot, and the factors carry over.
@@ -154,6 +187,7 @@ void assign_texture(ModelData& model, size_t index, int slot, std::shared_ptr<Te
     next.key = next.keyed ? key : g::MaterialKey{};
     if (!next.any()) next.keyed = false;
     bind(replacement, next);
+#endif
     if (texture) {
         auto& users = texture->users;
         std::erase_if(users, [](const auto& user) { return user.expired(); });

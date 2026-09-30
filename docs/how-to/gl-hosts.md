@@ -26,7 +26,8 @@ Close each target before its window. A target that is garbage-collected instead 
 See [Host integrations](../reference/api.md#host-integrations) for sizes and errors.
 
 The integrations were tested on Windows 11 with an Intel Iris Xe GPU and pyglet 1.4.11,
-moderngl 5.12.0, and zengl 2.7.3. Linux GLX and pyglet 2 were not tested.
+moderngl 5.12.0, and zengl 2.7.3. They also passed on Linux GLX (Ubuntu 22.04 under WSL, with the
+Mesa D3D12 driver and with Xvfb and llvmpipe). pyglet 2 was not tested.
 
 ## Install
 
@@ -240,7 +241,7 @@ reset because of Filament.
 
 ## Run the examples
 
-Each example spins Suzanne. pyglet's event loop swaps the buffers. The example prints timing
+Each example spins the wooden horse and plays its spring animation. pyglet's event loop swaps the buffers. The example prints timing
 percentiles as JSON.
 
 ```powershell

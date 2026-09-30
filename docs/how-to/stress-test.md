@@ -7,8 +7,8 @@ Run a short check from the project directory:
 uv run --no-sync python examples/psychopy_stress.py --cycles 4 --frames 120 --warmup 30 --transparent
 ```
 
-The default asset is Suzanne. The first run downloads the same pinned asset as the screenshot
-example. Each cycle loads an asset, creates node-local materials, draws warmup and measured frames,
+The default asset is the wooden horse in `examples/assets`, which the screenshot example also
+uses. Each cycle loads an asset, creates node-local materials, draws warmup and measured frames,
 then closes the model. A regular PsychoPy grating and text label are drawn each frame.
 The transparent option shows the grating through the Filament image.
 

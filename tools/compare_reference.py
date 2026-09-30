@@ -91,22 +91,34 @@ def find_asset(name):
     return files[0].resolve()
 
 
-def fit_camera(bounds, width, height, focal_length):
-    """Frame the bounding sphere from a fixed oblique direction."""
+def fit_camera(camera, model, width, height, focal_length):
+    """Frame the bounding sphere from a fixed oblique direction; return the camera for both sides.
+
+    The fill puts the sphere at 1.05 times the distance where it touches the narrower view axis,
+    the framing that the recorded results used.
+    """
     import numpy as np
-    bounds = np.asarray(bounds, dtype=float)
-    center = bounds.mean(axis=0)
-    radius = float(np.linalg.norm(bounds[1] - bounds[0]) / 2)
-    if not math.isfinite(radius) or radius <= 0:
-        raise ValueError("Asset has no finite nonzero bounds")
     half = math.atan(SENSOR_HEIGHT_MM / 2 / focal_length)
-    half_x = math.atan(math.tan(half) * width / height)
-    distance = radius / math.sin(min(half, half_x)) * 1.05
-    direction = np.asarray(VIEW_DIRECTION) / np.linalg.norm(VIEW_DIRECTION)
-    eye = center + direction * distance
-    return {"eye": eye.tolist(), "target": center.tolist(), "up": [0.0, 1.0, 0.0],
-            "fov_y": math.degrees(2 * half), "focal_length_mm": focal_length,
-            "near": max(distance - radius * 1.5, distance * 0.01), "far": distance + radius * 3}
+    narrower = min(half, math.atan(math.tan(half) * width / height))
+    fill = math.tan(math.asin(math.sin(narrower) / 1.05)) / math.tan(narrower)
+    # The same call gltf_viewer makes, so both sides share one projection matrix.
+    camera.set_lens_projection(focal_length_mm=focal_length, aspect=width / height, near=1, far=2)
+    direction = -np.asarray(VIEW_DIRECTION) / np.linalg.norm(VIEW_DIRECTION)
+    try:
+        distance = camera.frame(model, fill=fill, direction=direction, aspect=width / height)
+    except ValueError as error:
+        raise ValueError("Asset has no finite nonzero bounds") from error
+    bounds = np.asarray(model.bounds, dtype=float)
+    radius = float(np.linalg.norm(bounds[1] - bounds[0]) / 2)
+    near, far = max(distance - radius * 1.5, distance * 0.01), distance + radius * 3
+    camera.set_lens_projection(focal_length_mm=focal_length, aspect=width / height, near=near, far=far)
+    eye = np.asarray(camera.position, dtype=float)
+    target = eye + direction * distance
+    # Pose filly's camera from exactly the values that gltf_viewer receives: frame()'s own
+    # orientation differs in the last float bits and moved edge pixels by up to 54 levels.
+    camera.look_at(target, up=(0, 1, 0))
+    return {"eye": eye.tolist(), "target": target.tolist(), "up": [0.0, 1.0, 0.0],
+            "fov_y": math.degrees(2 * half), "focal_length_mm": focal_length, "near": near, "far": far}
 
 
 def render_filly(args):
@@ -128,18 +140,13 @@ def render_filly(args):
         scene.tone_mapping = "aces_legacy"
         scene.encoding = "srgb"
         model = scene.load(args.worker)
-        camera_setup = fit_camera(model.bounds, args.width, args.height, args.focal_length)
+        camera = scene.create_camera()
+        camera_setup = fit_camera(camera, model, args.width, args.height, args.focal_length)
         scene.load_environment(str(args.environment), intensity=IBL_INTENSITY, rotation_deg=0)
         scene.environment_visible = args.skybox
         if args.sun:
             # Same SUN light as the viewer; the default disc and halo match its settings.
             scene.add_sun_light(direction=SUN_DIRECTION, intensity=SUN_INTENSITY, color=(1, 1, 1))
-        camera = scene.create_camera()
-        # The same call gltf_viewer makes, so both sides share one projection matrix.
-        camera.set_lens_projection(focal_length_mm=camera_setup["focal_length_mm"], aspect=args.width / args.height,
-                                   near=camera_setup["near"], far=camera_setup["far"])
-        camera.position = camera_setup["eye"]
-        camera.look_at(camera_setup["target"], up=camera_setup["up"])
         scene.camera = camera
         camera_setup["exposure_ev100"] = camera.exposure
         target = renderer.create_render_target(width=args.width, height=args.height)

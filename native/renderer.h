@@ -75,6 +75,7 @@ struct RenderOptions {
 };
 
 class Node;
+class Model;
 
 class Light {
 public:
@@ -123,6 +124,9 @@ public:
     // Offset and scale in UV units, rotation in radians, as KHR_texture_transform.
     void set_texture_transform(int slot, std::array<float, 2> offset, std::array<float, 2> scale,
                                float rotation);
+    // For tests: the name of the Filament material behind this handle, and whether it refracts
+    // in screen space.
+    std::pair<std::string, bool> shader() const;
 private:
     std::shared_ptr<detail::ModelData> data_;
     size_t index_;
@@ -151,6 +155,8 @@ public:
     Vec3 rotation_euler_deg() const;
     void set_rotation_euler_deg(Vec3 value);
     Material material(size_t slot) const;
+    // Model.bounds restricted to this node and its descendants.
+    std::array<Vec3, 2> bounds() const;
     size_t morph_target_count() const;
     void set_morph_weights(const std::vector<float>& values);
     bool same(const Node& other) const;
@@ -158,6 +164,16 @@ public:
 private:
     std::shared_ptr<detail::ModelData> data_;
     uint32_t entity_;
+    friend class Camera;
+};
+
+// Camera::frame() inputs; see docs/reference/api.md.
+struct FrameOptions {
+    double fill = 0.8;
+    std::optional<Vec3> direction;
+    Vec3 up = {0, 1, 0};
+    std::string fit = "sphere";
+    std::optional<double> near, far, aspect;
 };
 
 class Camera {
@@ -184,6 +200,11 @@ public:
     void set_focus_distance(float value);
     float aperture() const;
     void set_aperture(float value);
+    // Aims at the target's center and sets the distance and clipping planes so that it fills
+    // `fill` of the view. Returns the distance from the camera to that center.
+    double frame(const Model& target, const FrameOptions& options);
+    double frame(const Node& target, const FrameOptions& options);
+    double frame(const std::array<Vec3, 2>& box, const FrameOptions& options);
     bool same(const Camera& other) const;
     uintptr_t key() const;
     // The glTF node of an imported camera; false for cameras that a scene created.
@@ -239,6 +260,7 @@ private:
     void attach_mesh(const MeshArrays& arrays);
     std::shared_ptr<detail::ModelData> data_;
     friend class Scene;
+    friend class Camera;
 };
 
 class Scene {
@@ -267,8 +289,8 @@ public:
                          float range, float inner, float outer);
     std::string encoding() const;
     void set_encoding(const std::string& value);
-    // "graded" (the default) or "direct". Direct output skips postprocessing, so it rejects
-    // every option and material that needs color grading instead of falling back.
+    // "exact" (the default) or "direct". Direct output skips filly's encode pass, so it rejects
+    // every option and material that needs that pass instead of falling back.
     std::string output_path() const;
     void set_output_path(const std::string& value);
     std::string tone_mapping() const;
@@ -426,6 +448,8 @@ public:
     bool closed() const;
     bool precompiled_shaders() const;
     uintptr_t shared_context() const;
+    // "wgl", "glx", or "egl".
+    std::string gl_platform() const;
     Stats stats() const;
 private:
     void submit(const Scene& scene, detail::TargetData& target, const RenderOptions& options);

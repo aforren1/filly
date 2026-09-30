@@ -14,8 +14,12 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD6
   message(FATAL_ERROR "Supported targets are Windows and Linux x86_64.")
 endif()
 if(WIN32)
-  set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
-  set(FILAMENT_LIB_DIR "${FILAMENT_ROOT}/lib/x86_64/md")
+  # Hybrid CRT: static C++ runtime and vcruntime, dynamic UCRT (see the link options below).
+  # Python ships no msvcp140.dll, and a host process that loaded an older one first (MATLAB,
+  # Qt applications) can crash code built with a newer toolset. This applies to nanobind and
+  # libwebp too, because both are built as targets of this project.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded)
+  set(FILAMENT_LIB_DIR "${FILAMENT_ROOT}/lib/x86_64/mt")
 else()
   set(FILAMENT_LIB_DIR "${FILAMENT_ROOT}/lib/x86_64")
   # Keep the system GL dispatch library external to manylinux wheels.
@@ -66,18 +70,38 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 set(BUILD_SHARED_LIBS OFF)
 if(NOT WIN32)
-  # libwebp marks its API visibility("default"); keep it out of the module's exported symbols
-  # so that another libwebp in the process, such as Pillow's, cannot bind to this copy.
+  # libwebp marks its API visibility("default"). The module's version script already keeps it
+  # unexported; hidden visibility also lets the compiler bind calls directly, without the PLT.
   set(CMAKE_C_VISIBILITY_PRESET hidden)
   add_compile_definitions(WEBP_EXTERN=extern)
 endif()
 FetchContent_MakeAvailable(libwebp)
 
-add_library(filly_core STATIC native/renderer.cpp native/gl_interop.cpp native/materials.cpp native/surface_material.cpp
-  native/gltf_prepare.cpp native/json.cpp native/shapes.cpp native/webp_provider.cpp
+# glTF materials: "runtime" compiles each material configuration with filamat while loading;
+# "archive" uses filly's precompiled material archive (native/materials), built here with the
+# SDK's matc and uberz. See docs/explanation/material-precompilation.md.
+set(FILLY_MATERIALS runtime CACHE STRING "glTF material path: runtime or archive")
+set_property(CACHE FILLY_MATERIALS PROPERTY STRINGS runtime archive)
+if(FILLY_MATERIALS STREQUAL "archive")
+  enable_language(C)
+  include(native/materials/materials.cmake)
+  set(FILLY_MATERIAL_SOURCES native/archive_materials.cpp)
+elseif(FILLY_MATERIALS STREQUAL "runtime")
+  set(FILLY_MATERIAL_SOURCES native/materials.cpp native/surface_material.cpp)
+else()
+  message(FATAL_ERROR "FILLY_MATERIALS must be runtime or archive, not '${FILLY_MATERIALS}'")
+endif()
+message(STATUS "filly glTF materials: ${FILLY_MATERIALS}")
+
+add_library(filly_core STATIC native/renderer.cpp native/output_pass.cpp native/gl_interop.cpp ${FILLY_MATERIAL_SOURCES}
+  native/gltf_prepare.cpp native/json.cpp native/shapes.cpp native/webp_provider.cpp native/egl_platform.cpp
   native/vendor/meshoptimizer/vertexcodec.cpp native/vendor/meshoptimizer/indexcodec.cpp
   native/vendor/meshoptimizer/vertexfilter.cpp)
 target_compile_features(filly_core PUBLIC cxx_std_20)
+if(FILLY_MATERIALS STREQUAL "archive")
+  target_compile_definitions(filly_core PUBLIC FILLY_MATERIALS_ARCHIVE=1)
+  target_link_libraries(filly_core PRIVATE filly_material_archive)
+endif()
 set_target_properties(filly_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(filly_core PUBLIC native PRIVATE "${FILAMENT_ROOT}/include" "${libwebp_SOURCE_DIR}/src")
 target_link_libraries(filly_core PRIVATE webpdecoder)
@@ -93,6 +117,19 @@ endif()
 
 nanobind_add_module(_native STABLE_ABI NOSTRIP native/bindings.cpp)
 target_link_libraries(_native PRIVATE filly_core)
+if(MSVC)
+  # The UCRT is part of Windows 10 and later, and one shared copy keeps a single heap and
+  # locale state per process. The static runtime objects request libucrt.lib by default.
+  target_link_options(_native PRIVATE /NODEFAULTLIB:libucrt.lib /DEFAULTLIB:ucrt.lib)
+else()
+  # Filament marks its public API visible, and the C++ template instantiations are visible
+  # regardless of -fvisibility. Exported, they could bind to another copy of Filament, libwebp,
+  # or a different libstdc++ build in the process, so only the module entry point is exported.
+  set(FILLY_EXPORTS "${CMAKE_CURRENT_BINARY_DIR}/_native.map")
+  file(WRITE "${FILLY_EXPORTS}" "{\n  global: PyInit__native;\n  local: *;\n};\n")
+  target_link_options(_native PRIVATE "LINKER:--version-script=${FILLY_EXPORTS}")
+  set_property(TARGET _native APPEND PROPERTY LINK_DEPENDS "${FILLY_EXPORTS}")
+endif()
 install(TARGETS _native LIBRARY DESTINATION filly RUNTIME DESTINATION filly)
 install(FILES "${FILAMENT_ROOT}/LICENSE" DESTINATION filly/licenses RENAME Filament.txt)
 install(FILES native/vendor/meshoptimizer/LICENSE.md DESTINATION filly/licenses RENAME meshoptimizer.txt)

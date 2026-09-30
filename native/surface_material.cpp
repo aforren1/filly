@@ -96,7 +96,7 @@ std::string shaderFromKey(const MaterialKey& config) {
         shader += "material.baseColor *= getColor();\n";
     }
 
-    // Filament's unlit shading outputs base color alpha even for OPAQUE. Without color grading,
+    // Filament's unlit shading outputs base color alpha even for OPAQUE. On the direct path,
     // that alpha would reach the target of an opaque view, which must store alpha one.
     if (config.unlit && config.alphaMode == AlphaMode::OPAQUE) {
         shader += "material.baseColor.a = 1.0;\n";
@@ -297,10 +297,11 @@ std::string shaderFromKey(const MaterialKey& config) {
 }
 
 Material* createMaterial(Engine* engine, const MaterialKey& config, const UvMap& uvmap,
-        const char* name, bool optimizeShaders, filament::UserVariantFilterMask variantFilter, bool extended) {
+        const char* name, bool optimizeShaders, filament::UserVariantFilterMask variantFilter, unsigned lobes) {
     std::string shader = shaderFromKey(config);
     processShaderString(&shader, uvmap, config);
-    if (extended) shader.insert(shader.rfind('}'), R"SHADER(
+    const bool extended = lobes != 0;
+    if (lobes & filly::detail::surface_anisotropy) shader.insert(shader.rfind('}'), R"SHADER(
         float a = materialParams.anisotropyStrength;
         vec2 direction = vec2(1.0, 0.0);
         if (materialParams.anisotropyIndex >= 0) {
@@ -313,6 +314,8 @@ Material* createMaterial(Engine* engine, const MaterialKey& config, const UvMap&
         float c = cos(materialParams.anisotropyRotation), s = sin(materialParams.anisotropyRotation);
         material.anisotropy = a;
         material.anisotropyDirection = vec3(c*direction.x-s*direction.y, s*direction.x+c*direction.y, 0.0);
+    )SHADER");
+    if (lobes & filly::detail::surface_iridescence) shader.insert(shader.rfind('}'), R"SHADER(
         material.iridescence = materialParams.iridescenceFactor;
         if (materialParams.iridescenceIndex >= 0) {
             vec2 uv = (materialParams.iridescenceUvMatrix * vec3(materialParams.iridescenceIndex == 1 ? getUV1() : getUV0(), 1.0)).xy;
@@ -602,7 +605,7 @@ Material* createMaterial(Engine* engine, const MaterialKey& config, const UvMap&
 }
 namespace filly::detail {
 filament::Material* create_surface_material(filament::Engine* engine, const filament::gltfio::MaterialKey& key,
-        const filament::gltfio::UvMap& uvmap, const char* name, bool extended) {
-    return createMaterial(engine, key, uvmap, name, false, 0, extended);
+        const filament::gltfio::UvMap& uvmap, const char* name, unsigned lobes) {
+    return createMaterial(engine, key, uvmap, name, false, 0, lobes);
 }
 }

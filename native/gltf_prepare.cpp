@@ -11,10 +11,14 @@
 #include <limits>
 #include <set>
 #include <string_view>
+#include <utility>
 
 namespace filly::detail {
 namespace {
 
+// Selects the material path's preparation: the archive path plans extension texture slots, and
+// the runtime path checks its sampler rules.
+constexpr bool archive_materials = FILLY_MATERIALS_ARCHIVE != 0;
 constexpr double float_max = 3.402823466e38;
 constexpr double pi = 3.141592653589793;
 
@@ -655,7 +659,8 @@ std::vector<uint8_t> image_bytes(const cgltf_image& image, const std::string& pa
     return std::vector<uint8_t>(bytes, bytes + view->size);
 }
 
-AssetTexture texture_info(const cgltf_texture_view& info, const std::string& path) {
+// With read false, the result has the UV set, transform, and sampler, but no image bytes.
+AssetTexture texture_info(const cgltf_texture_view& info, const std::string& path, bool read = true) {
     AssetTexture result;
     if (!info.texture) return result;
     const auto& texture = *info.texture;
@@ -670,9 +675,13 @@ AssetTexture texture_info(const cgltf_texture_view& info, const std::string& pat
     const double ox = info.has_transform ? transform.offset[0] : 0, oy = info.has_transform ? transform.offset[1] : 0;
     for (double value : {angle, sx, sy, ox, oy}) if (!finite_float(value)) invalid("Invalid texture transform");
     const double c = std::cos(angle), s = std::sin(angle);
-    result.transform = {float(c*sx), float(s*sx), 0, float(-s*sy), float(c*sy), 0, float(ox), float(oy), 1};
-    result.bytes = image_bytes(*image, path);
-    result.mime = image->mime_type ? image->mime_type : sniff(result.bytes);
+    // The transpose of gltfio's matrixFromUvTransform(), for M * uv: a quarter turn maps (u, v) to
+    // (v, -u), which renders TextureTransformMultiTest correctly.
+    result.transform = {float(sx*c), float(-sy*s), 0, float(sx*s), float(sy*c), 0, float(ox), float(oy), 1};
+    if (read) {
+        result.bytes = image_bytes(*image, path);
+        result.mime = image->mime_type ? image->mime_type : sniff(result.bytes);
+    }
     if (texture.sampler) {
         const auto& sampler = *texture.sampler;
         result.wrap_s = sampler.wrap_s;
@@ -1060,6 +1069,254 @@ void prepare_nodes(const cgltf_data* data, PreparedAsset& tables) {
     }
 }
 
+// Model bounds ------------------------------------------------------------------------------
+
+// Column-major, like cgltf and Filament.
+using Mat4 = std::array<float, 16>;
+
+Mat4 multiply(const Mat4& a, const Mat4& b) {
+    Mat4 out{};
+    for (int c = 0; c < 4; ++c)
+        for (int r = 0; r < 4; ++r) {
+            float sum = 0;
+            for (int k = 0; k < 4; ++k) sum += a[k * 4 + r] * b[c * 4 + k];
+            out[c * 4 + r] = sum;
+        }
+    return out;
+}
+
+// World transforms of all nodes relative to the gltfio root. cgltf_node_transform_world walks
+// every ancestor for each call; a skin asks for many joints that share ancestors.
+std::vector<Mat4> node_worlds(const cgltf_data* data) {
+    std::vector<Mat4> worlds(data->nodes_count);
+    std::vector<uint8_t> done(data->nodes_count, 0);
+    std::vector<size_t> chain;
+    for (size_t i = 0; i < data->nodes_count; ++i) {
+        for (const cgltf_node* node = &data->nodes[i]; node && !done[cgltf_node_index(data, node)]; node = node->parent)
+            chain.push_back(cgltf_node_index(data, node));
+        for (; !chain.empty(); chain.pop_back()) {
+            const size_t index = chain.back();
+            const auto& node = data->nodes[index];
+            Mat4 local;
+            cgltf_node_transform_local(&node, local.data());
+            worlds[index] = node.parent ? multiply(worlds[cgltf_node_index(data, node.parent)], local) : local;
+            done[index] = 1;
+        }
+    }
+    return worlds;
+}
+
+struct Box {
+    Vec3 low{FLT_MAX, FLT_MAX, FLT_MAX}, high{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+    void add(const Vec3& p) {
+        for (int i = 0; i < 3; ++i) { low[i] = std::min(low[i], p[i]); high[i] = std::max(high[i], p[i]); }
+    }
+    void add(const Box& b) { if (b.low[0] <= b.high[0]) { add(b.low); add(b.high); } }
+    bool empty() const { return low[0] > high[0]; }
+};
+
+Vec3 transform_point(const Mat4& m, const float* p) {
+    Vec3 out;
+    for (int r = 0; r < 3; ++r) out[r] = m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r];
+    return out;
+}
+
+std::optional<Mat4> affine_inverse(const Mat4& m) {
+    auto at = [&](int r, int c) { return double(m[c * 4 + r]); };
+    const double c00 = at(1,1) * at(2,2) - at(1,2) * at(2,1), c01 = at(1,2) * at(2,0) - at(1,0) * at(2,2),
+                 c02 = at(1,0) * at(2,1) - at(1,1) * at(2,0);
+    const double det = at(0,0) * c00 + at(0,1) * c01 + at(0,2) * c02;
+    if (!std::isfinite(det) || std::abs(det) < 1e-30) return std::nullopt;
+    const double r[3][3] = {
+        {c00 / det, (at(0,2) * at(2,1) - at(0,1) * at(2,2)) / det, (at(0,1) * at(1,2) - at(0,2) * at(1,1)) / det},
+        {c01 / det, (at(0,0) * at(2,2) - at(0,2) * at(2,0)) / det, (at(0,2) * at(1,0) - at(0,0) * at(1,2)) / det},
+        {c02 / det, (at(0,1) * at(2,0) - at(0,0) * at(2,1)) / det, (at(0,0) * at(1,1) - at(0,1) * at(1,0)) / det}};
+    Mat4 out{};
+    for (int row = 0; row < 3; ++row) {
+        double t = 0;
+        for (int c = 0; c < 3; ++c) {
+            out[c * 4 + row] = float(r[row][c]);
+            t -= r[row][c] * at(c, 3);
+        }
+        out[12 + row] = float(t);
+    }
+    out[15] = 1;
+    return out;
+}
+
+// Arvo's method: the exact box of the transformed box, without eight corner transforms.
+Box transform_box(const Mat4& m, const Box& box) {
+    Box out;
+    if (box.empty()) return out;
+    for (int r = 0; r < 3; ++r) {
+        float low = m[12 + r], high = m[12 + r];
+        for (int c = 0; c < 3; ++c) {
+            const float a = m[c * 4 + r] * box.low[c], b = m[c * 4 + r] * box.high[c];
+            low += std::min(a, b);
+            high += std::max(a, b);
+        }
+        out.low[r] = low;
+        out.high[r] = high;
+    }
+    return out;
+}
+
+// Accessor min and max are in the stored component type, also for normalized integers.
+std::optional<Box> accessor_box(const cgltf_accessor* accessor) {
+    if (!accessor || !accessor->has_min || !accessor->has_max || cgltf_num_components(accessor->type) < 3)
+        return std::nullopt;
+    float scale = 1;
+    bool is_signed = false;
+    if (accessor->normalized) {
+        switch (accessor->component_type) {
+            case cgltf_component_type_r_8: scale = 127; is_signed = true; break;
+            case cgltf_component_type_r_8u: scale = 255; break;
+            case cgltf_component_type_r_16: scale = 32767; is_signed = true; break;
+            case cgltf_component_type_r_16u: scale = 65535; break;
+            default: break;
+        }
+    }
+    Box box;
+    for (int i = 0; i < 3; ++i) {
+        box.low[i] = accessor->min[i] / scale;
+        box.high[i] = accessor->max[i] / scale;
+        if (is_signed) { box.low[i] = std::max(box.low[i], -1.0f); box.high[i] = std::max(box.high[i], -1.0f); }
+    }
+    return box;
+}
+
+const cgltf_accessor* attribute(const cgltf_attribute* attributes, size_t count, cgltf_attribute_type type, int index = 0) {
+    for (size_t i = 0; i < count; ++i)
+        if (attributes[i].type == type && attributes[i].index == index) return attributes[i].data;
+    return nullptr;
+}
+
+// Accessor bounds of the base positions, grown by each morph target at weight one, as gltfio
+// computes them for culling.
+Box primitive_box(const cgltf_primitive& primitive) {
+    Box box;
+    const auto base = accessor_box(attribute(primitive.attributes, primitive.attributes_count, cgltf_attribute_type_position));
+    if (!base) return box;
+    box = *base;
+    for (size_t t = 0; t < primitive.targets_count; ++t) {
+        const auto& target = primitive.targets[t];
+        const auto delta = accessor_box(attribute(target.attributes, target.attributes_count, cgltf_attribute_type_position));
+        if (!delta) continue;
+        Box moved;
+        for (int i = 0; i < 3; ++i) { moved.low[i] = base->low[i] + delta->low[i]; moved.high[i] = base->high[i] + delta->high[i]; }
+        box.add(moved);
+    }
+    return box;
+}
+
+std::vector<float> unpack(const cgltf_accessor* accessor, size_t components) {
+    std::vector<float> values(accessor->count * components);
+    if (cgltf_num_components(accessor->type) != components ||
+            cgltf_accessor_unpack_floats(accessor, values.data(), values.size()) != values.size())
+        values.clear();
+    return values;
+}
+
+// Skinned vertices ignore their node's transform: each one moves by the weighted sum of its
+// joints' world transforms times their inverse bind matrices. Skinning is not linear in the
+// position box, so the vertices are skinned one by one, once per load.
+Box skinned_box(const cgltf_data* data, const cgltf_node& node, const cgltf_primitive& primitive,
+                const std::vector<Mat4>& worlds) {
+    const auto& skin = *node.skin;
+    std::vector<Mat4> joints(skin.joints_count);
+    for (size_t j = 0; j < skin.joints_count; ++j) {
+        Mat4 inverse_bind = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+        if (skin.inverse_bind_matrices) cgltf_accessor_read_float(skin.inverse_bind_matrices, j, inverse_bind.data(), 16);
+        joints[j] = multiply(worlds[cgltf_node_index(data, skin.joints[j])], inverse_bind);
+    }
+    const auto* positions = attribute(primitive.attributes, primitive.attributes_count, cgltf_attribute_type_position);
+    std::vector<float> points;
+    // Draco accessors have no buffer view; cgltf would unpack zeros for them.
+    if (positions && !primitive.has_draco_mesh_compression) points = unpack(positions, 3);
+    std::vector<std::pair<std::vector<float>, std::vector<float>>> sets;
+    for (int s = 0; !points.empty(); ++s) {
+        const auto* j = attribute(primitive.attributes, primitive.attributes_count, cgltf_attribute_type_joints, s);
+        const auto* w = attribute(primitive.attributes, primitive.attributes_count, cgltf_attribute_type_weights, s);
+        if (!j || !w) break;
+        auto indices = unpack(j, 4), weights = unpack(w, 4);
+        if (indices.size() != points.size() / 3 * 4 || weights.size() != indices.size()) { points.clear(); break; }
+        sets.emplace_back(std::move(indices), std::move(weights));
+    }
+    Box box;
+    if (points.empty() || sets.empty()) {
+        // Unreadable vertices: the union over joints of the transformed position box contains
+        // every skinned vertex, since each one is a convex combination of those transforms.
+        const Box local = primitive_box(primitive);
+        for (const auto& joint : joints) box.add(transform_box(joint, local));
+        return box;
+    }
+    std::vector<std::vector<float>> deltas;
+    for (size_t t = 0; t < primitive.targets_count; ++t) {
+        const auto& target = primitive.targets[t];
+        if (const auto* d = attribute(target.attributes, target.attributes_count, cgltf_attribute_type_position))
+            if (auto values = unpack(d, 3); values.size() == points.size()) deltas.push_back(std::move(values));
+    }
+    const size_t count = points.size() / 3;
+    for (size_t v = 0; v < count; ++v) {
+        Mat4 blend{};
+        float total = 0;
+        for (const auto& [indices, weights] : sets)
+            for (size_t k = 0; k < 4; ++k) {
+                const float weight = weights[v * 4 + k];
+                const auto index = size_t(indices[v * 4 + k]);
+                if (!(weight > 0) || index >= joints.size()) continue;
+                total += weight;
+                for (size_t e = 0; e < 16; ++e) blend[e] += weight * joints[index][e];
+            }
+        // A vertex without weight collapses to its node origin in Filament; it spans nothing.
+        if (!(total > 0)) continue;
+        // gltfio normalizes weights by default, so the bounds do too.
+        for (auto& e : blend) e /= total;
+        const float* p = &points[v * 3];
+        box.add(transform_point(blend, p));
+        for (const auto& delta : deltas) {
+            const float moved[3] = {p[0] + delta[v * 3], p[1] + delta[v * 3 + 1], p[2] + delta[v * 3 + 2]};
+            box.add(transform_point(blend, moved));
+        }
+    }
+    return box;
+}
+
+// The rest-pose bounds in the model's frame, before model and node transforms change: glTF
+// node transforms apply, skinned meshes are skinned with the joints' rest transforms, and each
+// morph target counts at weight one, as in gltfio's culling boxes. Like gltfio, every node with
+// a mesh counts, also nodes outside the scenes. gltfio's getBoundingBox() instead moves a skinned
+// mesh's accessor box by the mesh node's transform, which the glTF specification says to ignore:
+// Sketchfab rigs scale the armature by 100 and put the 0.01 in the inverse bind matrices.
+void compute_bounds(const cgltf_data* data, PreparedAsset& tables) {
+    const auto worlds = node_worlds(data);
+    Box bounds;
+    tables.node_boxes.assign(data->nodes_count, {Box{}.low, Box{}.high});
+    tables.parents.assign(data->nodes_count, UINT32_MAX);
+    for (size_t i = 0; i < data->nodes_count; ++i) {
+        const auto& node = data->nodes[i];
+        if (node.parent) tables.parents[i] = uint32_t(cgltf_node_index(data, node.parent));
+        if (!node.mesh) continue;
+        const bool skinned = node.skin && node.skin->joints_count;
+        Box box;
+        for (size_t p = 0; p < node.mesh->primitives_count; ++p) {
+            const auto& primitive = node.mesh->primitives[p];
+            box.add(skinned ? skinned_box(data, node, primitive, worlds) : transform_box(worlds[i], primitive_box(primitive)));
+        }
+        bounds.add(box);
+        tables.node_boxes[i] = {box.low, box.high};
+        // Filament culls a renderable, and fits shadow maps, with its box in the node's frame.
+        // gltfio gives skinned meshes the bind-space accessor box there, which can miss the
+        // skinned vertices entirely or be 100 times too large.
+        if (skinned && !box.empty())
+            if (const auto inverse = affine_inverse(worlds[i])) {
+                const Box local = transform_box(*inverse, box);
+                tables.skinned_boxes.push_back({i, {local.low, local.high}});
+            }
+    }
+    tables.bounds = {bounds.low, bounds.high};
+}
+
 void prepare_materials(const cgltf_data* data, PreparedAsset& tables, const std::string& path) {
     tables.materials.resize(data->materials_count);
     for (size_t index = 0; index < data->materials_count; ++index) {
@@ -1068,10 +1325,13 @@ void prepare_materials(const cgltf_data* data, PreparedAsset& tables, const std:
         // Provider-built instances keep the name gltfio would give them; unnamed ones get an index.
         source.label = m.name ? std::string(m.name) : "material_" + std::to_string(index);
         source.root_label = m.name ? std::string(m.name) : "material";
+        source.emissive_factor = {m.emissive_factor[0], m.emissive_factor[1], m.emissive_factor[2]};
         if (!m.has_anisotropy && !m.has_iridescence) continue;
         if (m.unlit || m.has_pbr_specular_glossiness || m.has_diffuse_transmission)
             throw AssetError("Anisotropy/iridescence cannot use unlit, specular-glossiness, or custom diffuse transmission");
         SurfaceSource surface;
+        surface.has_anisotropy = m.has_anisotropy;
+        surface.has_iridescence = m.has_iridescence;
         if (m.has_anisotropy) {
             surface.anisotropy = m.anisotropy.anisotropy_strength;
             surface.rotation = m.anisotropy.anisotropy_rotation;
@@ -1086,8 +1346,10 @@ void prepare_materials(const cgltf_data* data, PreparedAsset& tables, const std:
         if (!std::all_of(std::begin(v), std::end(v), finite_float) || !(0 <= v[0] && v[0] <= 1 && 0 <= v[2] && v[2] <= 1
                 && v[3] >= 1 && std::min(v[4], v[5]) >= 0))
             invalid("Invalid anisotropy or iridescence factors");
-        if (m.has_anisotropy) surface.anisotropy_texture = texture_info(m.anisotropy.anisotropy_texture, path);
-        if (m.has_iridescence) {
+        // The archive path binds these through its extension texture plan.
+        if (!archive_materials && m.has_anisotropy)
+            surface.anisotropy_texture = texture_info(m.anisotropy.anisotropy_texture, path);
+        if (!archive_materials && m.has_iridescence) {
             surface.iridescence_texture = texture_info(m.iridescence.iridescence_texture, path);
             surface.thickness_texture = texture_info(m.iridescence.iridescence_thickness_texture, path);
         }
@@ -1143,6 +1405,121 @@ void prepare_materials(const cgltf_data* data, PreparedAsset& tables, const std:
         source.kind = MaterialKind::diffuse;
         source.source = tables.diffuse.size();
         tables.diffuse.push_back(std::move(diffuse));
+    }
+}
+
+// Archive entry, texture slots, and UV sets of each glTF material for the archive path. The
+// provider applies the plan; warnings come from here, so strict loads raise them as errors.
+void plan_archive_materials(const cgltf_data* data, PreparedAsset& tables, const std::string& path, const Issues& issue) {
+    using R = ExtensionRole;
+    using E = ArchiveEntry;
+    tables.plans.resize(data->materials_count);
+    tables.textures.resize(data->textures_count);
+    for (size_t index = 0; index < data->materials_count; ++index) {
+        const auto& m = data->materials[index];
+        auto& plan = tables.plans[index];
+        const auto name = repr(material_name(m, index, " "));
+        if (m.has_clearcoat && m.clearcoat.clearcoat_normal_texture.texture)
+            plan.clearcoat_normal_scale = m.clearcoat.clearcoat_normal_texture.scale;
+        // Only the Specular entries and the anisotropic entries have KHR_materials_specular inputs.
+        // With them, Filament's isotropic lobe uses glTF's F90 instead of its F90 from F0; see
+        // native/materials/surface.mat.in.
+        const bool anisotropy = m.has_anisotropy, specular = m.has_specular;
+        const bool extended = m.has_clearcoat || m.has_sheen || m.has_iridescence;
+        if (m.unlit) plan.entry = E::Unlit;
+        else if (m.has_diffuse_transmission) plan.entry = E::DiffuseTransmission;
+        else if (m.has_pbr_specular_glossiness) plan.entry = E::SpecularGlossiness;
+        else if (m.has_volume) plan.entry = anisotropy ? E::RefractionSolidAnisotropy
+                                            : specular ? E::RefractionSolidSpecular : E::RefractionSolid;
+        else if (m.has_transmission) plan.entry = anisotropy ? E::RefractionThinAnisotropy
+                                                  : specular ? E::RefractionThinSpecular : E::RefractionThin;
+        else if (anisotropy) plan.entry = E::LitAnisotropy;
+        else if (specular) plan.entry = E::LitSpecular;
+        else if (extended) plan.entry = E::LitExtended;
+        const bool lit = plan.entry != E::Unlit && plan.entry != E::SpecularGlossiness && plan.entry != E::DiffuseTransmission;
+        if (plan.entry == E::SpecularGlossiness) {
+            std::vector<std::string> dropped;
+            const std::pair<bool, const char*> others[] = {
+                {bool(m.has_clearcoat), "KHR_materials_clearcoat"}, {bool(m.has_sheen), "KHR_materials_sheen"},
+                {bool(m.has_specular), "KHR_materials_specular"}, {bool(m.has_transmission), "KHR_materials_transmission"},
+                {bool(m.has_volume), "KHR_materials_volume"}};
+            for (const auto& [present, extension] : others) if (present) dropped.push_back(extension);
+            if (!dropped.empty()) {
+                std::string list;
+                for (const auto& item : dropped) list += (list.empty() ? "" : ", ") + item;
+                issue("Material " + name + " uses KHR_materials_pbrSpecularGlossiness, which renders without " + list);
+            }
+        }
+        // Core textures on a third UV set: every archive entry reads TEXCOORD_0 and TEXCOORD_1.
+        const std::pair<const cgltf_texture_view*, const char*> core[] = {
+            {&m.pbr_metallic_roughness.base_color_texture, "baseColorTexture"},
+            {&m.pbr_metallic_roughness.metallic_roughness_texture, "metallicRoughnessTexture"},
+            {&m.normal_texture, "normalTexture"}, {&m.occlusion_texture, "occlusionTexture"},
+            {&m.emissive_texture, "emissiveTexture"},
+            {&m.pbr_specular_glossiness.diffuse_texture, "diffuseTexture"}};
+        for (const auto& [view, role] : core) {
+            const int uv = view->has_transform && view->transform.has_texcoord ? view->transform.texcoord : view->texcoord;
+            if (view->texture && uv > 1)
+                issue("Material " + name + " renders without its " + role + ", which uses TEXCOORD_"
+                      + std::to_string(uv) + "; filly supports TEXCOORD_0 and TEXCOORD_1");
+        }
+        if (!lit) continue;
+        const bool refraction = plan.entry >= E::RefractionThin && plan.entry <= E::RefractionSolidAnisotropy;
+        const bool lobes = plan.entry != E::LitCore;
+        struct Use { R role; const cgltf_texture_view* view; bool enabled; bool srgb; const char* label; };
+        const auto same = [](const cgltf_texture_view& a, const cgltf_texture_view& b) { return a.texture && a.texture == b.texture; };
+        const Use uses[] = {
+            {R::transmission, &m.transmission.transmission_texture, m.has_transmission && refraction, false, "transmissionTexture"},
+            {R::volumeThickness, &m.volume.thickness_texture, m.has_volume && refraction, false, "thicknessTexture"},
+            {R::anisotropy, &m.anisotropy.anisotropy_texture, bool(m.has_anisotropy), false, "anisotropyTexture"},
+            {R::iridescence, &m.iridescence.iridescence_texture, m.has_iridescence && lobes, false, "iridescenceTexture"},
+            {R::clearCoat, &m.clearcoat.clearcoat_texture, m.has_clearcoat && lobes, false, "clearcoatTexture"},
+            // gltfio decodes these in sRGB, and a roughness or specular map that shares the texture with them too.
+            {R::sheenColor, &m.sheen.sheen_color_texture, m.has_sheen && lobes, true, "sheenColorTexture"},
+            {R::specularColor, &m.specular.specular_color_texture, bool(m.has_specular), true, "specularColorTexture"},
+            {R::specular, &m.specular.specular_texture, bool(m.has_specular),
+                same(m.specular.specular_texture, m.specular.specular_color_texture), "specularTexture"},
+            {R::iridescenceThickness, &m.iridescence.iridescence_thickness_texture, m.has_iridescence && lobes, false,
+                "iridescenceThicknessTexture"},
+            {R::clearCoatRoughness, &m.clearcoat.clearcoat_roughness_texture, m.has_clearcoat && lobes, false,
+                "clearcoatRoughnessTexture"},
+            {R::sheenRoughness, &m.sheen.sheen_roughness_texture, m.has_sheen && lobes,
+                same(m.sheen.sheen_roughness_texture, m.sheen.sheen_color_texture), "sheenRoughnessTexture"},
+            {R::clearCoatNormal, &m.clearcoat.clearcoat_normal_texture, m.has_clearcoat && lobes, false,
+                "clearcoatNormalTexture"},
+        };
+        const size_t capacity = plan.entry == E::LitCore ? 0 : refraction ? 3 : 4;
+        std::vector<std::string> dropped;
+        size_t distinct = 0;
+        for (const auto& use : uses) {
+            if (!use.enabled || !use.view->texture) continue;
+            const size_t texture = size_t(use.view->texture - data->textures);
+            auto& target = plan.roles[size_t(use.role)];
+            // texture_info() checks the image, sampler, and UV set.
+            AssetTexture info = texture_info(*use.view, path, false);
+            target.uv = uint8_t(info.uv);
+            target.transform = info.transform;
+            const auto found = std::find_if(plan.slots.begin(), plan.slots.end(), [&](const ExtensionSampler& s) {
+                return s.texture == texture && s.srgb == use.srgb; });
+            const bool known = std::any_of(uses, std::end(uses), [&](const Use& other) {
+                return &other < &use && other.enabled && other.view->texture == use.view->texture && other.srgb == use.srgb; });
+            if (!known) ++distinct;
+            if (found != plan.slots.end()) {
+                target.slot = int8_t(found - plan.slots.begin());
+            } else if (plan.slots.size() < capacity) {
+                target.slot = int8_t(plan.slots.size());
+                plan.slots.push_back({texture, use.srgb});
+                if (tables.textures[texture].bytes.empty()) tables.textures[texture] = texture_info(*use.view, path);
+            } else {
+                dropped.push_back(use.label);
+            }
+        }
+        if (!dropped.empty()) {
+            std::string list;
+            for (const auto& item : dropped) list += (list.empty() ? "" : ", ") + item;
+            issue("Material " + name + " has " + std::to_string(distinct) + " extension textures, but its shader has "
+                  + std::to_string(capacity) + " extension texture samplers; it renders without its " + list);
+        }
     }
 }
 
@@ -1208,7 +1585,7 @@ Prepared prepare_asset(std::vector<uint8_t> bytes, const std::string& path, cons
     prepared.tables = std::make_shared<PreparedAsset>();
     auto& tables = *prepared.tables;
     // In a view that is not transparent, Filament writes the sharpened edge alpha of MASK
-    // materials to the target, and only color grading then stores alpha one. Variant materials
+    // materials to the target, and only the encode pass then stores alpha one. Variant materials
     // are included because a variant can switch a mesh to one of them.
     for (size_t i = 0; i < data->materials_count; ++i)
         tables.masked = tables.masked || data->materials[i].alpha_mode == cgltf_alpha_mode_mask;
@@ -1229,7 +1606,8 @@ Prepared prepare_asset(std::vector<uint8_t> bytes, const std::string& path, cons
         if (m.has_dispersion && (!m.has_volume || m.unlit || m.has_pbr_specular_glossiness))
             throw AssetError("Dispersion requires a volume material without unlit or specular-glossiness");
     }
-    for (size_t i = 0; i < data->materials_count; ++i) check_texture_count(data->materials[i], i, options, issue);
+    if (!archive_materials)
+        for (size_t i = 0; i < data->materials_count; ++i) check_texture_count(data->materials[i], i, options, issue);
 
     Loader loader{data, path};
     load_buffers(loader, prepared.patches);
@@ -1246,9 +1624,11 @@ Prepared prepare_asset(std::vector<uint8_t> bytes, const std::string& path, cons
     if (cgltf_validate(data) != cgltf_result_success) invalid("cgltf validation failed");
 
     prepare_nodes(data, tables);
+    compute_bounds(data, tables);
     prepare_cameras(data, tables);
     prepare_animations(data, tables, prepared.patches, issue);
     prepare_materials(data, tables, path);
+    if (archive_materials) plan_archive_materials(data, tables, path, issue);
     for (size_t i = 0; i < data->images_count; ++i) {
         const auto& image = data->images[i];
         if (image.mime_type || !image.buffer_view) continue;

@@ -54,7 +54,10 @@ jobs:
           CIBW_TEST_REQUIRES: 'pytest pillow pyglet==1.4.11'
           CIBW_TEST_COMMAND_LINUX: 'timeout 600 xvfb-run -a python -m pytest {project}/tests -q -m "not psychopy" -o faulthandler_timeout=60'
           # Hosted Windows runners do not supply a reliable OpenGL rendering device.
-          CIBW_TEST_COMMAND_WINDOWS: 'python -m pytest {project}/tests/test_stress.py -q'
+          CIBW_TEST_COMMAND_WINDOWS: 'python -m pytest {project}/tests/test_stress.py {project}/tests/test_native_imports.py -q'
+      - name: Check extension imports
+        shell: bash
+        run: python tools/check_native_imports.py wheelhouse/*.whl
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}

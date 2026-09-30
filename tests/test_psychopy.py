@@ -30,7 +30,7 @@ def test_psychopy_samples_texture_and_owns_flip(triangle_glb, monkeypatch, use_f
 
     monkeypatch.setattr(win.backend, "swapBuffers", swap)
     try:
-        label = visual.TextBox2(win, text="Suzanne", units="pix", pos=(-60, 60), size=(110, 22),
+        label = visual.TextBox2(win, text="Horse", units="pix", pos=(-60, 60), size=(110, 22),
                                 letterHeight=12, color="white", anchor="top-left", alignment="left", autoLog=False)
         with create_renderer(win) as renderer:
             scene = renderer.create_scene()

@@ -1,4 +1,4 @@
-"""Spin Suzanne in a plain pyglet window through a shared OpenGL texture.
+"""Spin and animate the wooden horse in a plain pyglet window through a shared OpenGL texture.
 
 pyglet's event loop calls on_draw and swaps buffers. The moderngl and zengl
 examples reuse run() and change only the host draw.
@@ -14,7 +14,7 @@ import pyglet
 from pyglet import gl
 
 import filly
-from screenshot import setup_scene
+from screenshot import animate, setup_scene
 
 
 class GpuTimer:
@@ -69,13 +69,13 @@ def run(window, renderer, target, draw, args):
     The caller closes the window after this returns.
     """
     width, height = target.width, target.height
-    scene, model = setup_scene(renderer, width / height)
+    scene, model = setup_scene(renderer, width / height, spin=True)
     timer = GpuTimer()
     timings = []
     start = perf_counter()
 
     def on_draw():
-        model.rotation_euler_deg = (8, -24 + (perf_counter() - start) * args.spin, 0)
+        animate(model, perf_counter() - start, args.spin)
         renderer.render(scene, target)
         # Acquire outside the timed region so the timers exclude the wait for Filament's frame.
         with target.acquire():

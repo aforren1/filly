@@ -5,6 +5,7 @@
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
@@ -224,6 +225,8 @@ NB_MODULE(_native, module) {
         "An optional asset feature cannot be reproduced by this renderer.", PyExc_UserWarning, nullptr);
     if (!compatibility_warning) throw nb::python_error();
     module.attr("AssetCompatibilityWarning") = nb::handle(compatibility_warning);
+    // The build's glTF material path (CMake FILLY_MATERIALS), for tests and diagnostics.
+    module.attr("_materials") = FILLY_MATERIALS_ARCHIVE ? "archive" : "runtime";
 
     auto shapes = module.def_submodule("shapes",
         "Vertex arrays for simple shapes, for ``Scene.create_mesh(**shape)``.\n\n"
@@ -408,6 +411,7 @@ NB_MODULE(_native, module) {
         .def_prop_ro("closed", &Renderer::closed)
         .def_prop_ro("precompiled_shaders", &Renderer::precompiled_shaders)
         .def_prop_ro("shared_context", &Renderer::shared_context)
+        .def_prop_ro("gl_platform", &Renderer::gl_platform)
         .def_prop_ro("stats", &Renderer::stats)
         .def("__enter__", [](Renderer& self) -> Renderer& {
             if (self.closed()) throw FillyError("Renderer is closed");
@@ -545,6 +549,21 @@ NB_MODULE(_native, module) {
            "height"_a.none() = nb::none(), "center"_a.none() = nb::none(), "near"_a, "far"_a)
         .def_prop_rw("position", &Camera::position, &Camera::set_position)
         .def("look_at", &Camera::look_at, "target"_a, "up"_a = Vec3{0, 1, 0})
+        .def("frame", [](Camera& self, nb::handle target, double fill, std::optional<Vec3> direction, Vec3 up,
+                         const std::string& fit, std::optional<double> near, std::optional<double> far,
+                         std::optional<double> aspect) {
+            const FrameOptions options{fill, direction, up, fit, near, far, aspect};
+            if (nb::isinstance<Model>(target)) return self.frame(nb::cast<const Model&>(target), options);
+            if (nb::isinstance<Node>(target)) return self.frame(nb::cast<const Node&>(target), options);
+            std::array<Vec3, 2> box;
+            if (!nb::try_cast(target, box))
+                throw nb::type_error("target must be a Model, a Node, or a (min, max) box of two 3-vectors");
+            return self.frame(box, options);
+        }, "target"_a, nb::kw_only(), "fill"_a = 0.8, "direction"_a.none() = nb::none(), "up"_a = Vec3{0, 1, 0},
+           "fit"_a = "sphere", "near"_a.none() = nb::none(), "far"_a.none() = nb::none(),
+           "aspect"_a.none() = nb::none(),
+           "Aim at the target's center and set the distance, and near and far, so that it fills `fill` "
+           "of the view. Returns the distance to the center.")
         .def_prop_rw("transform", [](const Camera& self) { return to_array(self.transform()); },
             [](Camera& self, const MatrixInput& value) { self.set_transform(from_array(value)); }, nb::rv_policy::move)
         .def_prop_ro("view_matrix", [](const Camera& self) { return to_array(self.view_matrix()); }, nb::rv_policy::move)
@@ -618,6 +637,7 @@ NB_MODULE(_native, module) {
             return nb::cast(self.parent());
         })
         .def_prop_ro("children", &Node::children)
+        .def_prop_ro("bounds", &Node::bounds)
         .def_prop_ro("morph_target_count", &Node::morph_target_count)
         .def("set_morph_weights", &Node::set_morph_weights, "weights"_a)
         .def_prop_rw("transform", [](const Node& self) { return to_array(self.transform()); },
@@ -642,6 +662,7 @@ NB_MODULE(_native, module) {
         .def_prop_rw("metallic", &Material::metallic, &Material::set_metallic)
         .def_prop_rw("roughness", &Material::roughness, &Material::set_roughness)
         .def_prop_rw("emissive", &Material::emissive, &Material::set_emissive)
+        .def_prop_ro("_shader", &Material::shader)
         .def_prop_rw("base_color_texture", [](const Material& self) { return wrap_texture(self.texture(0)); },
             [](Material& self, nb::handle value) {
                 auto texture = unwrap_texture(value);

@@ -20,15 +20,30 @@ uv pip install --python .deps/psychopy311/Scripts/python.exe --no-build-isolatio
 uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py
 ```
 
-To display a local GLB instead of Suzanne, pass its path:
+To display a local GLB instead of the wooden horse, pass its path:
 
 ```powershell
 uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py "C:/models/stimulus.glb" --frames 600
 ```
 
-The demo centers custom assets and fits the camera without changing physical scale. It plays the
+The demo centers the asset and frames it with `camera.frame()`: the bounding sphere spans 85% of
+the window height at every rotation. The asset keeps its physical scale. It plays the
 first glTF animation and shows the file stem in the upper-left label. Custom assets do not spin
-unless `--spin` is supplied. Press Escape to stop. Custom assets do not trigger the Suzanne download.
+unless `--spin` is supplied. Without a path, the demo shows the horse in `examples/assets` from a
+three-quarter view, spins it at 30 degrees per second, and plays its spring animation. Press Escape to stop.
+
+If the asset has exactly one camera, the demo uses it. Useful options:
+
+| Option | Effect |
+| --- | --- |
+| `--camera NAME` | Use the imported camera on the node with this name. |
+| `--fit-camera` | Ignore imported cameras and frame all geometry, including ground planes. |
+| `--no-animation`, `--time 4` | Stop playback, or show the pose at 4 s. |
+| `--variant "Khronos Red"` | Select a material variant. |
+| `--exposure 0` | Brighten a dim asset. |
+| `--environment-intensity 30000` | Add environment light to an asset that has its own lights. Such assets get no environment by default, so authored lighting stays as designed. |
+
+Run the demo with `--help` for the lighting, environment, and projection options.
 
 Use these options to inspect an asset:
 
@@ -42,10 +57,10 @@ Use these options to inspect an asset:
 | `--lighting studio` | Disable authored lights and add the demo's directional light. |
 | `--lighting asset` | Retain authored lights without adding a directional light. |
 | `--lighting environment` | Disable authored lights and light the model with the panorama. Default intensity: 30000 lux; exposure: EV100 15. |
-| `--view 35 22` | Fit the camera at yaw 35 and pitch 22 degrees. Overrides the default imported camera; cannot be combined with `--camera`. |
+| `--view 35 22` | Fit the camera at yaw 35 and pitch 22 degrees. Files default to 0 0; the horse defaults to 40 12. Overrides the default imported camera; cannot be combined with `--camera`. |
 | `--exposure 0` | Set camera EV100. Lower values make the image brighter. |
 | `--camera "CameraNode"` | Use an imported camera by the name or glTF index of its node. |
-| `--projection perspective` | Set the fitted camera projection. Files default to perspective; Suzanne defaults to orthographic. |
+| `--projection orthographic` | Set the fitted camera projection. The default is perspective. |
 | `--background 0.5 0.5 0.5` | Set a neutral linear RGB background to inspect glass. |
 | `--environment studio.hdr` | Load a 2:1 HDR panorama for reflections and diffuse lighting. |
 | `--environment-intensity 30000` | Set environment intensity in lux. |
@@ -190,7 +205,7 @@ then any overlays. The adapter converts premultiplied texture color for ImageSti
 uv run --no-sync python examples/psychopy_shared.py --transparent --frames 300
 ```
 
-This draws Suzanne over a regular PsychoPy grating, with the text label above both.
+This draws the horse over a regular PsychoPy grating, with the text label above both.
 Glass can refract geometry in the Filament scene, but cannot refract the PsychoPy underlay.
 
 ## Lighting and shadows

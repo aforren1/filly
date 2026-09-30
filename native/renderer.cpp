@@ -2,6 +2,7 @@
 #include "gl_interop.h"
 #include "gltf_prepare.h"
 #include "materials.h"
+#include "output_pass.h"
 #include "engine_config.h"
 #include "webp_provider.h"
 
@@ -41,7 +42,6 @@
 #include <gltfio/TextureProvider.h>
 #include <gltfio/math.h>
 #include <ktxreader/Ktx1Reader.h>
-#include <gltfio/materials/uberarchive.h>
 #include <math/mat4.h>
 #include <utils/EntityManager.h>
 #include <utils/Log.h>
@@ -53,6 +53,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <string_view>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -157,6 +158,27 @@ struct State {
     f::View* fill_view = nullptr;
     f::Scene* fill_scene = nullptr;
     f::Skybox* fill_sky = nullptr;
+    // filly's output passes (see output_pass.h). Each draws one full-screen triangle in its own
+    // view, after the scene view in the same frame.
+    struct Pass {
+        f::Material* material = nullptr;
+        f::MaterialInstance* instance = nullptr;
+        utils::Entity entity;
+        f::Scene* scene = nullptr;
+        f::View* view = nullptr;
+        // Parameters as last set, so that steady frames set none. A target's release clears
+        // `input`, because a new texture can reuse a destroyed one's address.
+        f::Texture* input = nullptr;
+        int flags = -1;
+        m::float4 values{NAN};
+        m::float4 bounds{NAN};
+        m::float4 inner{NAN};
+        m::float4 background{NAN};
+    };
+    Pass encode, encode_graded, fxaa;
+    f::VertexBuffer* triangle = nullptr;
+    f::IndexBuffer* triangle_indices = nullptr;
+    utils::Entity pass_camera;
 
     void check_thread() const {
         if (thread != std::this_thread::get_id())
@@ -248,6 +270,10 @@ struct SceneData : Resource {
     std::vector<std::shared_ptr<ModelData>> dirty_bones;
     Vec4 background = {0, 0, 0, 1};
     f::ColorGrading* grading = nullptr;
+    // The tone mapper mixes channels, so it runs in Filament's 3D LUT (see apply_grading()).
+    bool channel_mixing = false;
+    // Filament's color grading writes sRGB values, so the encode pass stores them as they are.
+    bool filament_encodes = false;
     f::IndirectLight* environment = nullptr;
     f::Texture* reflections = nullptr;
     f::Texture* irradiance = nullptr;
@@ -264,12 +290,12 @@ struct SceneData : Resource {
     // Fog color last sent to Filament, after the exposure compensation. NaN forces an update.
     m::float3 fog_applied = {NAN, NAN, NAN};
     float dof_scale = NAN;
-    // The caller's opt-in to skip postprocessing: the view writes shaded color straight into the
-    // target and the GPU applies the sRGB encoding on write. It is never chosen automatically,
-    // because the two paths round differently by up to one 8-bit level.
+    // The caller's opt-in to skip filly's encode pass: the view writes shaded color straight into
+    // the target and the GPU applies the sRGB encoding on write. It is never chosen
+    // automatically, because the two paths round differently by up to one 8-bit level.
     bool direct = false;
     // Live models with MASK materials. Filament writes their sharpened edge alpha to the target,
-    // and only color grading stores alpha one for an opaque view.
+    // and only the encode pass stores alpha one for an opaque view.
     size_t masked = 0;
     void check() const {
         state->check();
@@ -299,10 +325,11 @@ struct SceneData : Resource {
     ~SceneData() override { release(); }
 };
 
-// Linear tone mapping clamps to [0, 1], as 8-bit storage does, so only these options need
-// Filament's postprocessing. Transparent views need color grading because it premultiplies after
-// encoding, which is what hosts that blend in encoded space expect; the GPU would encode the
-// premultiplied linear color instead. Returns the conflicting settings, or an empty string.
+// The direct path writes shaded color straight into the target, so it cannot render these
+// options: Filament's postprocessing (tone mapping other than the linear clamp, bloom, depth of
+// field, vignette), filly's passes (FXAA, dithering, premultiplying after encoding for
+// transparent views, which hosts that blend in encoded space expect), and, by its original
+// contract, MSAA, refraction, and SSAO. Returns the conflicting settings, or an empty string.
 std::string direct_conflicts(const SceneData& scene) {
     std::string names;
     auto add = [&](bool conflict, const char* name) {
@@ -320,11 +347,25 @@ std::string direct_conflicts(const SceneData& scene) {
     add(scene.vignette, "vignette");
     return names;
 }
-// Called before an option that needs postprocessing is applied, so a conflict changes nothing.
-void require_graded(const SceneData& scene, bool needs_grading, const std::string& option) {
-    if (scene.direct && needs_grading)
-        throw std::invalid_argument(option + " needs color grading, but output_path is "
-                                    "'direct'; set output_path = 'graded' first");
+// Called before an option that the direct path cannot render is applied, so a conflict changes
+// nothing.
+void require_exact(const SceneData& scene, bool needs_exact, const std::string& option) {
+    if (scene.direct && needs_exact)
+        throw std::invalid_argument(option + " needs the exact output path, but output_path is "
+                                    "'direct'; set output_path = 'exact' first");
+}
+// Filament's postprocessing runs only for the options that are part of it. Its color grading
+// then writes scene-linear color, or sRGB color for a channel-mixing tone mapper with sRGB
+// encoding (see apply_grading()); filly's encode pass still rounds, dithers, and sets alpha.
+void update_postprocessing(SceneData& scene) {
+    scene.view->setPostProcessingEnabled(!scene.direct && (scene.tone_mapping != "linear" || scene.bloom
+                                                            || scene.depth_of_field || scene.vignette));
+}
+// Dithering belongs before the rounding to 8-bit levels: in filly's encode pass, or in Filament's
+// color grading when that encodes.
+void update_dithering(SceneData& scene) {
+    scene.view->setDithering(scene.dithering && scene.filament_encodes ? f::View::Dithering::TEMPORAL
+                                                                       : f::View::Dithering::NONE);
 }
 
 // Scenes must not keep a camera whose component is gone.
@@ -679,6 +720,20 @@ struct TargetData : Resource {
     // renders into the host texture itself, which is mutable and has no view.
     uint32_t host_view = 0;
     SyncPoint ready;
+    // The exact output path, created on its first render: the scene renders scene-linear color
+    // into `linear` (with the target's depth, or `linear_depth` if the target has none), and
+    // filly's encode pass writes `color` through `output`. With FXAA, the encode pass writes
+    // `ldr` and FXAA writes `color`. When Filament's color grading encodes (a channel-mixing tone
+    // mapper with sRGB encoding), the scene renders into the RGBA8 `graded` instead, as
+    // gltf_viewer renders into its RGBA8 swap chain, and the encode pass copies it.
+    f::Texture* linear = nullptr;
+    f::Texture* linear_depth = nullptr;
+    f::RenderTarget* linear_target = nullptr;
+    f::Texture* graded = nullptr;
+    f::RenderTarget* graded_target = nullptr;
+    f::RenderTarget* output = nullptr;
+    f::Texture* ldr = nullptr;
+    f::RenderTarget* ldr_target = nullptr;
     void check() const {
         state->check();
         if (!target) throw FillyError("Render target is closed");
@@ -690,14 +745,16 @@ struct TargetData : Resource {
                 host_done = nullptr;
                 state->interop->destroy(*state->engine, ready);
             }
-            if (target) state->engine->destroy(target);
-            if (depth) state->engine->destroy(depth);
-            if (color) state->engine->destroy(color);
+            for (auto* rt : {target, linear_target, graded_target, output, ldr_target}) if (rt) state->engine->destroy(rt);
+            for (auto* texture : {linear, graded, linear_depth, ldr, depth, color}) if (texture) state->engine->destroy(texture);
         }
+        if (state->encode.input && state->encode.input == linear) state->encode.input = nullptr;
+        if (state->encode_graded.input && state->encode_graded.input == graded) state->encode_graded.input = nullptr;
+        if (state->fxaa.input && state->fxaa.input == ldr) state->fxaa.input = nullptr;
         if (host_view) state->stale_views.push_back(host_view);
         host_view = 0;
-        target = nullptr;
-        color = depth = nullptr;
+        target = linear_target = graded_target = output = ldr_target = nullptr;
+        color = depth = linear = graded = linear_depth = ldr = nullptr;
         held = 0;
     }
     ~TargetData() override { release(); }
@@ -785,6 +842,22 @@ void initialize_model(ModelData& model, const std::vector<MaterialBinding>& bind
         if (engine.getCameraComponent(entity)) model.camera_entities.push_back(entity);
     }
     model.camera_handles.resize(model.camera_entities.size());
+    // Follow KHR_materials_emissive_strength: emission is factor times strength, once. gltfio
+    // bakes the strength into emissiveFactor and every shader multiplies by emissiveStrength again.
+    // This runs before animation reads rest values, so animated factor and strength stay correct.
+    for (const auto& [index, instance] : bindings) {
+        if (!instance || index >= prepared.materials.size()) continue;
+        if (!instance->getMaterial()->hasParameter("emissiveFactor")) continue;
+        const auto& factor = prepared.materials[index].emissive_factor;
+        instance->setParameter("emissiveFactor", m::float3{factor[0], factor[1], factor[2]});
+    }
+    for (const auto& [index, box] : prepared.skinned_boxes) {
+        if (index >= model.nodes.size() || !model.nodes[index]) continue;
+        const auto renderable = renderables.getInstance(model.nodes[index]);
+        if (!renderable) continue;
+        const auto& [low, high] = box;
+        renderables.setAxisAlignedBoundingBox(renderable, f::Box().set(m::float3{low[0], low[1], low[2]}, m::float3{high[0], high[1], high[2]}));
+    }
     initialize_visibility(model);
     initialize_cameras(model, prepared.cameras);
     initialize_animations(model, prepared.animations, bindings);
@@ -886,6 +959,26 @@ void State::close() noexcept {
     fill_view = nullptr;
     fill_scene = nullptr;
     fill_sky = nullptr;
+    for (auto* pass : {&encode, &encode_graded, &fxaa}) {
+        if (pass->view) engine->destroy(pass->view);
+        if (pass->scene) engine->destroy(pass->scene);
+        if (pass->entity) {
+            engine->destroy(pass->entity);
+            utils::EntityManager::get().destroy(pass->entity);
+        }
+        if (pass->instance) engine->destroy(pass->instance);
+        if (pass->material) engine->destroy(pass->material);
+        *pass = {};
+    }
+    if (triangle) engine->destroy(triangle);
+    if (triangle_indices) engine->destroy(triangle_indices);
+    triangle = nullptr;
+    triangle_indices = nullptr;
+    if (pass_camera) {
+        engine->destroyCameraComponent(pass_camera);
+        utils::EntityManager::get().destroy(pass_camera);
+        pass_camera = {};
+    }
     host_inputs.clear();
     if (frame_chain) engine->destroy(frame_chain);
     frame_chain = nullptr;
@@ -894,6 +987,198 @@ void State::close() noexcept {
     f::Engine::destroy(&engine);
     engine = nullptr;
     delete_views();
+}
+
+// Builds a pass on first use: its material, one full-screen triangle, and a view that
+// writes the shader output raw (no postprocessing).
+enum class PassKind { encode, encode_graded, fxaa };
+State::Pass& output_pass(State& state, State::Pass& pass, PassKind kind) {
+    if (pass.view) return pass;
+    auto& engine = *state.engine;
+    if (!state.triangle) {
+        // Clip-space corners: one triangle that covers the whole viewport.
+        static const m::float4 corners[3] = {{-1, -1, 1, 1}, {3, -1, 1, 1}, {-1, 3, 1, 1}};
+        static const uint16_t order[3] = {0, 1, 2};
+        state.triangle = f::VertexBuffer::Builder().vertexCount(3).bufferCount(1)
+            .attribute(f::VertexAttribute::POSITION, 0, f::VertexBuffer::AttributeType::FLOAT4).build(engine);
+        state.triangle->setBufferAt(engine, 0, f::VertexBuffer::BufferDescriptor(corners, sizeof(corners)));
+        state.triangle_indices = f::IndexBuffer::Builder().indexCount(3)
+            .bufferType(f::IndexBuffer::IndexType::USHORT).build(engine);
+        state.triangle_indices->setBuffer(engine, f::IndexBuffer::BufferDescriptor(order, sizeof(order)));
+        state.pass_camera = utils::EntityManager::get().create();
+        engine.createCamera(state.pass_camera)->setProjection(f::Camera::Projection::ORTHO, -1, 1, -1, 1, 0, 1);
+    }
+    pass.material = kind == PassKind::fxaa ? build_fxaa_material(engine)
+                                           : build_encode_material(engine, kind == PassKind::encode_graded);
+    pass.instance = pass.material->createInstance();
+    pass.entity = utils::EntityManager::get().create();
+    f::RenderableManager::Builder(1).boundingBox({{-1, -1, -1}, {1, 1, 1}}).material(0, pass.instance)
+        .geometry(0, f::RenderableManager::PrimitiveType::TRIANGLES, state.triangle, state.triangle_indices, 0, 3)
+        .culling(false).castShadows(false).receiveShadows(false).build(engine, pass.entity);
+    pass.scene = engine.createScene();
+    pass.scene->addEntity(pass.entity);
+    pass.view = engine.createView();
+    pass.view->setScene(pass.scene);
+    pass.view->setCamera(engine.getCameraComponent(state.pass_camera));
+    pass.view->setPostProcessingEnabled(false);
+    pass.view->setShadowingEnabled(false);
+    // The triangle always covers the viewport, so culling has nothing to reject.
+    pass.view->setFrustumCullingEnabled(false);
+    return pass;
+}
+
+// Allocates a target's exact-path buffers on first use; targets never change size. The linear
+// and graded buffers are allocated only for the routes that the target's scenes take.
+void prepare_exact(State& state, TargetData& target, bool fxaa, bool graded) {
+    auto& engine = *state.engine;
+    using T = f::Texture;
+    using A = f::RenderTarget::AttachmentPoint;
+    if (!target.output) {
+        target.output = f::RenderTarget::Builder().texture(A::COLOR, target.color).build(engine);
+        if (!target.depth)
+            target.linear_depth = T::Builder().width(target.width).height(target.height).levels(1)
+                .sampler(T::Sampler::SAMPLER_2D).format(T::InternalFormat::DEPTH24)
+                .usage(T::Usage::DEPTH_ATTACHMENT).build(engine);
+        if (!target.output || (!target.depth && !target.linear_depth))
+            throw FillyError("Could not create the output render target");
+    }
+    auto* depth = target.depth ? target.depth : target.linear_depth;
+    if (!graded && !target.linear_target) {
+        // RGBA16F: alpha for transparent views, and 11 significant bits keep the encoded value
+        // within 0.06 levels of the exact one. See docs/explanation/design.md.
+        target.linear = T::Builder().width(target.width).height(target.height).levels(1)
+            .sampler(T::Sampler::SAMPLER_2D).format(T::InternalFormat::RGBA16F)
+            .usage(T::Usage::COLOR_ATTACHMENT | T::Usage::SAMPLEABLE).build(engine);
+        target.linear_target = f::RenderTarget::Builder().texture(A::COLOR, target.linear)
+            .texture(A::DEPTH, depth).build(engine);
+        if (!target.linear || !target.linear_target)
+            throw FillyError("Could not create the scene-linear render target");
+    }
+    if (graded && !target.graded_target) {
+        // RGBA8, so the driver rounds Filament's sRGB output to levels as it does for
+        // gltf_viewer's swap chain. An RGBA16F buffer moved 1% of DamagedHelmet's pixels by one
+        // level against gltf_viewer.
+        target.graded = T::Builder().width(target.width).height(target.height).levels(1)
+            .sampler(T::Sampler::SAMPLER_2D).format(T::InternalFormat::RGBA8)
+            .usage(T::Usage::COLOR_ATTACHMENT | T::Usage::SAMPLEABLE).build(engine);
+        target.graded_target = f::RenderTarget::Builder().texture(A::COLOR, target.graded)
+            .texture(A::DEPTH, depth).build(engine);
+        if (!target.graded || !target.graded_target)
+            throw FillyError("Could not create the graded render target");
+    }
+    if (graded) output_pass(state, state.encode_graded, PassKind::encode_graded);
+    if (fxaa) output_pass(state, state.fxaa, PassKind::fxaa);
+    if (fxaa && !target.ldr_target) {
+        target.ldr = T::Builder().width(target.width).height(target.height).levels(1)
+            .sampler(T::Sampler::SAMPLER_2D).format(T::InternalFormat::RGBA8)
+            .usage(T::Usage::COLOR_ATTACHMENT | T::Usage::SAMPLEABLE).build(engine);
+        target.ldr_target = f::RenderTarget::Builder().texture(A::COLOR, target.ldr).build(engine);
+        if (!target.ldr || !target.ldr_target) throw FillyError("Could not create the FXAA input target");
+    }
+}
+
+// The region that the output passes write. With clear, they cover the whole target: outside
+// the viewport the linear buffer holds the cleared background, because the scene view clears
+// it as the first view of that target in the frame.
+f::Viewport output_region(const TargetData& target, const f::Viewport& viewport, bool clear) {
+    return clear ? f::Viewport{0, 0, target.width, target.height} : viewport;
+}
+
+// Sets the output passes' parameters. Filament commits material instances when a frame's first
+// view renders, so this runs before beginFrame(); a change after the scene view would reach the
+// GPU inside the render pass, or not at all.
+void configure_output(State& state, const SceneData& scene, const TargetData& target, const f::Viewport& region,
+                      const f::Viewport& viewport, const m::float4& clear) {
+    const bool fxaa = scene.antialiasing == "fxaa";
+    const bool graded = scene.filament_encodes;
+    const int flags = (scene.encoding == "srgb" ? ENCODE_SRGB : 0) | (scene.transparent ? ENCODE_TRANSPARENT : 0)
+                      | (scene.dithering ? ENCODE_DITHER : 0) | (fxaa && !scene.transparent ? ENCODE_LUMA : 0);
+    auto& encode = graded ? state.encode_graded : state.encode;
+    auto* source = graded ? target.graded : target.linear;
+    if (encode.input != source) {
+        encode.instance->setParameter("source", source,
+            f::TextureSampler(f::TextureSampler::MinFilter::NEAREST, f::TextureSampler::MagFilter::NEAREST));
+        encode.input = source;
+    }
+    if (encode.flags != flags) {
+        encode.instance->setParameter("flags", int32_t(flags));
+        encode.flags = flags;
+    }
+    if (graded) {
+        // Outside the viewport the graded buffer holds the clear color as 8-bit linear values.
+        // The pass stores this instead: the clear color as the RGBA16F buffer would hold it,
+        // encoded as the default pass would encode it (without dithering).
+        const m::float4 inner{float(viewport.left), float(viewport.bottom), float(viewport.left + int32_t(viewport.width)),
+                              float(viewport.bottom + int32_t(viewport.height))};
+        m::float4 background{m::half4(clear)};
+        const float a = scene.transparent ? std::clamp(background.a, 0.0f, 1.0f) : 1.0f;
+        for (size_t i = 0; i < 3; ++i) {
+            float s = scene.transparent ? (a > 0 ? background[i] / a : 0.0f) : background[i];
+            s = std::clamp(s, 0.0f, 1.0f);
+            if (scene.encoding == "srgb") s = s <= 0.0031308f ? 12.92f * s : 1.055f * std::pow(s, 1 / 2.4f) - 0.055f;
+            background[i] = s * a;
+        }
+        background.a = a;
+        if (!all(equal(inner, encode.inner))) {
+            encode.instance->setParameter("inner", inner);
+            encode.inner = inner;
+        }
+        if (!all(equal(background, encode.background))) {
+            encode.instance->setParameter("background", background);
+            encode.background = background;
+        }
+    }
+    // A golden-ratio sequence gives each frame a different dithering pattern.
+    const float noise = scene.dithering ? float(std::fmod(double(state.stats.frames_rendered) * 0.6180339887498949, 1.0)) : 0.0f;
+    const m::float4 frame{noise, 1.0f / float(region.width), 1.0f / float(region.height), 0};
+    if (!all(equal(frame, encode.values))) {
+        encode.instance->setParameter("frame", frame);
+        encode.values = frame;
+    }
+    if (!fxaa) return;
+    auto& pass = state.fxaa;
+    if (pass.input != target.ldr) {
+        pass.instance->setParameter("ldr", target.ldr,
+            f::TextureSampler(f::TextureSampler::MinFilter::LINEAR, f::TextureSampler::MagFilter::LINEAR));
+        pass.input = target.ldr;
+    }
+    if (pass.flags != int(scene.transparent)) {
+        pass.instance->setParameter("transparent", int32_t(scene.transparent));
+        pass.flags = int(scene.transparent);
+    }
+    const float w = float(target.width), h = float(target.height);
+    const m::float4 texel{1 / w, 1 / h, 0, 0};
+    const m::float4 bounds{(float(region.left) + 0.5f) / w, (float(region.bottom) + 0.5f) / h,
+                           (float(region.left + int32_t(region.width)) - 0.5f) / w,
+                           (float(region.bottom + int32_t(region.height)) - 0.5f) / h};
+    if (!all(equal(texel, pass.values))) {
+        pass.instance->setParameter("texel", texel);
+        pass.values = texel;
+    }
+    if (!all(equal(bounds, pass.bounds))) {
+        pass.instance->setParameter("bounds", bounds);
+        pass.bounds = bounds;
+    }
+}
+
+// Encodes the scene-linear buffer into the target, then runs FXAA if the scene has it.
+void render_output(State& state, const SceneData& scene, TargetData& target, const f::Viewport& region) {
+    const bool fxaa = scene.antialiasing == "fxaa";
+    const bool whole = region.left == 0 && region.bottom == 0 && region.width == target.width
+                       && region.height == target.height;
+    // Every pixel of the region is written, so the old contents need not be loaded.
+    f::Renderer::ClearOptions keep;
+    keep.clear = false;
+    keep.discard = whole;
+    state.renderer->setClearOptions(keep);
+    auto& encode = scene.filament_encodes ? state.encode_graded : state.encode;
+    encode.view->setViewport(region);
+    encode.view->setRenderTarget(fxaa ? target.ldr_target : target.output);
+    state.renderer->render(encode.view);
+    if (!fxaa) return;
+    state.fxaa.view->setViewport(region);
+    state.fxaa.view->setRenderTarget(target.output);
+    state.renderer->render(state.fxaa.view);
 }
 }
 
@@ -907,13 +1192,15 @@ Renderer::Renderer(uintptr_t shared_context, bool precompiled_shaders) {
     state_->frame_chain = state_->engine->createSwapChain(1, 1, 0);
     if (!state_->frame_chain) throw BackendError("Could not create the headless frame swap chain");
     // With GL_EXT_shader_framebuffer_fetch (Intel Iris Xe 32.0.101.7088), the color-grading
-    // subpass writes a black frame with a gradient tile. Drivers without the extension never
-    // take that path, so the flag changes nothing there. See docs/explanation/assumptions.md.
+    // subpass writes a black frame with a gradient tile. Only scenes that use Filament's
+    // postprocessing (tone mapping other than linear, bloom, depth of field, vignette) run color
+    // grading. Drivers without the extension never take that path, so the flag changes nothing
+    // there. See docs/explanation/assumptions.md.
     if (!state_->engine->getDebugRegistry().setProperty("d.renderer.disable_subpasses", true))
         throw BackendError("Filament SDK lacks the required separate postprocessing pass control");
     // Without this flag, a per-channel tone mapper still goes through a 32^3 10-bit LUT in a
     // wide working gamut: unlit (1, 0, 0) became (247, 0, 0) and (0, 1, 0) became (23, 247, 6).
-    // The 1D LUT applies the tone mapper and transfer function per channel in fp16.
+    // The 1D LUT applies the tone mapper per channel in fp16.
     if (!state_->engine->setFeatureFlag("engine.color_grading.use_1d_lut", true))
         throw BackendError("Filament SDK lacks the one-dimensional color-grading LUT");
     state_->materials = detail::create_material_provider(state_->engine, !precompiled_shaders);
@@ -921,6 +1208,12 @@ Renderer::Renderer(uintptr_t shared_context, bool precompiled_shaders) {
     state_->loader = g::AssetLoader::create({state_->engine, state_->materials, state_->names.get()});
     if (!state_->renderer || !state_->materials || !state_->loader)
         throw BackendError("Could not initialize Filament resources");
+    // Every default render needs the encode pass; compiling it here keeps that cost out of the
+    // first frame.
+    detail::output_pass(*state_, state_->encode, detail::PassKind::encode);
+    // No material warmup: compiling the common archive entries at renderer creation made the
+    // first frames slower on both test GPUs unless the application stayed idle for seconds.
+    // See docs/explanation/material-precompilation.md.
 }
 bool Renderer::precompiled_shaders() const { state_->check(); return state_->precompiled; }
 
@@ -931,7 +1224,9 @@ Scene Renderer::create_scene() {
     data->view = state_->engine->createView();
     data->view->setScene(data->scene);
     f::RenderQuality quality;
-    // RGB16F keeps 10 bits in [0, 1]; R11G11B10F keeps 5 or 6 and shifts 8-bit output levels.
+    // Filament's own intermediate buffers, used only with its postprocessing, MSAA, refraction,
+    // or transparent views: RGB16F keeps 10 bits in [0, 1]; R11G11B10F keeps 5 or 6 and shifts
+    // 8-bit output levels.
     quality.hdrColorBuffer = f::QualityLevel::HIGH;
     data->view->setRenderQuality(quality);
     data->view->setShadowingEnabled(false);
@@ -1001,7 +1296,7 @@ ImportedTarget Renderer::import_gl_texture(uint32_t texture, int64_t width, int6
     if (!state_->interop->shared()) throw InteropError("Create the renderer with shared_context first");
     check_target(width, height, format);
     state_->delete_views();
-    // Color grading writes encoded values raw, so only output_path 'direct' needs the view.
+    // The encode pass writes encoded values raw, so only output_path 'direct' needs the view.
     const auto view = state_->interop->import_texture(texture, uint32_t(width), uint32_t(height),
                                                       detail::GlInterop::SrgbView::IF_IMMUTABLE);
     const bool has_view = view != texture;
@@ -1040,7 +1335,7 @@ void Renderer::render(const Scene& scene, const ImportedTarget& target, const Re
     if (settings.direct && settings.encoding == "srgb" && !data.host_view)
         throw InteropError("output_path 'direct' with sRGB encoding needs an imported texture with "
                            "immutable storage from glTexStorage2D; this texture was allocated with "
-                           "glTexImage2D. Use output_path 'graded' or allocate it with glTexStorage2D");
+                           "glTexImage2D. Use output_path 'exact' or allocate it with glTexStorage2D");
     const auto start = std::chrono::steady_clock::now();
     // The previous frame was never sampled, so only Filament's own ordering applies to it.
     if (data.access == detail::TargetData::Access::SUBMITTED) state_->interop->destroy(*state_->engine, data.ready);
@@ -1147,17 +1442,24 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
         state_->interop->enqueue_wait(*state_->engine, input->host_done);
         input->host_done = nullptr;
     }
+    const bool exact = !data.direct;
     auto* view = data.view;
     const f::Viewport viewport{int32_t(x), int32_t(y), width, height};
+    const f::Viewport region = detail::output_region(target, viewport, options.clear);
+    if (exact) {
+        detail::prepare_exact(*state_, target, data.antialiasing == "fxaa", data.filament_encodes);
+        detail::configure_output(*state_, data, target, region, viewport,
+            {clear.clearColor.r, clear.clearColor.g, clear.clearColor.b, clear.clearColor.a});
+    }
     view->setViewport(viewport);
-    view->setRenderTarget(target.target);
+    view->setRenderTarget(!exact ? target.target : data.filament_encodes ? target.graded_target : target.linear_target);
     if (camera != data.active_camera.get()) view->setCamera(camera->camera);
     f::View* fill = nullptr;
-    if (!options.clear) {
-        // Filament clears whole attachments. Without a clear, the viewport would keep the previous
-        // frame on the direct path and an uncleared buffer on the color-grading path. The first
-        // view of a frame sets the target's clear, so a background-only view goes first without
-        // one; the scene view then clears only its own intermediate buffer.
+    if (!options.clear && !exact) {
+        // Filament clears whole attachments, and without a clear the direct path would keep the
+        // previous frame in the viewport. The first view of a frame sets the target's clear, so
+        // a background-only view goes first without one. The exact path needs no fill: its
+        // scene view clears the linear buffer, and only the viewport is encoded.
         fill = fill_view(*state_);
         state_->fill_sky->setColor({clear.clearColor.r, clear.clearColor.g, clear.clearColor.b, clear.clearColor.a});
         fill->setViewport(viewport);
@@ -1179,8 +1481,15 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
         state_->renderer->setClearOptions(clear);
     }
     state_->renderer->render(view);
+    if (exact) detail::render_output(*state_, data, target, region);
     state_->renderer->endFrame();
     view->setRenderTarget(nullptr);
+    // Views must not keep a render target that the caller may close before the next call.
+    if (exact) {
+        state_->encode.view->setRenderTarget(nullptr);
+        if (state_->encode_graded.view) state_->encode_graded.view->setRenderTarget(nullptr);
+        if (state_->fxaa.view) state_->fxaa.view->setRenderTarget(nullptr);
+    }
     // The fill view must not keep a camera that the caller may close before the next call.
     if (fill) { fill->setRenderTarget(nullptr); fill->setCamera(nullptr); }
     if (camera != data.active_camera.get())
@@ -1212,6 +1521,10 @@ void Renderer::close() {
 uintptr_t Renderer::shared_context() const {
     state_->check_thread();
     return state_->interop->context();
+}
+std::string Renderer::gl_platform() const {
+    state_->check_thread();
+    return state_->interop->platform_name();
 }
 bool Renderer::closed() const { state_->check_thread(); return !state_->engine; }
 Stats Renderer::stats() const {
@@ -1313,8 +1626,8 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
         {strict, data_->refraction, state->precompiled}, warnings);
     const auto& tables = *prepared.tables;
     if (tables.masked && data_->direct)
-        throw AssetError("Asset has alphaMode MASK materials, which need color grading, but "
-                         "output_path is 'direct'; set output_path = 'graded' first");
+        throw AssetError("Asset has alphaMode MASK materials, which need the exact output path, but "
+                         "output_path is 'direct'; set output_path = 'exact' first");
     auto shared = state->track(std::make_shared<detail::AssetData>(state));
     shared->prepared = prepared.tables;
     shared->buffers = prepared.buffers;
@@ -1416,6 +1729,8 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
         auto& kept = *shared->prepared;
         kept.diffuse = {};
         kept.surfaces = {};
+        kept.plans = {};
+        kept.textures = {};
         kept.animations = {};
         kept.cameras = {};
         kept.materials = {};
@@ -1581,6 +1896,158 @@ void Camera::set_orthographic_height(double height, double center_x, double cent
     data_->near = near; data_->far = far;
     data_->apply_fit();
 }
+namespace {
+// A framing target in world space: the sphere that circumscribes its box, and the box corners.
+struct FrameTarget {
+    m::double3 center;
+    double radius = 0;
+    std::array<m::double3, 8> corners;
+};
+FrameTarget frame_target(const std::array<Vec3, 2>& box, const m::mat4& world) {
+    const auto& [low, high] = box;
+    for (size_t i = 0; i < 3; ++i)
+        if (!(std::isfinite(low[i]) && std::isfinite(high[i]) && low[i] <= high[i]))
+            throw std::invalid_argument("The target's bounds are empty or not finite");
+    auto point = [&](double x, double y, double z) { return (world * m::double4{x, y, z, 1}).xyz; };
+    FrameTarget target;
+    const m::double3 lo{low[0], low[1], low[2]}, hi{high[0], high[1], high[2]};
+    const auto middle = (lo + hi) * 0.5;
+    target.center = point(middle.x, middle.y, middle.z);
+    // The largest column norm is the largest scale factor of a rotation-scale transform, so a
+    // rotation of the target does not change the sphere.
+    double scale = 0;
+    for (size_t c = 0; c < 3; ++c) scale = std::max(scale, length(world[c].xyz));
+    target.radius = length(hi - lo) * 0.5 * scale;
+    for (size_t k = 0; k < 8; ++k)
+        target.corners[k] = point(k & 1 ? hi.x : lo.x, k & 2 ? hi.y : lo.y, k & 4 ? hi.z : lo.z);
+    if (!(target.radius > 0) || !std::isfinite(target.radius))
+        throw std::invalid_argument("The target has zero size");
+    return target;
+}
+
+double frame_camera(detail::CameraData& data, const FrameTarget& target, const FrameOptions& options) {
+    owned_projection(data, "frame()");
+    const double fill = options.fill;
+    if (!(fill > 0 && fill <= 1)) throw std::invalid_argument("fill must be in (0, 1]");
+    const bool sphere = options.fit == "sphere";
+    if (!sphere && options.fit != "box")
+        throw std::invalid_argument("fit must be 'sphere' or 'box', got '" + options.fit + "'");
+    if (options.near) {
+        finite(*options.near);
+        if (!(*options.near > 0)) throw std::invalid_argument("Require near > 0");
+    }
+    if (options.far) finite(*options.far);
+    if (options.aspect && !(std::isfinite(*options.aspect) && *options.aspect > 0))
+        throw std::invalid_argument("aspect must be finite and positive");
+    auto* camera = data.camera;
+    m::double3 forward = camera->getForwardVector();
+    if (options.direction) {
+        finite(*options.direction);
+        forward = {(*options.direction)[0], (*options.direction)[1], (*options.direction)[2]};
+    }
+    if (!(length(forward) > 1e-12)) throw std::invalid_argument("direction must be a nonzero vector");
+    forward = normalize(forward);
+    finite(options.up);
+    const m::double3 up{options.up[0], options.up[1], options.up[2]};
+    if (!(length(up) > 1e-12) || length(cross(forward, normalize(up))) < 1e-6)
+        throw std::invalid_argument("up must be nonzero and not parallel to the viewing direction");
+    const auto right = normalize(cross(forward, up));
+    const auto upward = cross(right, forward);
+
+    // Filament's projection holds the field of view and the aspect that the last render applied
+    // (1 before the first render of a camera that follows its target).
+    const m::mat4 projection = camera->getProjectionMatrix();
+    const bool orthographic = projection[2][3] == 0;
+    const double fixed_aspect = projection[1][1] / projection[0][0];
+    const double aspect = options.aspect.value_or(fixed_aspect);
+    const double tan_v = 1 / projection[1][1], tan_h = tan_v * aspect;
+
+    // Corner coordinates relative to the center along the camera's right, up, and forward axes.
+    double extent_x = 0, extent_y = 0, z_min = 0, z_max = 0;
+    std::array<m::double3, 8> local;
+    for (size_t k = 0; k < 8; ++k) {
+        const auto q = target.corners[k] - target.center;
+        local[k] = {dot(q, right), dot(q, upward), dot(q, forward)};
+        extent_x = std::max(extent_x, std::abs(local[k].x));
+        extent_y = std::max(extent_y, std::abs(local[k].y));
+        z_min = std::min(z_min, local[k].z);
+        z_max = std::max(z_max, local[k].z);
+    }
+    if (sphere) {
+        extent_x = extent_y = target.radius;
+        z_min = -target.radius;
+        z_max = target.radius;
+    }
+    // A flat target has no depth; the margins scale with its size instead.
+    const double depth = std::max(z_max - z_min, target.radius);
+
+    double distance = 0, height = 0;
+    if (!orthographic) {
+        if (sphere) {
+            // The sphere's silhouette spans `fill` of the narrower view axis: the tangent of its
+            // angular radius is `fill` times the tangent of that axis's half-angle.
+            const double t = fill * std::min(tan_v, tan_h);
+            distance = target.radius * std::sqrt(1 + 1 / (t * t));
+        } else {
+            // Every corner projects within `fill` of the half-extent on both axes.
+            for (const auto& q : local)
+                distance = std::max(distance, std::max(std::abs(q.x) / (fill * tan_h), std::abs(q.y) / (fill * tan_v)) - q.z);
+            // Keep every corner in front of the camera.
+            distance = std::max(distance, -z_min + 0.05 * depth);
+        }
+    } else {
+        height = sphere ? 2 * target.radius / (fill * std::min(1.0, aspect))
+                        : std::max(2 * extent_y / fill, 2 * extent_x / (fill * aspect));
+        // Far enough that the near plane has room in front of the target.
+        distance = -z_min + 0.1 * depth;
+    }
+    const double margin = 0.05 * depth;
+    const double near = options.near.value_or(std::max(distance + z_min - margin, 0.5 * (distance + z_min)));
+    const double far = options.far.value_or(distance + z_max + margin);
+    clipping(near, far);
+
+    const m::double3 eye = target.center - forward * distance;
+    data.set_world_transform(m::mat4::lookAt(eye, target.center, upward));
+    using Fit = detail::CameraData::Fit;
+    if (orthographic) {
+        if (data.fit != Fit::ORTHOGRAPHIC) data.aspect = aspect;
+        data.fit = Fit::ORTHOGRAPHIC;
+        data.size = height;
+        data.center_x = data.center_y = 0;
+        data.near = near;
+        data.far = far;
+        data.apply_fit();
+    } else if (data.fit == Fit::PERSPECTIVE || data.fit == Fit::LENS) {
+        data.near = near;
+        data.far = far;
+        data.apply_fit();
+    } else {
+        // A fixed projection keeps its field of view and aspect.
+        const double fov_y = 2 * std::atan(tan_v) * 180 / 3.141592653589793;
+        camera->setProjection(fov_y, fixed_aspect, near, far, f::Camera::Fov::VERTICAL);
+    }
+    return distance;
+}
+
+m::mat4 model_world(const detail::ModelData& model) {
+    auto& tm = model.state->engine->getTransformManager();
+    return tm.getWorldTransformAccurate(tm.getInstance(model.instance->getRoot()));
+}
+}
+double Camera::frame(const Model& target, const FrameOptions& options) {
+    data_->check();
+    target.data_->check();
+    return frame_camera(*data_, frame_target(target.bounds(), model_world(*target.data_)), options);
+}
+double Camera::frame(const Node& target, const FrameOptions& options) {
+    data_->check();
+    target.data_->check();
+    return frame_camera(*data_, frame_target(target.bounds(), model_world(*target.data_)), options);
+}
+double Camera::frame(const std::array<Vec3, 2>& box, const FrameOptions& options) {
+    data_->check();
+    return frame_camera(*data_, frame_target(box, m::mat4()), options);
+}
 Vec3 Camera::position() const { data_->check(); return vec(data_->camera->getPosition()); }
 void Camera::set_position(Vec3 value) {
     data_->check(); finite(value);
@@ -1607,8 +2074,8 @@ Matrix Camera::projection() const { data_->check(); return matrix(data_->camera-
 Model::Model(std::shared_ptr<detail::ModelData> data) : data_(std::move(data)) {}
 std::array<Vec3, 2> Model::bounds() const {
     data_->check();
-    const auto box = data_->asset->getBoundingBox();
-    return {vec(box.min), vec(box.max)};
+    // Not gltfio's getBoundingBox(), which is wrong for skinned meshes; see compute_bounds.
+    return data_->shared->prepared->bounds;
 }
 Node Model::root() const {
     data_->check();
@@ -1741,6 +2208,26 @@ int64_t Node::index() const {
     for (size_t i = 0; i < data_->nodes.size(); ++i) if (data_->nodes[i] == entity) return int64_t(i);
     return -1;
 }
+std::array<Vec3, 2> Node::bounds() const {
+    data_->check();
+    const auto& prepared = *data_->shared->prepared;
+    const auto index = detail::node_index(*data_, utils::Entity::import(entity_));
+    // The model root is not a glTF node; its subtree is the whole model.
+    if (index == SIZE_MAX) return prepared.bounds;
+    std::array<Vec3, 2> result = {Vec3{FLT_MAX, FLT_MAX, FLT_MAX}, Vec3{-FLT_MAX, -FLT_MAX, -FLT_MAX}};
+    for (size_t i = 0; i < prepared.node_boxes.size(); ++i) {
+        const auto& [low, high] = prepared.node_boxes[i];
+        if (low[0] > high[0]) continue;
+        size_t ancestor = i;
+        while (ancestor != index && ancestor < prepared.parents.size()) ancestor = prepared.parents[ancestor];
+        if (ancestor != index) continue;
+        for (size_t a = 0; a < 3; ++a) {
+            result[0][a] = std::min(result[0][a], low[a]);
+            result[1][a] = std::max(result[1][a], high[a]);
+        }
+    }
+    return result;
+}
 bool Node::has_parent() const {
     data_->check();
     auto& tm = data_->state->engine->getTransformManager();
@@ -1866,6 +2353,11 @@ float Material::metallic() const {
 void Material::set_metallic(float value) {
     unit_interval(value);
     material_instance(data_, index_, "metallicFactor")->setParameter("metallicFactor", value);
+}
+std::pair<std::string, bool> Material::shader() const {
+    const auto* material = material_instance(data_, index_, "baseColorFactor")->getMaterial();
+    return {material->getName() ? material->getName() : "",
+            material->getRefractionMode() == f::RefractionMode::SCREEN_SPACE};
 }
 float Material::roughness() const {
     return material_instance(data_, index_, "roughnessFactor")->getParameter<float>("roughnessFactor");

@@ -10,8 +10,11 @@ filament::gltfio::MaterialProvider* create_material_provider(filament::Engine*, 
 // The asset that createAsset() or createInstance() is building, or null. The provider reads its
 // material table for instances whose extras carry a glTF material index; see load_asset().
 void set_prepared_asset(filament::gltfio::MaterialProvider*, const PreparedAsset*);
+// Lobes of filly's surface material. With none, the material is the standard glTF material.
+enum SurfaceLobes : unsigned { surface_anisotropy = 1, surface_iridescence = 2 };
+unsigned surface_lobes(const SurfaceSource&);
 filament::Material* create_surface_material(filament::Engine*, const filament::gltfio::MaterialKey&,
-                                           const filament::gltfio::UvMap&, const char*, bool extended = true);
+                                           const filament::gltfio::UvMap&, const char*, unsigned lobes);
 // Textures that provider-built materials sample; the caller destroys them with the asset.
 std::vector<filament::Texture*> take_material_textures(filament::gltfio::MaterialProvider*);
 using MaterialBinding = std::pair<size_t, filament::MaterialInstance*>;

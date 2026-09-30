@@ -1,0 +1,40 @@
+// filly's unlit glTF material (KHR_materials_unlit). materials.cmake writes one file per
+// blending mode. It declares the core parameters of the lit entries because gltfio sets some of
+// them for every material.
+material {
+    name : @NAME@,
+    requires : [ uv0, uv1, color ],
+    shadingModel : unlit,
+    blending : @BLENDING@,
+    // An explicit value gives instances the double-sided capability.
+    doubleSided : false,
+    transparency : default,
+    flipUV : false,
+    parameters : [
+@PARAMETERS@
+    ],
+}
+
+fragment {
+// Filament's program cache key is a hash of the user shader code only, without blending or
+// other material properties, so each package's code names its entry and blending mode.
+#define FILLY_ENTRY_@NAME@
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        material.baseColor = materialParams.baseColorFactor;
+        if (materialParams.baseColorIndex > -1) {
+            highp vec2 uv = materialParams.baseColorIndex == 1 ? getUV1() : getUV0();
+            uv = (vec3(uv, 1.0) * materialParams.baseColorUvMatrix).xy;
+            material.baseColor *= texture(materialParams_baseColorMap, uv);
+        }
+#if defined(BLEND_MODE_FADE)
+        material.baseColor.rgb *= material.baseColor.a;
+#endif
+        material.baseColor *= getColor();
+#if defined(BLEND_MODE_OPAQUE)
+        // Unlit shading writes base color alpha even for OPAQUE. On the direct path, that
+        // alpha would reach the target of an opaque view, which must store alpha one.
+        material.baseColor.a = 1.0;
+#endif
+    }
+}

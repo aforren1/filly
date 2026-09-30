@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--height", type=positive_int, default=1080)
     parser.add_argument("--frames", type=positive_int, default=10000)
     parser.add_argument("--warmup", type=positive_int, default=30)
-    parser.add_argument("--output-path", choices=("graded", "direct"), default="graded")
+    parser.add_argument("--output-path", choices=("exact", "direct"), default="exact")
     args = parser.parse_args()
     with Renderer() as renderer:
         scene = renderer.create_scene()

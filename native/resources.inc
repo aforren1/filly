@@ -217,13 +217,20 @@ detail::Assignment* assignment_of(detail::ModelData& model, size_t index) {
     return nullptr;
 }
 }
+// `emissive` is the effective emission, emissiveFactor times emissiveStrength, so that it means the
+// same for materials with and without KHR_materials_emissive_strength.
 Vec3 Material::emissive() const {
-    auto color = material_instance(data_, index_, "emissiveFactor")->getParameter<m::float3>("emissiveFactor");
+    auto* instance = material_instance(data_, index_, "emissiveFactor");
+    auto color = instance->getParameter<m::float3>("emissiveFactor");
+    if (instance->getMaterial()->hasParameter("emissiveStrength"))
+        color *= instance->getParameter<float>("emissiveStrength");
     return {color.x, color.y, color.z};
 }
 void Material::set_emissive(Vec3 value) {
     for (auto v : value) { finite(v); if (v < 0) throw std::invalid_argument("Emissive values must be nonnegative"); }
-    material_instance(data_, index_, "emissiveFactor")->setParameter("emissiveFactor", m::float3{value[0], value[1], value[2]});
+    auto* instance = material_instance(data_, index_, "emissiveFactor");
+    instance->setParameter("emissiveFactor", m::float3{value[0], value[1], value[2]});
+    if (instance->getMaterial()->hasParameter("emissiveStrength")) instance->setParameter("emissiveStrength", 1.0f);
 }
 std::shared_ptr<detail::TextureData> Material::texture(int slot) const {
     data_->check();
@@ -327,12 +334,16 @@ void Model::attach_mesh(const MeshArrays& a) {
     mesh->color_upload.size = n * sizeof(m::float4);
     using V = f::VertexBuffer;
     using A = f::VertexAttribute;
-    // Separate buffers let an update send only the attributes that changed.
-    auto vertices = V::Builder().vertexCount(uint32_t(n)).bufferCount(mesh->has_colors ? 4 : 3)
+    // Separate buffers let an update send only the attributes that changed. Material packages
+    // that serve every key (Filament's archive, filly's) require COLOR and UV1 and multiply by
+    // the vertex color, so a mesh without colors supplies white; UV1 reads the UV0 buffer.
+    auto vertices = V::Builder().vertexCount(uint32_t(n)).bufferCount(4)
         .attribute(A::POSITION, 0, V::AttributeType::FLOAT3)
         .attribute(A::TANGENTS, 1, V::AttributeType::SHORT4).normalized(A::TANGENTS)
-        .attribute(A::UV0, 2, V::AttributeType::FLOAT2);
+        .attribute(A::UV0, 2, V::AttributeType::FLOAT2)
+        .attribute(A::UV1, 2, V::AttributeType::FLOAT2);
     if (mesh->has_colors) vertices.attribute(A::COLOR, 3, V::AttributeType::FLOAT4);
+    else vertices.attribute(A::COLOR, 3, V::AttributeType::UBYTE4).normalized(A::COLOR);
     mesh->vertices = vertices.build(engine);
     mesh->indices = f::IndexBuffer::Builder().indexCount(uint32_t(a.triangles * 3))
         .bufferType(f::IndexBuffer::IndexType::UINT).build(engine);
@@ -368,6 +379,11 @@ void Model::attach_mesh(const MeshArrays& a) {
         mesh->vertices->setBufferAt(engine, 2, V::BufferDescriptor(bytes, mesh->uv_upload.size, free_bytes));
     }
     if (a.colors) send(3, a.colors, mesh->color_upload.size);
+    else {
+        auto* bytes = owned(n * 4);
+        std::memset(bytes, 0xFF, n * 4);
+        mesh->vertices->setBufferAt(engine, 3, V::BufferDescriptor(bytes, n * 4, free_bytes));
+    }
     {
         const size_t size = a.triangles * 3 * sizeof(uint32_t);
         auto* bytes = owned(size);

@@ -1,4 +1,4 @@
-"""Spin Suzanne in a pyglet window through a shared image drawn by zengl."""
+"""Spin and animate the wooden horse in a pyglet window through a shared image drawn by zengl."""
 
 import zengl
 

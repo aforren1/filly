@@ -123,7 +123,7 @@ def test_shared_texture_holds_srgb_bytes(host, triangle_glb):
 
 
 @pytest.mark.parametrize("encoding", ["srgb", "linear"])
-@pytest.mark.parametrize("path", ["direct", "graded"])
+@pytest.mark.parametrize("path", ["direct", "exact"])
 def test_shared_texture_matches_transfer_function(host, triangle_glb, encoding, path):
     """The same sweep as the offscreen test, sampled by the host as plain RGBA8."""
     from test_encoding import SWEEP, srgb
@@ -145,9 +145,16 @@ def test_shared_texture_matches_transfer_function(host, triangle_glb, encoding, 
             with target.acquire():
                 actual.append(read_host_texture(texture, gl)[32, 32, :3].astype(int))
         target.close()
-    expected = np.round(255 * (srgb(SWEEP) if encoding == "srgb" else SWEEP))
-    error = np.abs(np.array(actual) - expected[:, None])
+    f = srgb if encoding == "srgb" else (lambda v: np.asarray(v, dtype=float))
+    actual = np.array(actual)
+    error = np.abs(actual - np.round(255 * f(SWEEP))[:, None])
     assert error.max() <= 1, (SWEEP[error.max(axis=1).argmax()], error.max())
+    if path == "exact":
+        # Exact for the value in the RGBA16F scene-linear buffer, as offscreen.
+        from test_encoding import half_neighbors
+        below, above = half_neighbors(SWEEP)
+        candidates = np.stack([np.round(255 * f(below)), np.round(255 * f(above))], axis=1)
+        assert (actual[:, :, None] == candidates[:, None, :]).any(axis=2).all()
 
 
 @pytest.fixture
@@ -180,7 +187,7 @@ def test_mutable_texture_imports_on_the_default_path(mutable, triangle_glb):
     with filly.Renderer(shared_context=filly.current_gl_context()) as renderer:
         scene = grey_scene(renderer, triangle_glb)
         target = renderer.import_gl_texture(texture.value, width=64, height=64)
-        for encoding, path, expected in (("srgb", "graded", 188), ("linear", "graded", 128),
+        for encoding, path, expected in (("srgb", "exact", 188), ("linear", "exact", 128),
                                          ("linear", "direct", 128)):
             scene.encoding = encoding
             scene.output_path = path
@@ -201,7 +208,7 @@ def test_direct_srgb_output_rejects_a_mutable_texture(mutable, triangle_glb):
         with pytest.raises(filly.InteropError, match="output_path 'direct'.*glTexStorage2D"):
             renderer.render(scene, target)
         # The failed call changed nothing: the target still renders on the default path.
-        scene.output_path = "graded"
+        scene.output_path = "exact"
         renderer.render(scene, target)
         with target.acquire():
             np.testing.assert_allclose(read_host_texture(texture, gl)[32, 32, :3], 188, atol=1)

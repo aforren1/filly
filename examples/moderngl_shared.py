@@ -1,4 +1,4 @@
-"""Spin Suzanne in a pyglet window through a shared texture drawn by moderngl."""
+"""Spin and animate the wooden horse in a pyglet window through a shared texture drawn by moderngl."""
 
 import moderngl
 

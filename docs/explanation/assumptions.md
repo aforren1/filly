@@ -43,6 +43,13 @@ fetch. Filament's workaround registry (`OpenGLContext::initBugs`) is internal to
 It has no Intel Windows entry, so a driver-specific fix needs an upstream report. The Mesa Intel
 driver on Linux was not tested. Correct the code comment and design text.
 
+**Update (September 30).** The default output path no longer runs color grading, so the setting
+matters only for scenes that use Filament's postprocessing without MSAA, bloom, or depth of field:
+tone mapping other than `"linear"`, or the vignette. A probe build that skipped the setting
+rendered DamagedHelmet at 256 x 256 on the Intel GPU: with `tone_mapping = "aces"` or
+`vignette = True`, 75% of the pixels were black (largest difference 254 and 255 levels); the
+default scene and ACES with MSAA 4 were identical with and without the setting. Keep it.
+
 ## 2. PsychoPy `useFBO=True`
 
 **Claim.** PsychoPy's FBO blit produces a black window, so every example forces `useFBO=False`.

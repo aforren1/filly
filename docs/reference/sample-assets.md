@@ -80,8 +80,7 @@ same lighting and a 45-degree perspective view and an orthographic view of the s
 Asset credits are in the [image notes](../images/README.md). This is a screen-space
 approximation: it does not trace the gap to background geometry or multiple glass
 surfaces. The demo
-now defaults to perspective for user-supplied files and retains orthographic projection for
-Suzanne. Use `--projection` to choose explicitly. A brighter `--background` improves contrast
+defaults to perspective projection. Use `--projection orthographic` to change it. A brighter `--background` improves contrast
 through glass. Use `--show-environment` to display a loaded or studio panorama. Screen-space
 refraction cannot sample ordinary PsychoPy drawing outside the Filament scene.
 

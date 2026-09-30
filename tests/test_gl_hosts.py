@@ -122,7 +122,12 @@ class ModernglHost:
         return self.target(renderer)
 
     def read_screen(self):
-        return np.frombuffer(self.ctx.screen.read(components=4), dtype=np.uint8).reshape(SIZE, SIZE, 4)
+        data = self.ctx.screen.read(components=4)
+        # moderngl selects GL_COLOR_ATTACHMENT0 as the read buffer of the default framebuffer.
+        # Mesa reports GL_INVALID_OPERATION and reads the back buffer; the Windows drivers accept
+        # it. Reading ctx.error clears the error, which pyglet would report when the window closes.
+        self.ctx.error
+        return np.frombuffer(data, dtype=np.uint8).reshape(SIZE, SIZE, 4)
 
     def clear(self, color):
         self.framebuffer.clear(*color)
@@ -386,6 +391,33 @@ def test_premultiplied_alpha(host, window, triangle_glb):
         # Premultiplied source-over: 0.5 red plus half of the blue backdrop.
         np.testing.assert_allclose(samples["center"], (128, 0, 127, 255), atol=2)
         np.testing.assert_array_equal(samples["corner"], (0, 0, 255, 255))
+
+
+@pytest.mark.parametrize("alpha", [0.25, 0.5, 0.75])
+def test_premultiplied_encoding_through_the_adapter(host, window, triangle_glb, alpha):
+    """Grey levels at partial alpha, drawn by the adapter with premultiplied blending over black:
+    every host shows the encoded straight color times alpha."""
+    from test_encoding import srgb
+    renderer = create_renderer(window)
+    greys = (0.05, 0.2, 0.5, 0.8)
+    samples = []
+    try:
+        scene, model = triangle_scene(renderer, translucent(triangle_glb, alpha),
+                                      background=(0, 0, 0, 0), transparent=True)
+        target = host.target(renderer)
+        for grey in greys:
+            model.material("red").base_color = (grey, grey, grey, alpha)
+            host.clear((0, 0, 0, 1))
+            host.premultiplied_blending()
+            renderer.render(scene, target)
+            target.draw(0, 0, SIZE, SIZE)
+            samples.append(cell(host.read(), 0, 0, SIZE)["center"])
+        target.close()
+    finally:
+        renderer.close()
+    expected = 255 * srgb(greys) * alpha
+    actual = np.array(samples, dtype=float)
+    assert np.abs(actual[:, :3] - expected[:, None]).max() <= 1, (actual, expected)
 
 
 def test_host_draws_interleave_with_shared_draws(host, window, triangle_glb):

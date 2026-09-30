@@ -110,7 +110,6 @@ def worker(path, output, mode, *, lighting="auto", view=None, projection=None, h
                 scene.tone_mapping = "aces_legacy"
                 model = scene.load(path)
                 bounds = np.asarray(model.bounds)
-                center = bounds.mean(axis=0)
                 radius = np.linalg.norm(bounds[1] - bounds[0]) / 2
                 if not np.isfinite(bounds).all() or not np.isfinite(radius) or radius <= 0:
                     raise ValueError("No finite nonzero geometry bounds")
@@ -132,11 +131,10 @@ def worker(path, output, mode, *, lighting="auto", view=None, projection=None, h
                     else:
                         aspect = camera_projection["orthographic"]["xmag"] / camera_projection["orthographic"]["ymag"]
                 elif projection == "orthographic":
-                    half = radius * 1.15
-                    camera.set_orthographic(left=-half, right=half, bottom=-half, top=half,
-                                            near=max(radius * 0.001, 1e-6), far=radius * 10)
+                    # frame() sets the height and the clipping planes for each view.
+                    camera.set_orthographic(height=1, near=1, far=2)
                 else:
-                    camera.set_perspective(fov_y=45, near=max(radius * 0.001, 1e-6), far=radius * 10)
+                    camera.set_perspective(fov_y=45, near=1, far=2)
                 result["camera"] = camera_name if imported else "fitted"
                 scene.camera = camera
                 asset_lights = bool(model.lights) and lighting == "auto"
@@ -168,8 +166,10 @@ def worker(path, output, mode, *, lighting="auto", view=None, projection=None, h
                         model.apply_animation(0, model.animations[0].duration * 0.5, loop=False)
                     direction = np.asarray(direction, dtype=float)
                     if not imported:
-                        camera.position = center + direction / np.linalg.norm(direction) * radius * 3
-                        camera.look_at(center)
+                        # The fills of the earlier fits: a 2.3-radius orthographic height, and a
+                        # 45-degree view from 3 radii.
+                        fill = 1 / 1.15 if projection == "orthographic" else math.tan(math.asin(1 / 3)) / math.tan(math.radians(22.5))
+                        camera.frame(model, fill=fill, direction=-direction, aspect=aspect)
                     renderer.render(scene, target)
                     pixels = target.read()
                     image = output / f"view-{index}.png"

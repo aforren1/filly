@@ -10,6 +10,7 @@ import filly
 from test_features import lit, pack, unpack
 
 pytestmark = pytest.mark.gpu
+ARCHIVE = filly._native._materials == "archive"
 
 SIZE = 16
 
@@ -25,7 +26,7 @@ def linear(byte):
 
 
 def use_path(scene, path):
-    """Color grading with MSAA, or the direct opt-in. A full-view plane has no geometry edge for
+    """The exact path with MSAA, or the direct opt-in. A full-view plane has no geometry edge for
     MSAA to change."""
     if path == "direct":
         scene.output_path = "direct"
@@ -51,7 +52,7 @@ def quadrants(image):
     return [image[q, q], image[q, 3 * q], image[3 * q, q], image[3 * q, 3 * q]]
 
 
-@pytest.mark.parametrize("path", ["direct", "grading"])
+@pytest.mark.parametrize("path", ["direct", "exact"])
 def test_rgba8_srgb_texels_reach_the_output(renderer, scene, path):
     use_path(scene, path)
     texels = np.array([[[255, 0, 0, 255], [0, 255, 0, 255]],
@@ -64,7 +65,7 @@ def test_rgba8_srgb_texels_reach_the_output(renderer, scene, path):
         np.testing.assert_allclose(actual, expected, atol=1)
 
 
-@pytest.mark.parametrize("path", ["direct", "grading"])
+@pytest.mark.parametrize("path", ["direct", "exact"])
 @pytest.mark.parametrize("channels,dtype,space", [
     (1, np.uint8, "srgb"), (1, np.uint8, "linear"), (3, np.uint8, "srgb"), (3, np.uint8, "linear"),
     (4, np.uint8, "linear"), (1, np.float32, "linear"), (3, np.float32, "linear"), (4, np.float32, "linear"),
@@ -166,7 +167,7 @@ def test_texture_transform_drifts(renderer, scene):
         material.set_texture_transform("normal")
 
 
-@pytest.mark.parametrize("path", ["direct", "grading"])
+@pytest.mark.parametrize("path", ["direct", "exact"])
 def test_glTF_material_without_texture_slot(renderer, scene, triangle_glb, path):
     """The flat-colored stimulus case: the provider compiles the variant with the slot."""
     use_path(scene, path)
@@ -294,6 +295,7 @@ def test_glTF_texture_is_restored_after_removal(renderer, scene, triangle_glb):
     np.testing.assert_array_equal(center(), [0, 255, 0, 255])
 
 
+@pytest.mark.skipif(ARCHIVE, reason="the runtime material path compiles a material for a new slot")
 def test_other_glTF_textures_block_a_new_slot(renderer, scene, triangle_glb):
     model = scene.load(textured_glb(triangle_glb, with_normal_map=True))
     texture = renderer.create_texture(np.full((1, 1, 4), 255, np.uint8), color_space="srgb")
@@ -305,7 +307,49 @@ def test_other_glTF_textures_block_a_new_slot(renderer, scene, triangle_glb):
         model.material("red").set_texture_transform("base_color", offset=(0.5, 0))
 
 
-@pytest.mark.parametrize("path", ["direct", "grading"])
+@pytest.mark.skipif(not ARCHIVE, reason="the archive material path has every slot in every material")
+def test_new_slot_keeps_other_glTF_textures(renderer, scene, triangle_glb):
+    model = scene.load(textured_glb(triangle_glb, with_normal_map=True))
+    scene.add_directional_light(direction=(0, 0, -1), intensity=50000)
+    material = model.material("red")
+    original = render(renderer, scene)
+    material.base_color = (0, 0, 0, 1)
+    material.emissive = (1, 1, 1)
+    material.emissive_texture = renderer.create_texture(np.array([[[0, 128, 255]]], np.uint8), color_space="linear")
+    np.testing.assert_allclose(render(renderer, scene)[8, 8], [0, srgb(128 / 255), 255, 255], atol=1)
+    material.set_texture_transform("emissive", offset=(0.5, 0))
+    material.base_color_texture = renderer.create_texture(np.full((1, 1, 3), 255, np.uint8), color_space="srgb")
+    material.set_texture_transform("base_color", offset=(0.5, 0))
+    material.emissive_texture = None
+    material.base_color_texture = None
+    material.base_color = (1, 1, 1, 1)
+    material.emissive = (0, 0, 0)
+    np.testing.assert_array_equal(render(renderer, scene), original)
+
+
+@pytest.mark.skipif(not ARCHIVE, reason="the runtime material path has no slots in custom materials")
+@pytest.mark.parametrize("extension", [
+    {"KHR_materials_anisotropy": {"anisotropyStrength": 0.5}},
+    {"KHR_materials_iridescence": {"iridescenceFactor": 1}},
+    {"KHR_materials_diffuse_transmission": {"diffuseTransmissionFactor": 0.5}},
+])
+def test_slots_on_extended_materials(renderer, scene, triangle_glb, extension):
+    doc, binary = unpack(triangle_glb)
+    lit(doc)
+    doc["materials"][0]["extensions"] = extension
+    doc["extensionsUsed"] = list(extension)
+    material = scene.load(pack(doc, binary)).material("red")
+    scene.add_directional_light(direction=(0, 0, -1), intensity=50000)
+    plain = render(renderer, scene)
+    # A red texture on the white base color removes the diffuse green; specular green remains.
+    material.base_color_texture = renderer.create_texture(np.array([[[255, 0, 0]]], np.uint8), color_space="srgb")
+    red = render(renderer, scene)
+    assert plain[8, 8, 1] > 100 and red[8, 8, 1] < plain[8, 8, 1] / 4 and abs(red[8, 8, 0] - plain[8, 8, 0]) <= 1
+    material.base_color_texture = None
+    np.testing.assert_array_equal(render(renderer, scene), plain)
+
+
+@pytest.mark.parametrize("path", ["direct", "exact"])
 def test_emissive_texture_on_lit_material(renderer, scene, path):
     use_path(scene, path)
     # Black and nonmetallic, without lights: only emission reaches the output, unscaled by exposure.

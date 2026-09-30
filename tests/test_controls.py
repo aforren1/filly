@@ -140,3 +140,95 @@ def test_asset_bounds_include_authored_transforms(scene, triangle_glb):
     model.position = (100, 0, 0)
     model.node("triangle").position = (0, 0, 0)
     np.testing.assert_allclose(model.bounds, expected, atol=1e-5)
+
+
+def skinned_rig(morph=False):
+    """A Sketchfab-style rig: the armature scales by 100 and the inverse bind matrices by 0.01.
+
+    Bind-pose vertices are world positions. The mesh node sits under the armature, but skinning
+    ignores its transform. Joint 1 rests 90 degrees about +Z from its bind pose, around (5, 1, 0).
+    Rest-pose vertices: (4, 0, 0), (6, 0, 0), (4, 1, 0) from (5, 2, 0), and (4.5, 1.5, 1) from
+    (5, 2, 1) half on each joint. With the morph, vertex 3 at weight one is (5, 2, 3) in bind
+    space and (4.5, 1.5, 3) at rest.
+    """
+    armature = np.array([[100, 0, 0, 5], [0, 100, 0, 0], [0, 0, 100, 0], [0, 0, 0, 1]], dtype=float)
+    joint1_bind = armature @ np.array([[1, 0, 0, 0], [0, 1, 0, 0.01], [0, 0, 1, 0], [0, 0, 0, 1]])
+    inverse_binds = [np.linalg.inv(armature), np.linalg.inv(joint1_bind)]
+    positions = np.float32([[4, 0, 0], [6, 0, 0], [5, 2, 0], [5, 2, 1]])
+    joints = np.uint8([[0, 0, 0, 0], [0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0]])
+    weights = np.float32([[1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [0.5, 0.5, 0, 0]])
+    indices = np.uint16([0, 1, 2, 0, 1, 3])
+    delta = np.float32([[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 2]])
+    matrices = np.float32([m.T for m in inverse_binds])  # column-major
+    chunks = [positions, joints, weights, matrices, indices] + ([delta] if morph else [])
+    binary, views = b"", []
+    for chunk in chunks:
+        views.append({"buffer": 0, "byteOffset": len(binary), "byteLength": chunk.nbytes})
+        binary += chunk.tobytes() + bytes(-chunk.nbytes % 4)
+    views[4]["target"] = 34963
+    accessors = [
+        {"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3",
+         "min": positions.min(0).tolist(), "max": positions.max(0).tolist()},
+        {"bufferView": 1, "componentType": 5121, "count": 4, "type": "VEC4"},
+        {"bufferView": 2, "componentType": 5126, "count": 4, "type": "VEC4"},
+        {"bufferView": 3, "componentType": 5126, "count": 2, "type": "MAT4"},
+        {"bufferView": 4, "componentType": 5123, "count": 6, "type": "SCALAR"},
+    ]
+    primitive = {"attributes": {"POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2}, "indices": 4, "material": 0}
+    mesh = {"primitives": [primitive]}
+    if morph:
+        accessors.append({"bufferView": 5, "componentType": 5126, "count": 4, "type": "VEC3",
+                          "min": [0, 0, 0], "max": [0, 0, 2]})
+        primitive["targets"] = [{"POSITION": 5}]
+        mesh["weights"] = [0]
+    document = {
+        "asset": {"version": "2.0"},
+        "extensionsUsed": ["KHR_materials_unlit"],
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [
+            {"name": "armature", "children": [1, 2], "translation": [5, 0, 0], "scale": [100] * 3},
+            {"name": "mesh", "mesh": 0, "skin": 0},
+            {"name": "joint0", "children": [3]},
+            {"name": "joint1", "translation": [0, 0.01, 0], "rotation": [0, 0, 2 ** -0.5, 2 ** -0.5]},
+        ],
+        "skins": [{"joints": [2, 3], "inverseBindMatrices": 3}],
+        "meshes": [mesh],
+        "materials": [{"doubleSided": True, "extensions": {"KHR_materials_unlit": {}},
+                       "pbrMetallicRoughness": {"baseColorFactor": [1, 0, 0, 1]}}],
+        "buffers": [{"byteLength": len(binary)}],
+        "bufferViews": views,
+        "accessors": accessors,
+    }
+    encoded = json.dumps(document).encode()
+    encoded += b" " * (-len(encoded) % 4)
+    return (struct.pack("<III", 0x46546C67, 2, 28 + len(encoded) + len(binary))
+            + struct.pack("<II", len(encoded), 0x4E4F534A) + encoded
+            + struct.pack("<II", len(binary), 0x004E4942) + binary)
+
+
+def test_skinned_bounds_are_the_rest_pose(scene):
+    # gltfio's box moved the bind-space accessor box by the mesh node's transform:
+    # [[405, 0, 0], [605, 200, 100]] here.
+    model = scene.load(skinned_rig())
+    np.testing.assert_allclose(model.bounds, [[4, 0, 0], [6, 1.5, 1]], atol=1e-5)
+    # Each morph target counts at weight one, as in the unskinned accessor bounds.
+    morphed = scene.load(skinned_rig(morph=True))
+    np.testing.assert_allclose(morphed.bounds, [[4, 0, 0], [6, 1.5, 3]], atol=1e-5)
+
+
+def test_skinned_bounds_frame_the_rendered_mesh(renderer, scene):
+    model = scene.load(skinned_rig())
+    low, high = np.asarray(model.bounds)
+    center = (low + high) / 2
+    # One pixel per 1/32 unit: the bounds' x and y span 64 by 48 pixels in the middle.
+    scene.camera.set_orthographic(left=-2, right=2, bottom=-2, top=2, near=0.1, far=20)
+    scene.camera.position = (center[0], center[1], 10)
+    scene.camera.look_at(tuple(center))
+    target = renderer.create_render_target(width=128, height=128)
+    renderer.render(scene, target)
+    rows, columns = np.nonzero(target.read()[..., 0] > 128)
+    # Image rows run down; the rest-pose triangles fill x in [4, 6] and y in [0, 1.5]. The
+    # tolerance covers pixel centers on the thin top vertex and the edges.
+    np.testing.assert_allclose([columns.min(), columns.max()], [32, 95], atol=1)
+    np.testing.assert_allclose([rows.min(), rows.max()], [40, 87], atol=1)

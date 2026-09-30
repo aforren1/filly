@@ -6,6 +6,7 @@
 #include "vendor/cgltf/cgltf.h"
 
 #include <array>
+#include <cfloat>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -13,12 +14,19 @@
 #include <string>
 #include <vector>
 
+// 1 when the module uses filly's material archive (CMake FILLY_MATERIALS=archive).
+#ifndef FILLY_MATERIALS_ARCHIVE
+#define FILLY_MATERIALS_ARCHIVE 0
+#endif
+
 namespace filly::detail {
 
 struct AssetTexture {
     std::vector<uint8_t> bytes;
     std::string mime;
     int uv = 0;
+    // Column-major KHR_texture_transform matrix for M * uv, the transpose of the matrix that
+    // gltfio sets for its uv * M parameters.
     std::array<float, 9> transform = {1,0,0,0,1,0,0,0,1};
     int wrap_s = 10497, wrap_t = 10497;
     int min_filter = 9987, mag_filter = 9729;
@@ -32,9 +40,51 @@ struct DiffuseSource {
     AssetTexture thickness_texture;
 };
 struct SurfaceSource {
+    // The extensions present. Only these lobes are compiled: an anisotropic lobe at zero strength
+    // still differs from the isotropic one in float arithmetic.
+    bool has_anisotropy = false, has_iridescence = false;
     float anisotropy = 0, rotation = 0, iridescence = 0, ior = 1.3f, minimum = 100, maximum = 400;
     AssetTexture anisotropy_texture, iridescence_texture, thickness_texture;
 };
+// The archive material path (FILLY_MATERIALS=archive) ----------------------------------------
+// Entries of filly's material archive. The names match the uberz spec flags that materials.cmake
+// writes.
+// Refraction entries stay contiguous; preparation tests the range.
+enum class ArchiveEntry : uint8_t {
+    LitCore, LitExtended, LitSpecular, LitAnisotropy, RefractionThin, RefractionThinSpecular,
+    RefractionSolid, RefractionSolidSpecular, RefractionThinAnisotropy, RefractionSolidAnisotropy,
+    SpecularGlossiness, Unlit, DiffuseTransmission, count
+};
+// Extension texture roles in order of importance. When a material has more distinct extension
+// textures than its entry has samplers, the last roles lose their textures first: detail maps
+// (normals, roughness) before the maps that define where an effect exists or how strong it is.
+enum class ExtensionRole : uint8_t {
+    transmission, volumeThickness, anisotropy, iridescence, clearCoat, sheenColor, specularColor,
+    specular, iridescenceThickness, clearCoatRoughness, sheenRoughness, clearCoatNormal, count
+};
+constexpr size_t extension_role_count = size_t(ExtensionRole::count);
+struct ExtensionTexture {
+    // Generic sampler of the entry, or -1 for no texture.
+    int8_t slot = -1;
+    // TEXCOORD_0 or TEXCOORD_1.
+    uint8_t uv = 0;
+    // Column-major KHR_texture_transform matrix for M * uv; see AssetTexture::transform.
+    std::array<float, 9> transform = {1,0,0,0,1,0,0,0,1};
+};
+struct ExtensionSampler {
+    // Index into PreparedAsset::textures.
+    size_t texture = 0;
+    bool srgb = false;
+};
+struct ArchivePlan {
+    ArchiveEntry entry = ArchiveEntry::LitCore;
+    std::array<ExtensionTexture, extension_role_count> roles;
+    // Texture of each generic sampler; roles that use the same texture share one.
+    std::vector<ExtensionSampler> slots;
+    // gltfio sets it only with the clearcoat normal texture, which the provider binds instead.
+    float clearcoat_normal_scale = 1;
+};
+
 enum class MaterialKind : uint8_t { standard, surface, diffuse };
 struct MaterialSource {
     MaterialKind kind = MaterialKind::standard;
@@ -44,6 +94,9 @@ struct MaterialSource {
     std::string label;
     // The name that gltfio gives MaterialProvider::getMaterial(): the glTF name, or "material".
     std::string root_label;
+    // The unscaled glTF emissiveFactor. gltfio 1.77.1 multiplies it by emissiveStrength and also
+    // passes emissiveStrength to the shader, which squares the strength; this restores the factor.
+    std::array<float, 3> emissive_factor{};
 };
 // Per glTF node. Names stay empty rather than taking gltfio's fallback of the mesh, light, or
 // camera name.
@@ -85,6 +138,20 @@ struct PreparedAsset {
     std::vector<SurfaceSource> surfaces;
     std::vector<AnimationSource> animations;
     std::vector<CameraSource> cameras;
+    // Archive material path only: one plan per glTF material, and the glTF textures that
+    // extension roles use, by glTF texture index (other entries stay empty).
+    std::vector<ArchivePlan> plans;
+    std::vector<AssetTexture> textures;
+    // Model-space bounds of the rest pose; see compute_bounds. Minimum above maximum means no
+    // geometry, which matches gltfio's empty box.
+    std::array<Vec3, 2> bounds = {Vec3{FLT_MAX, FLT_MAX, FLT_MAX}, Vec3{-FLT_MAX, -FLT_MAX, -FLT_MAX}};
+    // Rest-pose boxes of skinned mesh nodes in their own frames, by glTF node index, for the
+    // renderables' culling boxes.
+    std::vector<std::pair<size_t, std::array<Vec3, 2>>> skinned_boxes;
+    // Per glTF node, for Node.bounds: the rest-pose box of its own mesh in the model's frame
+    // (minimum above maximum without one), and its parent's index (UINT32_MAX at the top).
+    std::vector<std::array<Vec3, 2>> node_boxes;
+    std::vector<uint32_t> parents;
     bool masked = false;
     bool custom_materials() const { return !diffuse.empty() || !surfaces.empty(); }
 };

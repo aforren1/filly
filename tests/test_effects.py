@@ -31,12 +31,12 @@ def unlit_plane(scene, width, height, position, color=(1, 1, 1, 1), alpha_mode="
 
 def test_effects_are_off_by_default(renderer, scene):
     assert (scene.fog, scene.depth_of_field, scene.vignette) == (False, False, False)
-    assert scene.output_path == "graded"
+    assert scene.output_path == "exact"
     camera = scene.create_camera()
     assert camera.aperture == 16
 
 
-@pytest.mark.parametrize("path", ["direct", "grading"])
+@pytest.mark.parametrize("path", ["direct", "exact"])
 def test_fog_follows_beer_lambert(renderer, scene, path):
     if path == "direct":
         scene.output_path = "direct"

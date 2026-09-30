@@ -12,6 +12,7 @@
 #include <GL/gl.h>
 #include <GL/glx.h>
 #include <backend/platforms/PlatformGLX.h>
+#include "egl_platform.h"
 #endif
 #include <filament/Engine.h>
 #include <filament/Sync.h>
@@ -19,7 +20,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <cstdlib>
 #include <mutex>
+#include <string_view>
 
 namespace filly {
 uintptr_t current_gl_context() {
@@ -108,12 +111,9 @@ struct Signal {
     void* handle = nullptr;
 };
 
-#if defined(_WIN32)
-using HostPlatform = filament::backend::PlatformWGL;
-#else
-using HostPlatform = filament::backend::PlatformGLX;
-#endif
-struct GlInterop::Impl : HostPlatform {
+// Host-side GL entry points and the requests that Filament's driver thread applies in
+// command-stream order. It outlives the platform that calls into it.
+struct SyncQueue {
     // srgb is -1 to leave GL_FRAMEBUFFER_SRGB unchanged, else its new state.
     struct Request { void* incoming = nullptr; std::shared_ptr<Signal> outgoing; int srgb = -1; };
     struct NativeSync : filament::backend::Platform::Sync { void* handle = nullptr; };
@@ -127,12 +127,7 @@ struct GlInterop::Impl : HostPlatform {
     std::mutex mutex;
     std::deque<Request> requests;
 
-    explicit Impl(uintptr_t context)
-#if defined(_WIN32)
-        : context(context) {
-#else
-        : HostPlatform(context ? glXGetCurrentDisplay() : nullptr), context(context) {
-#endif
+    explicit SyncQueue(uintptr_t context) : context(context) {
         if (!context) return;
         fence = procedure<FenceFn>("glFenceSync");
         wait = procedure<WaitFn>("glWaitSync");
@@ -145,7 +140,7 @@ struct GlInterop::Impl : HostPlatform {
         requests.push_back(std::move(request));
     }
     // Filament calls this on its driver thread, in command-stream order.
-    filament::backend::Platform::Sync* createSync() noexcept override {
+    filament::backend::Platform::Sync* create_sync() noexcept {
         Request request{};
         {
             std::lock_guard lock(mutex);
@@ -176,21 +171,96 @@ struct GlInterop::Impl : HostPlatform {
         }
         return result;
     }
-    void destroySync(filament::backend::Platform::Sync* value) noexcept override {
+    void destroy_sync(filament::backend::Platform::Sync* value) noexcept {
         auto* sync = static_cast<NativeSync*>(value);
         if (sync->handle) delete_sync(sync->handle);
         delete sync;
     }
 };
 
+// Adds the synchronization hooks to any of Filament's OpenGL platforms.
+template <class Base> struct SyncPlatform final : Base {
+    template <class... Args>
+    explicit SyncPlatform(SyncQueue& queue, Args&&... args) : Base(std::forward<Args>(args)...), queue(queue) {}
+    filament::backend::Platform::Sync* createSync() noexcept override { return queue.create_sync(); }
+    void destroySync(filament::backend::Platform::Sync* value) noexcept override { queue.destroy_sync(value); }
+    // filly never presents: its only swap chain is the hidden 1x1 chain that drives Filament's
+    // per-frame bookkeeping. SwapBuffers on it waits for the vertical blank on NVIDIA, which
+    // pinned every frame to the refresh period (16.2 ms of GPU frame time for 0.37 ms of work).
+    // A flush submits the frame the same way without waiting for the display.
+    void commit(filament::backend::Platform::SwapChain*) noexcept override { glFlush(); }
+    SyncQueue& queue;
+};
+
+struct GlInterop::Impl {
+    SyncQueue sync;
+    std::unique_ptr<filament::backend::Platform> platform;
+    const char* name = nullptr;
+    explicit Impl(uintptr_t context) : sync(context) {}
+};
+
+#if defined(__linux__)
+namespace {
+bool x_display_available() {
+    const char* name = std::getenv("DISPLAY");
+    if (!name || !*name) return false;
+    Display* display = XOpenDisplay(nullptr);
+    if (!display) return false;
+    XCloseDisplay(display);
+    return true;
+}
+}
+
+// Offscreen engines prefer a GPU through EGL, which needs no X server. A software EGL
+// renderer is used only without an X display, because GLX on WSLg reaches the GPU while
+// Mesa's EGL platforms there may offer only llvmpipe. FILLY_OFFSCREEN_GL=egl or glx
+// overrides the choice.
+using PlatformPtr = std::unique_ptr<filament::backend::Platform>;
+PlatformPtr select_offscreen(SyncQueue& sync, const char*& name) {
+    const char* forced = std::getenv("FILLY_OFFSCREEN_GL");
+    const std::string_view choice = forced ? forced : "";
+    if (!choice.empty() && choice != "egl" && choice != "glx")
+        throw BackendError("FILLY_OFFSCREEN_GL must be 'egl' or 'glx', got '" + std::string(choice) + "'");
+    EglProbe probe;
+    if (choice != "glx") {
+        probe = probe_egl();
+        if (probe.device && (choice == "egl" || !probe.software || !x_display_available())) {
+            name = "egl";
+            return std::make_unique<SyncPlatform<EglPlatform>>(sync, std::move(probe.device));
+        }
+        if (choice == "egl") throw BackendError("EGL offscreen rendering is not available: " + probe.reason);
+    }
+    // PlatformGLX exits the process when it cannot open a display.
+    if (!x_display_available()) {
+        if (choice == "glx") throw BackendError("FILLY_OFFSCREEN_GL=glx needs an X display; DISPLAY is unset or unreachable");
+        throw BackendError("Offscreen rendering needs an EGL device or an X display. EGL: " + probe.reason);
+    }
+    name = "glx";
+    return std::make_unique<SyncPlatform<filament::backend::PlatformGLX>>(sync, nullptr);
+}
+#endif
+
 GlInterop::GlInterop(uintptr_t context) {
     if (context && current_gl_context() != context)
         throw InteropError("shared_context must be the current host OpenGL context");
     impl_ = std::make_unique<Impl>(context);
+#if defined(_WIN32)
+    impl_->platform = std::make_unique<SyncPlatform<filament::backend::PlatformWGL>>(impl_->sync);
+    impl_->name = "wgl";
+#else
+    if (context) {
+        impl_->platform = std::make_unique<SyncPlatform<filament::backend::PlatformGLX>>(
+            impl_->sync, glXGetCurrentDisplay());
+        impl_->name = "glx";
+    } else {
+        impl_->platform = select_offscreen(impl_->sync, impl_->name);
+    }
+#endif
 }
 GlInterop::~GlInterop() = default;
-filament::backend::Platform* GlInterop::platform() { return impl_.get(); }
-bool GlInterop::shared() const { return impl_->context != 0; }
+filament::backend::Platform* GlInterop::platform() { return impl_->platform.get(); }
+const char* GlInterop::platform_name() const { return impl_->name; }
+bool GlInterop::shared() const { return impl_->sync.context != 0; }
 filament::Engine* GlInterop::create_engine() {
     const auto config = engine_config();
     if (!shared())
@@ -199,7 +269,7 @@ filament::Engine* GlInterop::create_engine() {
     require_host();
 #if defined(_WIN32)
     auto dc = wglGetCurrentDC();
-    auto context = reinterpret_cast<HGLRC>(impl_->context);
+    auto context = reinterpret_cast<HGLRC>(impl_->sync.context);
     // Filament creates its shared context on its driver thread. wglCreateContextAttribsARB fails
     // while the host context is current on this thread: ERROR_BUSY (170) on Intel, 0xC00720DD on NVIDIA.
     if (!wglMakeCurrent(nullptr, nullptr)) throw InteropError("Could not release the host context for sharing");
@@ -207,7 +277,7 @@ filament::Engine* GlInterop::create_engine() {
     auto* display = glXGetCurrentDisplay();
     auto draw = glXGetCurrentDrawable();
     auto read = glXGetCurrentReadDrawable();
-    auto context = reinterpret_cast<GLXContext>(impl_->context);
+    auto context = reinterpret_cast<GLXContext>(impl_->sync.context);
     if (!glXMakeContextCurrent(display, None, None, nullptr))
         throw InteropError("Could not release the host GLX context for sharing");
 #endif
@@ -233,11 +303,11 @@ filament::Engine* GlInterop::create_engine() {
     return engine;
 }
 void GlInterop::require_host() const {
-    if (current_gl_context() != impl_->context)
+    if (current_gl_context() != impl_->sync.context)
         throw InteropError("Make the original host OpenGL context current first");
 }
-bool GlInterop::host_current() const { return current_gl_context() == impl_->context; }
-uintptr_t GlInterop::context() const { return impl_->context; }
+bool GlInterop::host_current() const { return current_gl_context() == impl_->sync.context; }
+uintptr_t GlInterop::context() const { return impl_->sync.context; }
 uint32_t GlInterop::import_texture(uint32_t texture, uint32_t width, uint32_t height, SrgbView view) const {
     require_host();
     if (!texture || !glIsTexture(texture)) throw InteropError("Texture does not exist in the host context");
@@ -267,7 +337,7 @@ uint32_t GlInterop::import_texture(uint32_t texture, uint32_t width, uint32_t he
     // while the host still sees plain RGBA8 values.
     GLuint name = 0;
     glGenTextures(1, &name);
-    impl_->texture_view(name, GL_TEXTURE_2D, texture, SRGB8_ALPHA8, 0, 1, 0, 1);
+    impl_->sync.texture_view(name, GL_TEXTURE_2D, texture, SRGB8_ALPHA8, 0, 1, 0, 1);
     if (glGetError() != GL_NO_ERROR || !glIsTexture(name)) {
         glDeleteTextures(1, &name);
         throw InteropError("Could not create an sRGB view of the host texture");
@@ -280,27 +350,27 @@ void GlInterop::delete_host_texture(uint32_t texture) const {
 }
 void* GlInterop::host_fence() {
     require_host();
-    void* result = impl_->fence(SYNC_GPU_COMMANDS_COMPLETE, 0);
+    void* result = impl_->sync.fence(SYNC_GPU_COMMANDS_COMPLETE, 0);
     if (!result) throw InteropError("Could not create host OpenGL fence");
     glFlush();
     return result;
 }
 void GlInterop::delete_host_fence(void* fence) {
-    if (fence) impl_->delete_sync(fence);
+    if (fence) impl_->sync.delete_sync(fence);
 }
 void GlInterop::enqueue_wait(filament::Engine& engine, void* fence) {
     if (!fence) return;
-    Impl::Request request;
+    SyncQueue::Request request;
     request.incoming = fence;
-    impl_->queue(std::move(request));
+    impl_->sync.queue(std::move(request));
     auto* gate = engine.createSync();
     engine.destroy(gate);
 }
 SyncPoint GlInterop::signal(filament::Engine& engine) {
     auto ticket = std::make_shared<Signal>();
-    Impl::Request request;
+    SyncQueue::Request request;
     request.outgoing = ticket;
-    impl_->queue(std::move(request));
+    impl_->sync.queue(std::move(request));
     return {engine.createSync(), std::move(ticket)};
 }
 void GlInterop::wait_on_host(const SyncPoint& point) {
@@ -310,23 +380,23 @@ void GlInterop::wait_on_host(const SyncPoint& point) {
         throw InteropError("Timed out waiting for Filament to publish its GL fence");
     if (!point.signal->handle) throw InteropError("Filament could not create its GL fence");
     // This queues a GPU dependency; it does not wait for GPU completion on the CPU.
-    impl_->wait(point.signal->handle, 0, UINT64_MAX);
+    impl_->sync.wait(point.signal->handle, 0, UINT64_MAX);
 }
 void GlInterop::destroy(filament::Engine& engine, SyncPoint& point) {
     if (point.sync) engine.destroy(point.sync);
     point = {};
 }
 void GlInterop::set_srgb_writes(filament::Engine& engine, bool value) {
-    Impl::Request request;
+    SyncQueue::Request request;
     request.srgb = value;
-    impl_->queue(std::move(request));
+    impl_->sync.queue(std::move(request));
     auto* gate = engine.createSync();
     engine.destroy(gate);
 }
 void GlInterop::finish_host() {
     auto* fence = host_fence();
-    auto status = impl_->client_wait(fence, 0, 10000000000ULL);
-    impl_->delete_sync(fence);
+    auto status = impl_->sync.client_wait(fence, 0, 10000000000ULL);
+    impl_->sync.delete_sync(fence);
     if (status != ALREADY_SIGNALED && status != CONDITION_SATISFIED)
         throw InteropError("Host GPU work did not complete during close");
 }

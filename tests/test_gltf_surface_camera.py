@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import math
+import struct
 
 import numpy as np
 import pytest
@@ -161,6 +162,39 @@ def test_uv_animation_matches_static_transform(triangle_glb, mode):
         model.reset_animation()
         renderer.render(scene, target)
         np.testing.assert_array_equal(target.read(), original)
+
+
+@pytest.mark.parametrize("mode", ["compiled", "precompiled"])
+def test_uv_rotation_direction_matches_static_transform(triangle_glb, mode):
+    """A quarter turn maps (u, v) to (v, -u) (gltfio, three.js): u = 0.9 samples green, where
+    the opposite direction would give u = -0.9 and clamp to red."""
+    doc, binary = unpack(triangle_glb)
+    textured(doc, binary)
+    uv = doc["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"]
+    view = doc["accessors"][uv]["bufferView"]
+    offset = doc["bufferViews"][view].get("byteOffset", 0)
+    binary[offset:offset + 24] = struct.pack("<6f", *[0.1, 0.9] * 3)
+    path = "/materials/0/pbrMetallicRoughness/baseColorTexture/extensions/KHR_texture_transform/"
+    add_clip(doc, binary, path + "rotation", [0, np.pi / 2])
+    with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
+        scene = renderer.create_scene()
+        camera = scene.create_camera()
+        camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
+        camera.position = (0, 0, 3)
+        camera.look_at((0, 0, 0))
+        scene.camera = camera
+        target = renderer.create_render_target(width=32, height=32)
+        model = scene.load(pack(doc, binary))
+        model.apply_animation(0, 2, loop=False)
+        renderer.render(scene, target)
+        np.testing.assert_array_equal(target.read()[16, 16], [0, 255, 0, 255])
+        model.close()
+        doc.pop("animations")
+        doc["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["extensions"]["KHR_texture_transform"] = {
+            "rotation": np.pi / 2}
+        scene.load(pack(doc, binary))
+        renderer.render(scene, target)
+        np.testing.assert_array_equal(target.read()[16, 16], [0, 255, 0, 255])
 
 
 @pytest.mark.parametrize("extension,field,start,end", [

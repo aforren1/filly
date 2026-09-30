@@ -17,10 +17,15 @@ logging, Python exceptions, or direct output that bypasses Filament's log stream
 
 `Renderer(*, shared_context=None, precompiled_shaders=False)` creates an OpenGL renderer.
 `shared_context` accepts the current host WGL context on Windows or GLX context on Linux as an
-integer. `current_gl_context()` returns that handle, or zero if no context is current. Linux
-rendering requires an X11/GLX display. Passing zero explicitly as `shared_context` is an error.
+integer. `current_gl_context()` returns that handle, or zero if no context is current. Passing
+zero explicitly as `shared_context` is an error. On Linux, an offscreen renderer uses EGL or GLX;
+see [Run on Linux](../how-to/build.md#run-on-linux). It needs no X display if EGL is available.
 
-`precompiled_shaders` selects how glTF materials get their shaders:
+How glTF materials get their shaders depends on the material path of the build
+(CMake `FILLY_MATERIALS`, see [Material path](../how-to/build.md#material-path)).
+`filly._native._materials` reports it as `"runtime"` or `"archive"`.
+
+On the **runtime** path (the default build), `precompiled_shaders` selects:
 
 - `False` (default): compile each glTF material configuration during loading. This adds 0.1 to
   0.35 s for each asset with new configurations.
@@ -32,9 +37,28 @@ diffuse-transmission, anisotropy, iridescence, transmission, and volume material
 compile unlit `OPAQUE` materials, so that they store alpha one on the direct
 [output path](#output-path): with `True`, the first unlit plane took 129 ms to load instead of
 14 ms for a lit one. A renderer compiles each configuration once.
-See [texture limits](#texture-limits) for the one case in which they differ. Both settings
-compile GL programs at the first draw, so render one warmup frame after loading and before a
-timing-critical trial. The material compiler is in the wheel for both settings.
+See [texture limits](#texture-limits) for the one case in which they differ. The material
+compiler is in the wheel for both settings.
+
+On the **archive** path, every glTF material is an instance of an entry of filly's precompiled
+material archive. Nothing is compiled while loading, and `precompiled_shaders` has no effect. The
+archive has 39 entries: core lit; lit with clearcoat, sheen, and iridescence, with and without
+`KHR_materials_specular`; lit with anisotropy; thin and solid refraction with and without
+`KHR_materials_specular` and with anisotropy; specular-glossiness; unlit; and diffuse
+transmission, each opaque, masked, and blended. Only materials with `KHR_materials_specular` get
+an entry with specular inputs: with them, Filament uses the specular extension's F90 instead of
+its F90 from F0, which is lower for dark metals and low IOR. See
+[material precompilation](../explanation/material-precompilation.md).
+
+On both paths, the GPU driver compiles each GL program at its first draw, so render one warmup
+frame after loading and before a timing-critical trial. The driver keeps compiled programs in its
+own disk cache, so the first frames are much slower on a machine or driver that has not seen the
+programs. With six sample assets on the test machine, the first frame of each took 1.3 s in
+total on the archive path and 2.8 s on the runtime path with cold driver caches (Intel Iris Xe),
+and 0.07 s and 0.25 s with warm caches. filly does not compile programs at renderer creation and
+does not keep its own program binary cache: neither made the first frames faster in these
+measurements. See
+[material precompilation](../explanation/material-precompilation.md#gap-closure-september-30-2026).
 
 Transmission and volume shading is Filament's. For perspective cameras it is identical to
 `gltf_viewer`, including its limits: rough-glass blur is an angular estimate from the vertical
@@ -66,6 +90,7 @@ Assets with roughly 18,000 or more meshes can still exceed the ring and abort th
 | `closed` | Report whether the engine is closed. |
 | `precompiled_shaders` | The setting given at creation. Read-only. |
 | `shared_context` | The host context handle given at creation, or `0` for an offscreen renderer. Read-only. |
+| `gl_platform` | The OpenGL binding of the engine: `"wgl"`, `"glx"`, or `"egl"`. Read-only. |
 | `stats` | Return a `Stats` snapshot of frame counters and CPU timings. |
 
 Target `width` and `height` accept Python and NumPy integers. They also accept floats with an
@@ -99,8 +124,8 @@ materials. These counts do not measure GPU memory or shader caches.
   must lie inside the target. Values follow the target size rules above. Default: the whole
   target.
 - `clear`: with `True`, the whole target is cleared to `scene.background` before the frame. With
-  `False`, pixels outside the viewport keep their contents. The viewport is still filled with the
-  background first, so the frame never shows an earlier frame through it.
+  `False`, pixels outside the viewport keep their contents. The viewport still starts from the
+  background, so the frame never shows an earlier frame through it.
 
 A camera that follows the target aspect uses the viewport aspect. The camera, viewport, and
 clear options allocate no memory.
@@ -114,12 +139,13 @@ renderer.render(scene, target, camera=left, viewport=(0, 0, w // 2, h))
 renderer.render(scene, target, camera=right, viewport=(w // 2, 0, w - w // 2, h), clear=False)
 ```
 
-Each call is a separate Filament frame: the second call adds one frame's fixed cost.
-`clear=False` renders one more pass that fills the viewport with the background. Measured at
-1920 x 1080 with two 960 x 1080 eyes on the tested Intel Iris Xe GPU, including a
-`finish()`: one full frame of a lit sphere took 1.8 ms on the direct output path and 5.4 ms
-with color grading and 4x MSAA; two eyes took 3.2 ms and 7.9 ms. The fill pass cost nothing measurable on the direct
-path and about 1 ms with color grading. CPU submission was 0.1 to 0.3 ms per call.
+Each call is a separate Filament frame: the second call adds one frame's fixed cost. On the exact
+path, `clear=False` encodes only the viewport. On the direct path it renders one more pass that
+fills the viewport with the background; that pass cost nothing measurable. Measured before the
+exact path existed, at 1920 x 1080 with two 960 x 1080 eyes on the tested Intel Iris Xe GPU,
+including a `finish()`: one full frame of a lit sphere took 1.8 ms on the direct output path and
+5.4 ms with Filament's color grading and 4x MSAA; two eyes took 3.2 ms and 7.9 ms. CPU submission
+was 0.1 to 0.3 ms per call.
 
 ## Scene
 
@@ -158,7 +184,7 @@ next `render()`.
 | Property | Values | Default |
 | --- | --- | --- |
 | `encoding` | `"srgb"`, `"linear"` | `"srgb"` |
-| `output_path` | `"graded"`, `"direct"`. See [output path](#output-path). | `"graded"` |
+| `output_path` | `"exact"`, `"direct"`. See [output path](#output-path). | `"exact"` |
 | `tone_mapping` | See the table below. | `"linear"` |
 | `antialiasing` | `"none"`, `"fxaa"` | `"none"` |
 | `msaa` | `1`, `2`, `4`, `8` (effective counts depend on the driver) | `1` |
@@ -179,23 +205,34 @@ targets and to imported host textures, and no other option changes it.
 
 - `"srgb"`: apply the sRGB transfer function. A host that samples the texture as plain RGBA8 into
   a non-sRGB framebuffer, and a NumPy readback, both see sRGB values: an unlit 0.5 grey is 188.
-  For unlit colors the output is within one 8-bit level of the analytic sRGB transfer function.
 - `"linear"`: store linear values: an unlit 0.5 grey is 128.
+
+On the default output path, the stored level is the rounded analytic value of the scene-linear
+color as filly's RGBA16F buffer holds it: exact for every fp16 value. A color that is not an fp16
+value is first stored as one of its two fp16 neighbors, so an unlit color is within 0.54 levels of
+its analytic value (one level at most after rounding). See
+[output encoding](../explanation/design.md#output-encoding).
 
 #### Output path
 
-`output_path` selects how the output is written. Both paths meet the one-level tolerance above,
-but they round differently: the same pixel can differ by one 8-bit level between them.
+`output_path` selects how the output is written. Both paths are within one 8-bit level of the
+analytic transfer function, but they round differently: the same pixel can differ by one level
+between them.
 
-- `"graded"` (default): Filament's color-grading pass applies the tone mapper and the encoding in
-  one step. Every option and material works on this path.
-- `"direct"`: Filament's postprocessing is off. The shader output goes straight to the target,
-  and the GPU applies the sRGB encoding on write. Linear output writes raw values.
+- `"exact"` (default): the scene renders scene-linear color into an RGBA16F buffer, and filly's
+  encode pass applies the linear tone mapper's clamp, the transfer function in fp32, and the alpha
+  rule, and rounds to 8-bit levels. Every option and material works on this path, and every
+  option ends in the same encode pass: an option that does not change the linear color does not
+  change a stored level. Options that are part of Filament's postprocessing (tone mapping other
+  than `"linear"`, bloom, depth of field, vignette) run it first; its output stays linear, with
+  one exception: a [tone mapper that mixes channels](#tone-mapping) with `encoding = "srgb"`.
+- `"direct"`: the shader output goes straight to the target, and the GPU applies the sRGB
+  encoding on write. Linear output writes raw values. It saves the encode pass.
 
 The scene never changes the path by itself, so a stimulus does not change by one level when
 another option or a material changes.
 
-The direct path cannot render some settings correctly. It never falls back to color grading.
+The direct path cannot render some settings correctly. It never falls back to the exact path.
 Instead, each conflict raises an error at the point where it occurs:
 
 | Conflict | Error |
@@ -206,23 +243,24 @@ Instead, each conflict raises an error at the point where it occurs:
 | Load an asset or create a mesh with a `MASK` material while `output_path` is `"direct"` | `AssetError`. Nothing is loaded. |
 | Render with `encoding = "srgb"` to an [imported target](#importedtarget) whose texture has mutable storage (`glTexImage2D`) | `InteropError`. Nothing is rendered. |
 
-Filament writes the sharpened edge alpha of `MASK` materials to the target, and only color grading
-stores alpha one. `fog`, `shadows`, `encoding`, lights, environments, and every other material
+Filament writes the sharpened edge alpha of `MASK` materials to the target, and only the encode
+pass stores alpha one. `fog`, `shadows`, `encoding`, lights, environments, and every other material
 work on both paths. A scene that is not transparent stores alpha one on both paths.
 
-Cost, measured at 1920 x 1080 on the tested Intel Iris Xe GPU as the median of five interleaved
-rounds of 150 frames, each frame one `render()` and one `finish()`:
+GPU frame time at 1920 x 1080 on the tested laptop, from Filament's timer in a 60 Hz loop, median
+of five interleaved rounds of 600 frames:
 
-| Scene | `"graded"` | `"direct"` |
+| Scene | `"exact"` | `"direct"` |
 | --- | ---: | ---: |
-| Empty, offscreen | 0.81 ms | 0.26 ms |
-| DamagedHelmet, offscreen | 2.00 ms | 1.20 ms |
-| Empty, shared texture | 0.82 ms | 0.25 ms |
-| DamagedHelmet, shared texture | 1.82 ms | 1.16 ms |
+| Empty, offscreen, Intel Iris Xe | 0.80 ms | 0.11 ms |
+| DamagedHelmet, offscreen, Intel Iris Xe | 2.32 ms | 1.61 ms |
+| DamagedHelmet, pyglet shared texture, Intel Iris Xe | 2.33 ms | 1.63 ms |
+| DamagedHelmet, offscreen, NVIDIA RTX A500 | 0.28 ms | 0.18 ms |
 
-Back to back without `finish()`, color grading added 0.33 ms per frame for the empty scene and
-0.56 ms for DamagedHelmet. Use `"direct"` when the frame budget needs this time and the scene
-uses none of the conflicting settings.
+The exact path also takes about 0.1 ms more CPU time per `render()`. At 512 x 512 the difference
+is 0.11 to 0.12 ms of GPU time on the Intel GPU. Use `"direct"` when the frame budget needs this
+time and the scene uses none of the conflicting settings. See
+[Performance](performance.md#output-path-september-30-2026).
 
 Material factors, background colors, light colors, and environment values are linear inputs.
 
@@ -242,9 +280,28 @@ Material factors, background colors, light colors, and environment values are li
 
 Set `tone_mapping = "aces_legacy"` to match `gltf_viewer`.
 
+`"linear"`, `"filmic"`, and `"generic"` map each channel on its own. filly then applies the sRGB
+transfer function exactly, as for every other option. The other tone mappers mix channels and
+run in Filament's 3D LUT. With `encoding = "srgb"`, Filament's color grading encodes them to sRGB
+and rounds to 8-bit levels, as `gltf_viewer` does, and filly's encode pass stores those levels
+unchanged: the output equals `gltf_viewer`'s (DamagedHelmet, TransmissionTest, ClearCoatTest,
+SheenChair: maximum difference 0). In this configuration:
+
+- `dithering = True` uses Filament's dithering, the same one-level triangular noise before the
+  8-bit rounding.
+- Transparent output is srgb(c) * a, as on the linear route.
+- FXAA runs on the encoded image, as on the linear route.
+- With `encoding = "linear"`, Filament writes linear color from its 3D LUT and filly stores it
+  without a transfer function. That LUT holds 10-bit linear values, so dark colors are coarse:
+  encoded afterwards, levels are within 3 of the sRGB route, and more near black.
+
 #### Effects
 
-`dithering=True` adds Filament's temporal dithering. Its noise pattern changes on every frame,
+`antialiasing = "fxaa"` runs filly's FXAA pass on the encoded image (FXAA 3.11 console with the
+G3D patches, as in Filament 1.77.1). A pixel without an edge keeps its exact level, so a flat
+field is identical with and without FXAA. `dithering=True` adds one level of Filament's triangular
+noise pattern after the transfer function, before rounding (in Filament's color grading for a
+tone mapper that mixes channels). The pattern changes on every frame,
 so identical frames can differ by one 8-bit level. `ssao=True` adds screen-space ambient
 occlusion to environment lighting. `bloom=True` adds bloom with strength 0.1. SSAO and bloom use
 Filament's default options, as `gltf_viewer` does. Temporal antialiasing, screen-space
@@ -279,13 +336,15 @@ Filament clamps large blurs. The camera aperture for exposure is separate: `aper
 change image brightness.
 
 Depth of field needs a perspective camera. Only opaque materials write depth, so blended
-materials take the blur of what is behind them. The effect uses color grading. Its passes store
-color as R11G11B10F at half the width and height, so flat areas can change by up to 2 levels.
+materials take the blur of what is behind them. The effect is part of Filament's postprocessing.
+Its passes store color as R11G11B10F at half the width and height, so flat areas can change by up
+to 2 levels.
 Its noise depends on the pixel position only.
 
 #### Vignette
 
-`vignette = True` darkens the image toward its edges in the color-grading pass.
+`vignette = True` darkens the image toward its edges in Filament's color-grading pass, which then
+runs before filly's encode pass.
 `set_vignette_options(*, midpoint=0.5, roundness=0.5, feather=0.5, color=(0, 0, 0))` sets
 Filament's `VignetteOptions`: `midpoint` in `[0, 1]` moves the start of the falloff, `roundness`
 in `[0, 1]` goes from a rounded rectangle to a circle, `feather` in `[0.05, 1]` sets the width of
@@ -294,8 +353,8 @@ the falloff, and `color` is the linear color at the edges. The center pixel is u
 #### Transparent output
 
 Set `transparent = True` and `background = (0, 0, 0, 0)` to keep alpha. Transparent scenes use
-the color-grading path. The output is premultiplied after encoding: RGB is the encoded straight
-color multiplied by alpha. An unlit
+the exact path. The output is premultiplied after encoding: RGB is the encoded straight color
+multiplied by alpha. An unlit
 0.5 grey at alpha 0.5 is `(94, 94, 94, 128)` with sRGB encoding. This is what OpenGL blending
 with `GL_ONE, GL_ONE_MINUS_SRC_ALPHA` into a non-sRGB framebuffer expects. The background is
 straight RGBA; the renderer multiplies its RGB by alpha. The PsychoPy adapter converts to its
@@ -361,13 +420,34 @@ material loads, and `AssetCompatibilityWarning` reports it: Filament's precompil
 some clearcoat, sheen, IOR, or specular inputs so that the rest fits. Transmission, volume,
 anisotropy, and iridescence materials are always compiled and raise `AssetError` above their limit.
 
+The archive path has other rules. Every entry has the five core textures (base color,
+metallic-roughness or specular-glossiness, normal, occlusion, emissive). Extension textures
+(clearcoat, sheen, transmission, thickness, specular, anisotropy, iridescence) share the generic
+samplers of the entry: 4 in non-refractive lit entries and 3 in refractive entries. Roles that
+use the same glTF texture with the same color space share a sampler. A material with more
+distinct extension textures than its entry has samplers loads without the least important ones,
+and `AssetCompatibilityWarning` names the material and each dropped texture (`strict=True` raises
+`AssetError`). Textures are dropped in this order: `clearcoatNormalTexture`,
+`sheenRoughnessTexture`, `clearcoatRoughnessTexture`, `iridescenceThicknessTexture`,
+`specularTexture`, `specularColorTexture`, `sheenColorTexture`, `clearcoatTexture`,
+`iridescenceTexture`, `anisotropyTexture`, `thicknessTexture`, and `transmissionTexture` last.
+Detail maps go first, and the maps that define where an effect exists or how strong it is go
+last. No Khronos sample material needs a drop. The limits are the same for the planned web build.
+Textures read `TEXCOORD_0` or `TEXCOORD_1`; a core texture on another set is not drawn, with a
+warning, and an extension texture on another set raises `AssetError`. A specular-glossiness
+material renders without clearcoat, sheen, specular, transmission, and volume, with a warning.
+
 The loader supports punctual lights, unlit materials, clearcoat, sheen, transmission, volume, IOR,
 specular, emissive strength, specular-glossiness, dispersion, variants, texture transforms,
 mesh quantization and Draco through Filament. Both `EXT_meshopt_compression` and
 `KHR_meshopt_compression` are decoded during loading with meshoptimizer 1.0, into the fallback
 buffers that the compressed views name. This includes version 1 vertex data and the COLOR filter,
 compressed pointer accessors, and compressed instance attributes.
-This is not a glTF conformance claim.
+This is not a glTF conformance claim. `KHR_materials_emissive_strength` scales the emissive
+factor once, as the extension specifies. Filament 1.77.1's gltfio applies it twice: it multiplies
+the factor by the strength and also passes the strength to the shader (factor 0.05 with strength 4
+renders as factor 0.8). filly restores the unscaled factor after loading, so its output differs
+from `gltf_viewer` for materials with a strength other than 1.
 `KHR_animation_pointer` has the tested subset listed below.
 Dispersion requires volume and rejects unlit or specular-glossiness combinations
 before native shader compilation.
@@ -398,7 +478,8 @@ Diffuse transmission uses a custom shader with direct and environment backlighti
 It supports factor and color textures, UV sets 0 and 1, texture transforms, sampler filters,
 alpha modes, normal maps, IOR, emissive strength, and volume attenuation with a G-channel thickness
 texture. UV orientation follows glTF. Thickness uses the complete model-to-world scale, as for volume materials.
-Dispersion has no effect on this diffuse-only transport path.
+Its emission is not scaled by the camera exposure, as in the other lit materials; the
+environment backlighting is. Dispersion has no effect on this diffuse-only transport path.
 Other diffuse-transmission combinations raise `AssetError`.
 
 Full Khronos reference-renderer parity is not implemented. Screen-space glass also cannot show
@@ -454,6 +535,9 @@ Two handles are equal when they refer to the same light.
   units around `center`. The width is `height` times the target aspect.
 - `position`: three coordinates.
 - `look_at(target, up=(0, 1, 0))`: set the viewing direction.
+- `frame(target, *, fill=0.8, direction=None, up=(0, 1, 0), fit="sphere", near=None, far=None, aspect=None)`:
+  aim at a target and move the camera so that it fills part of the view. See
+  [framing](#framing).
 - `transform`: affine 4 by 4 model matrix.
 - `view_matrix`: copy of the view matrix.
 - `projection`: copy of Filament's projection matrix.
@@ -478,6 +562,41 @@ shutter time 1/125 second, and ISO 100. Dim authored lights can require a much l
 Cameras support `==` and `hash()`. Two handles are equal when they refer to the same camera.
 `camera.node` returns the `Node` of an imported camera, and `None` for a scene-created camera.
 
+### Framing
+
+`camera.frame(target, ...)` places the camera once. It never runs by itself: call it again after
+the target moves. It returns the distance from the camera to the target's center.
+
+- `target`: a `Model` or a `Node`, which use their [`bounds`](#model) moved by the model's
+  current transform, or a `(min, max)` box in world coordinates.
+- `fit="sphere"` frames the sphere that circumscribes the box: its center is the box center, and
+  its radius is half the box diagonal times the largest scale factor of the model transform. A
+  rotation of the model does not change it, so a model that spins between trials keeps the same
+  framing. The sphere of a box is up to 1.73 times larger than the object, so the object looks
+  smaller than `fill`. `fit="box"` fits the box's corners tightly for the given direction.
+- `fill` in `(0, 1]`: the fraction of the view that the target spans. For `"sphere"`, the
+  sphere's projection spans `fill` of the narrower image axis (a sphere on the optical axis
+  projects to a circle). For `"box"`, every projected corner lies within `fill` of the half-width
+  and half-height from the image center, and at least one corner reaches it.
+- `direction`: the viewing direction, from the camera toward the target. Default: the camera's
+  current direction. `up` must not be parallel to it. The camera then looks at the target's
+  center with `up`, as `look_at()` does.
+- A perspective camera keeps its field of view; `frame()` sets its distance. An orthographic
+  camera gets the `height` form of `set_orthographic()`, so it follows the target aspect, and a
+  distance that keeps the target between the clipping planes.
+- `near` and `far`: default planes enclose the target (its sphere, or the box corners) with a
+  margin of 5% of its depth along the view, or of its sphere radius for a flatter target. Given
+  planes are used as they are. `projection` shows only `near`: Filament renders with the far
+  plane at infinity and uses `far` for culling.
+- `aspect`: the target aspect for the horizontal extent. Default: the aspect of the camera's
+  current projection, which is 1 before the first render of a camera that follows its target.
+  Pass the render target's width over height before the first render.
+
+`frame()` raises `ValueError` for a `fill` outside `(0, 1]`, a target with empty, non-finite, or
+zero-size bounds (such as a node without a mesh below it), a zero `direction` or `up`, a
+parallel `up`, an unknown `fit`, invalid planes, or an aspect that is not positive; `TypeError`
+for another target type; and `FillyError` for an imported camera, which keeps its glTF projection.
+
 ### Imported cameras
 
 Use `scene.camera = model.camera(key)` to select an imported camera. The key is the name or glTF
@@ -494,7 +613,7 @@ Imported perspective cameras support an omitted far plane. Imported orthographic
 
 ## Model
 
-- `bounds`: load-time minimum and maximum corners, shape `(2, 3)`, before changes to model or node transforms. Computed from glTF accessor bounds; not updated for deformation or animation.
+- `bounds`: minimum and maximum corners of the rest pose, shape `(2, 3)`, in the model's frame: `model.transform` does not apply, and glTF node transforms apply as loaded. A skinned mesh is skinned with the rest transforms of its joints, vertex by vertex; its own node transform does not apply, as the glTF specification requires. Other meshes use their accessor bounds. Each morph target counts at weight one. Computed once at load; not updated for node edits, deformation, or animation. For a model without geometry, each minimum is greater than its maximum. Skinned renderables get the same rest-pose box, in their node's frame, for culling and shadow fitting; animation that moves vertices far outside it can cull them.
 - `transform`: affine 4 by 4 matrix applied to the model root.
 - `position`: translation of the model root.
 - `visible`: add or remove the model's entities from its scene.
@@ -570,7 +689,8 @@ source data to create instances. With `clonable=True`, the source data stays in 
 the life of the asset. This costs about the size of the asset file: 3.7 MiB for the 3.6 MiB
 DamagedHelmet. With the default `clonable=False`, loading releases the source data. Each clone
 creates new material instances and decodes the textures of the custom diffuse-transmission,
-anisotropy, and iridescence materials again. Clones with lights add their light components to
+anisotropy, and iridescence materials again; on the archive path, it decodes all extension
+textures again. Clones with lights add their light components to
 `stats.live_lights`. Clone before the frame loop.
 
 Closing a model invalidates all its node, material, light, and imported camera handles. Scenes
@@ -736,6 +856,7 @@ Its transform is relative to its original glTF parent.
 | `index` | glTF node index. Read-only. |
 | `parent` | Parent `Node`, or `None` for a top-level node. Read-only. |
 | `children` | Child nodes in glTF order. Read-only. |
+| `bounds` | Rest-pose minimum and maximum corners of the node and its descendants, with the meaning of [`Model.bounds`](#model): in the model's frame, not changed by node edits or animation. Load computes one box per mesh node; each read joins the boxes of the subtree. Each minimum is greater than its maximum when no mesh is below the node. Read-only. |
 | `material(slot=0)` | Return this node slot's own material. |
 | `morph_target_count` | Number of morph targets. |
 | `set_morph_weights(weights)` | Set one finite weight per target. Weights are not restricted to `[0,1]`. |
@@ -777,8 +898,9 @@ and its edits.
 ### Material
 
 A `Material` exposes `base_color` as linear RGBA factors and `metallic` and `roughness` as scalar
-factors. Values must be finite and in `[0, 1]`. `emissive` is linear RGB, nonnegative; glTF
-emissive strength is folded into it. Changing a factor does not change the glTF alpha mode.
+factors. Values must be finite and in `[0, 1]`. `emissive` is the effective linear RGB emission,
+nonnegative: the glTF emissive factor times the emissive strength. Setting it sets the factor and
+resets the strength to 1. Changing a factor does not change the glTF alpha mode.
 Unsupported material parameters raise `AssetError`, for example `emissive` on an unlit material.
 
 ### Runtime textures
@@ -819,6 +941,12 @@ glTF material also reaches the textured material, and `apply_variant()` keeps ru
 on shared materials; on node-local materials that the variant maps, they are lost, as other
 edits are. The custom diffuse-transmission, anisotropy, and iridescence materials have no
 runtime texture slots: `AssetError`.
+
+On the archive path, every material has both slots, including diffuse transmission,
+anisotropy, and iridescence. An assignment changes parameters of a copy of the glTF instance:
+nothing is compiled, other glTF textures stay, and `set_texture_transform()` always works.
+Removing a texture starts again from a copy of the glTF instance, which has the glTF texture of
+that slot, and the factors carry over. The rules for variants and animation are the same.
 
 A texture can serve many materials. Closing it removes it from every material that uses it.
 
@@ -952,7 +1080,7 @@ The storage kind matters only for [`output_path = "direct"`](#output-path) with 
   `ARB_texture_view`). Filament renders into the view, so the GPU can encode sRGB on write.
   `close()` deletes the view if the host context is current; otherwise the view goes away with
   the context. Both output paths work.
-- Mutable storage, from `glTexImage2D`: Filament renders into the texture itself. The default
+- Mutable storage, from `glTexImage2D`: Filament renders into the texture itself. The exact
   path works. A render with `output_path = "direct"` and `encoding = "srgb"` raises
   `InteropError`, because the GPU encodes only into sRGB storage.
 
@@ -1045,7 +1173,7 @@ uv run --no-sync python -m filly.benchmark stimulus.glb --frames 10000
 ```
 
 The model should be near the origin and visible from `(0, 0, 3)`. Add `--output-path direct` to
-measure the [direct output path](#output-path); the default is `graded`.
+measure the [direct output path](#output-path); the default is `exact`.
 The command reports submission percentiles, a completion wait after the batch, average batch time
 per frame, and one readback cost. Warmup frames are excluded.
 It does not measure isolated GPU time, per-frame completion latency, or display deadlines.

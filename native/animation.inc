@@ -35,7 +35,8 @@ void commit_properties(ModelData& model) {
     for (const auto& uv : model.texture_transforms) {
         const auto& v = uv.value;
         const float c = std::cos(v[4]), s = std::sin(v[4]);
-        m::mat3f matrix{m::float3{c*v[2], s*v[2], 0}, m::float3{-s*v[3], c*v[3], 0}, m::float3{v[0], v[1], 1}};
+        // The same matrix as AssetTexture::transform; gltfio's parameters take its transpose.
+        m::mat3f matrix{m::float3{c*v[2], -s*v[3], 0}, m::float3{s*v[2], c*v[3], 0}, m::float3{v[0], v[1], 1}};
         if (uv.transpose) matrix = transpose(matrix);
         write_material(model, uv.material, [&](f::MaterialInstance* material) {
             material->setParameter(uv.parameter.c_str(), matrix);

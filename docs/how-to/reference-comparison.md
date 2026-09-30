@@ -18,7 +18,7 @@ and other lighting, so they cannot show pixel parity.
 Give catalog names from `docs/reference/sample-assets.csv`, or paths to `.glb` or `.gltf` files:
 
 ```powershell
-uv run --no-sync python tools/compare_reference.py BoxTextured DamagedHelmet .deps/suzanne-source.glb
+uv run --no-sync python tools/compare_reference.py BoxTextured DamagedHelmet IridescenceSuzanne
 ```
 
 Use `--catalog` to compare all assets that the catalog lists as rendered.
@@ -78,13 +78,13 @@ The tool gives `gltf_viewer` a `--settings` JSON file. It does not use `--batch`
 | Item | gltf_viewer default | Comparison setting (both sides) |
 | --- | --- | --- |
 | Model transform | `fitIntoUnitCube(aabb, 4)` | Disabled (`viewer.autoScaleEnabled: false`). The model keeps its glTF coordinates. |
-| Camera | Orbit manipulator, eye (0, 0, 0), target (0, 0, -4), 28 mm lens | Fixed eye and target from `model.bounds`. Direction (0.35, 0.25, 1). The bounding sphere fills the frame. |
+| Camera | Orbit manipulator, eye (0, 0, 0), target (0, 0, -4), 28 mm lens | `camera.frame()` on `model.bounds`, viewing along -(0.35, 0.25, 1). The bounding sphere is 1.05 times as far as where it would touch the narrower view axis. |
 | Projection | `setLensProjection(28 mm)`, near 0.1, far 100 | `setLensProjection(28 mm)` on both sides; filly uses `Camera.set_lens_projection()`. Near and far come from the bounds. |
 | Exposure | Aperture f/16, 1/125 s, ISO 100 | Same. This is also the filly default (EV100 14.97). |
 | IBL | Prefiltered KTX `lightroom_14b` with 3-band SH | The same 2:1 Radiance HDR on both sides, 30,000 lux, rotation 0. Both use `IBLPrefilterContext`. |
 | Skybox | Visible | Visible |
 | Sun | SUN light, 100,000 lux, shadows | Off. With `--sun`: a SUN light on both sides (`Scene.add_sun_light()`), white, no shadows. |
-| Tone mapping | ACES legacy, color grading quality MEDIUM | Same. The tool sets filly `tone_mapping="aces_legacy"`; the filly default is the neutral `"linear"`. Both sides encode sRGB. |
+| Tone mapping | ACES legacy, color grading quality MEDIUM | Same tone mapper. The tool sets filly `tone_mapping="aces_legacy"`; the filly default is the neutral `"linear"`. The viewer's color grading encodes sRGB; filly's color grading writes linear color, and filly's encode pass encodes sRGB. |
 | Antialiasing | FXAA and MSAA 4x | None (default), or FXAA and MSAA 4x |
 | SSAO, bloom, TAA, SSR, dithering | SSAO on, bloom on, dithering temporal | All off. Viewer bloom is on with strength 0. See the known issues. filly has `ssao`, `bloom`, and `dithering` options, but temporal dithering noise differs between processes. |
 | Animation | Plays in interactive mode | Off. Both show the authored rest pose. |
@@ -132,11 +132,19 @@ reflection difference.
 | SheenChair | 0 | 0 | 0.0000 | 1 | 0 | 107.1 |
 | SheenCloth | | | 0.0000 | 1 | 0 | 107.1 |
 | SpecularTest | | | 0 | 0 | 0 | identical |
-| EmissiveStrengthTest | | | 0 | 0 | 0 | identical |
+| EmissiveStrengthTest | | | 0.0998 | 32 | 0.0119 | 45.8 (intended, see below) |
 | TextureTransformTest | | | 0 | 0 | 0 | identical |
 | TransmissionTest | 0.0000 | 1 | 0.0000 | 1 | 0 | 101.1 |
 | TransmissionRoughnessTest | | | 0.0000 | 1 | 0 | 107.1 |
 | AttenuationTest | | | 0.0004 | 2 | 0 | 82.4 |
+
+**Emissive strength (September 30, 2026).** filly applies `KHR_materials_emissive_strength` once, as
+the extension specifies. gltfio 1.77.1, and therefore `gltf_viewer`, applies it twice. Materials
+with a strength other than 1 are therefore darker in filly than in `gltf_viewer`. Measured with
+`--environment studio` at 512 x 512: EmissiveStrengthTest MAE 0.0998, max 32, 1.2% of pixels over
+2/255; CompareEmissiveStrength MAE 0.549, max 87, 3.1% over 2/255. DamagedHelmet in the same run is
+identical to `gltf_viewer`.
+
 
 These assets match. Camera, projection, exposure, environment orientation, skybox, UV
 orientation, tangent frames, alpha modes, tone mapping, transmission, and volume agree with
@@ -190,7 +198,7 @@ filly changes the stock result.
 
 | Asset | Studio MAE | Max | Frac > 2 | PSNR (dB) | Cause |
 | --- | ---: | ---: | ---: | ---: | --- |
-| suzanne-source (README Suzanne) | 0.81 | 110 | 0.051 | 33.0 | Iridescence and glass materials. The plain Suzanne matches. |
+| IridescenceSuzanne | 0.81 | 110 | 0.051 | 33.0 | Iridescence and glass materials. The plain Suzanne matches. |
 | IridescenceDielectricSpheres | 0.35 | 49 | 0.077 | 45.8 | filly iridescence |
 | AnisotropyStrengthTest | 1.20 | 115 | 0.091 | 33.1 | gltfio renders the spheres as isotropic |
 | DiffuseTransmissionTest | 6.61 | 204 | 0.127 | 20.3 | gltfio ignores diffuse transmission |
@@ -221,7 +229,7 @@ These issues affect the reference side. The tool contains a workaround for each.
   for diffuse light and `gltf_viewer` 1.77.1 does not, so diffuse lighting differs. Dithering noise
   also differs between the two processes.
 - Shadows, animation, skinning, morph targets, and material variants are not compared.
-  Only suzanne-source has punctual lights, and its plain Suzanne matches.
+  Only IridescenceSuzanne has punctual lights, and its plain Suzanne matches.
 - The generated panoramas are 256 × 512 pixels. Higher-frequency environments can show filter
   differences that these panoramas do not show.
 - Only one GPU and driver were used.

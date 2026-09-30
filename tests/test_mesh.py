@@ -144,6 +144,19 @@ def test_vertex_colors_and_updates(renderer, scene):
         scene.create_mesh(shape["positions"], shape["indices"]).update_mesh(normals=shape["normals"])
 
 
+@pytest.mark.parametrize("precompiled", [False, True])
+def test_mesh_without_colors_is_white(precompiled):
+    """Precompiled materials multiply by COLOR and read UV1, so the mesh supplies both."""
+    with filly.Renderer(precompiled_shaders=precompiled) as renderer:
+        scene = perspective_scene(renderer)
+        scene.camera.set_orthographic(height=2, near=0.1, far=20)
+        scene.background = (0.2, 0.2, 0.2, 1)
+        scene.create_mesh(**filly.shapes.plane(1, 1), unlit=True, alpha_mode="blend", base_color=(0.5, 0.5, 0.5, 1))
+        image = render(renderer, scene)
+    np.testing.assert_array_equal(image[16, 16], [srgb(0.5)] * 3 + [255])
+    np.testing.assert_array_equal(image[2, 2, :3], [srgb(0.2)] * 3)
+
+
 def test_position_updates_move_pixels_without_history(renderer, scene):
     shape = filly.shapes.plane(1, 1)
     plane = scene.create_mesh(**shape, unlit=True, alpha_mode="blend")

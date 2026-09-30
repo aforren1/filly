@@ -10,21 +10,13 @@ from psychopy import core, event, visual
 
 import filly
 from filly.integrations.psychopy import SharedTarget, create_renderer
-from screenshot import suzanne_glb
-
-
-def studio_environment():
-    """A small linear HDR panorama with softbox reflections and a dim room."""
-    panorama = np.full((64, 128, 3), 0.12, dtype=np.float32)
-    panorama[8:30, 12:28] = (3.0, 2.8, 2.5)
-    panorama[12:40, 84:100] = (1.5, 1.8, 2.2)
-    return panorama
+from screenshot import HORSE, VIEW, studio_environment, view_direction
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", nargs="?", type=Path,
-                        help="glTF or GLB file to display (default: download and display Suzanne)")
+                        help="glTF or GLB file to display (default: the wooden horse)")
     parser.add_argument("--frames", type=int, default=300)
     parser.add_argument("--lighting", choices=["auto", "studio", "asset", "environment"], default="auto",
                         help="auto uses authored lights when present; environment uses only the panorama")
@@ -43,9 +35,9 @@ def main():
                         "(default: first imported camera, otherwise fit)")
     parser.add_argument("--fit-camera", action="store_true", help="Fit the complete model instead of using its imported camera")
     parser.add_argument("--view", type=float, nargs=2, metavar=("YAW", "PITCH"),
-                        help="Fitted camera angle in degrees; e.g. --view 35 22 for a diagonal view")
+                        help="Fitted camera angle in degrees (default: 0 0 for files, 40 12 for the horse)")
     parser.add_argument("--projection", choices=["perspective", "orthographic"],
-                        help="Fitted camera projection (default: perspective for files, orthographic for Suzanne)")
+                        help="Fitted camera projection (default: perspective)")
     parser.add_argument("--background", type=float, nargs=3, metavar=("R", "G", "B"),
                         default=(0.025, 0.035, 0.055), help="Linear RGB background in [0, 1]; brighter colors help inspect glass")
     parser.add_argument("--spin", type=float, help="Whole-model spin in degrees/second (custom GLBs default to 0)")
@@ -94,7 +86,7 @@ def main():
                         checkTiming=False, autoLog=False, color=(-0.95, -0.93, -0.89))
     # Present the startup background before the timed stimulus loop.
     win.flip()
-    label = visual.TextBox2(win, text=args.model.stem if args.model else "Suzanne",
+    label = visual.TextBox2(win, text=args.model.stem if args.model else "Wooden Playground Horse",
                             units="pix", pos=(-456, 296),
                             letterHeight=28, color="white", anchor="top-left",
                             alignment="left", autoLog=False)
@@ -108,7 +100,7 @@ def main():
     scene.environment_visible = args.show_environment
     underlay = visual.GratingStim(win, tex="sin", mask=None, size=win.size, sf=0.012,
                                  contrast=0.15, autoLog=False) if args.transparent else None
-    model = scene.load(args.model) if args.model else scene.load(suzanne_glb())
+    model = scene.load(args.model or HORSE)
     bounds = np.asarray(model.bounds, dtype=float)
     center = bounds.mean(axis=0)
     radius = np.linalg.norm(bounds[1] - bounds[0]) / 2
@@ -134,15 +126,16 @@ def main():
             parser.error(f"{error}; camera nodes (index, name): {available}")
     else:
         camera = scene.create_camera()
-        projection = args.projection or ("perspective" if args.model else "orthographic")
-        if projection == "perspective":
-            # The aspect ratio follows the render target.
-            camera.set_perspective(fov_y=45, near=max(radius*0.001, 0.0001), far=radius*10)
+        # The projection follows the render target; frame() sets the clipping planes.
+        if (args.projection or "perspective") == "perspective":
+            camera.set_perspective(fov_y=45, near=1, far=2)
         else:
-            camera.set_orthographic(height=radius*2.3, near=max(radius*0.001, 0.0001), far=radius*10)
-        yaw, pitch = np.deg2rad(args.view or (0, 0))
-        camera.position = radius*3 * np.array([np.sin(yaw)*np.cos(pitch), np.sin(pitch), np.cos(yaw)*np.cos(pitch)])
-        camera.look_at((0, 0, 0))
+            camera.set_orthographic(height=1, near=1, far=2)
+        # The loop keeps the asset's center at the origin while it spins; frame it there. The
+        # bounding sphere spans 85% of the window height at every rotation.
+        model.position = -center
+        camera.frame(model, fill=0.85, direction=view_direction(*(args.view or ((0, 0) if args.model else VIEW))),
+                     aspect=win_size[0] / win_size[1])
     scene.camera = camera
     lights = model.lights
     use_asset_lights = args.lighting == "asset" or (args.lighting == "auto" and bool(lights))
@@ -196,7 +189,7 @@ def main():
             break
         seconds = clock.getTime()
         if camera_key is None:
-            model.rotation_euler_deg = (0, seconds*spin, 0) if args.model else (8, -24+seconds*spin, 0)
+            model.rotation_euler_deg = (0, seconds*spin, 0)
             # Rotate around the asset's center, which need not coincide with its origin.
             model.position = -model.transform[:3, :3] @ center
         if clips and not args.no_animation:

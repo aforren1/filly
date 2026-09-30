@@ -1,0 +1,68 @@
+// filly's glTF material for KHR_materials_pbrSpecularGlossiness. materials.cmake writes one file
+// per blending mode. gltfio binds the specular-glossiness texture as metallicRoughnessMap and the
+// diffuse texture as baseColorMap.
+material {
+    name : @NAME@,
+    requires : [ uv0, uv1, color, tangents ],
+    shadingModel : specularGlossiness,
+    blending : @BLENDING@,
+    // An explicit value gives instances the double-sided capability.
+    doubleSided : false,
+    transparency : default,
+    flipUV : false,
+    specularAmbientOcclusion : simple,
+    specularAntiAliasing : true,
+    clearCoatIorChange : false,
+    reflections : default,
+    parameters : [
+@PARAMETERS@
+    ],
+}
+
+fragment {
+// Filament's program cache key is a hash of the user shader code only, without blending or
+// other material properties, so each package's code names its entry and blending mode.
+#define FILLY_ENTRY_@NAME@
+    highp vec2 fillyUv(int index, highp mat3 transform) {
+        highp vec2 uv = index == 1 ? getUV1() : getUV0();
+        return (vec3(uv, 1.0) * transform).xy;
+    }
+
+    void material(inout MaterialInputs material) {
+        if (materialParams.normalIndex > -1) {
+            highp vec2 uv = fillyUv(materialParams.normalIndex, materialParams.normalUvMatrix);
+            material.normal = texture(materialParams_normalMap, uv).xyz * 2.0 - 1.0;
+            material.normal.xy *= materialParams.normalScale;
+        }
+        prepareMaterial(material);
+
+        material.baseColor = materialParams.baseColorFactor;
+        if (materialParams.baseColorIndex > -1) {
+            highp vec2 uv = fillyUv(materialParams.baseColorIndex, materialParams.baseColorUvMatrix);
+            material.baseColor *= texture(materialParams_baseColorMap, uv);
+        }
+#if defined(BLEND_MODE_FADE)
+        material.baseColor.rgb *= material.baseColor.a;
+#endif
+        material.baseColor *= getColor();
+
+        material.glossiness = materialParams.glossinessFactor;
+        material.specularColor = materialParams.specularFactor;
+        material.emissive = vec4(materialParams.emissiveStrength * materialParams.emissiveFactor.rgb, 0.0);
+        if (materialParams.metallicRoughnessIndex > -1) {
+            highp vec2 uv = fillyUv(materialParams.metallicRoughnessIndex, materialParams.metallicRoughnessUvMatrix);
+            vec4 sg = texture(materialParams_metallicRoughnessMap, uv);
+            material.specularColor *= sg.rgb;
+            material.glossiness *= sg.a;
+        }
+        if (materialParams.aoIndex > -1) {
+            highp vec2 uv = fillyUv(materialParams.aoIndex, materialParams.occlusionUvMatrix);
+            float occlusion = texture(materialParams_occlusionMap, uv).r;
+            material.ambientOcclusion = 1.0 + materialParams.aoStrength * (occlusion - 1.0);
+        }
+        if (materialParams.emissiveIndex > -1) {
+            highp vec2 uv = fillyUv(materialParams.emissiveIndex, materialParams.emissiveUvMatrix);
+            material.emissive.rgb *= texture(materialParams_emissiveMap, uv).rgb;
+        }
+    }
+}

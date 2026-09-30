@@ -20,6 +20,8 @@ public:
     ~GlInterop();
     filament::backend::Platform* platform();
     filament::Engine* create_engine();
+    // "wgl", "glx", or "egl": the window-system binding of Filament's OpenGL context.
+    const char* platform_name() const;
     bool shared() const;
     void require_host() const;
     // False once the host has made another context current or destroyed its own.
@@ -42,7 +44,7 @@ public:
     void finish_host();
     // Sets GL_FRAMEBUFFER_SRGB in Filament's context, in command-stream order. Filament never
     // sets it, and it decides whether writes to sRGB attachments are encoded. Only scenes with
-    // output_path 'direct' enable it; color grading writes encoded values raw.
+    // output_path 'direct' enable it; filly's encode pass writes encoded values raw.
     void set_srgb_writes(filament::Engine& engine, bool value);
 private:
     struct Impl;

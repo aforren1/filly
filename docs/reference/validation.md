@@ -1,6 +1,7 @@
 # Validation results
 
-The renderer and shared-texture adapter were tested on September 25 through 29, 2026.
+The renderer and shared-texture adapter were tested on September 25 through 30, 2026.
+The environment table lists the Windows setup; Linux setups are listed with their results.
 
 ## Environment
 
@@ -21,6 +22,193 @@ The renderer and shared-texture adapter were tested on September 25 through 29, 
 | OpenGL driver | 4.5.0, build 32.0.101.7088 |
 
 ## Results
+
+### Skinned bounds, horse demo, tone-mapper route, framing (September 30)
+
+This revision:
+
+- computes `Model.bounds` at load from the rest pose, with vertex-by-vertex skinning for skinned
+  meshes, instead of gltfio's `getBoundingBox()`, and gives skinned renderables the same box for
+  culling; adds `Node.bounds`;
+- adds `Camera.frame()` and uses it in the examples and in `tools/compare_reference.py`,
+  `check_sample_assets.py`, `benchmark_refraction.py`, and `profile_frame.py`;
+- replaces Suzanne with "Wooden Playground Horse" (Batuhan13, CC BY 4.0) as the demo model and
+  README image;
+- lets Filament's color grading encode sRGB for tone mappers that mix channels.
+
+| Environment | Build | Result |
+| --- | --- | --- |
+| Windows, Python 3.12, Intel Iris Xe | Runtime (default), `.venv` | 503 passed, 14 skipped, 23 deselected, 182 s |
+| Windows, Python 3.11, PsychoPy | Runtime (default), `.deps\psychopy311` | 23 passed |
+| WSL Ubuntu 22.04, WSLg, Mesa 23.2.1 D3D12 (Intel Iris Xe) | Runtime wheel from the `filly-ml` manylinux_2_28 container, cp312 abi3 | 503 passed, 14 skipped, 23 deselected, 499 s |
+| WSL Ubuntu 22.04, Xvfb, `LIBGL_ALWAYS_SOFTWARE=1`, llvmpipe | Same wheel | 503 passed, 14 skipped, 23 deselected, 391 s (a first run failed the chart test: llvmpipe moved 3 channels by one level, and the test then allowed 2; it now allows 8) |
+
+- Bounds: the horse gave min (-19641, -48890, -83006), max (19641, 54310, 4286) from gltfio: its
+  skinned mesh node sits under an armature scaled by 100, and gltfio moved the bind-space
+  accessor box by that node's transform. The rest pose is min (-196.4, -42.9, -368.1), max
+  (196.4, 820.6, 744.4): the horse is about 8.6 units tall in its file. An independent NumPy
+  skinning of Fox, CesiumMan, RiggedFigure, BrainStem, and SimpleSkin gives the same boxes as
+  filly (gltfio was already right for them: their mesh nodes are at the identity). A generated
+  Sketchfab-style rig tests the box and that a camera fitted to it sees the skinned mesh; with
+  gltfio's culling box, that mesh was culled.
+- Reference comparison, studio environment, ACES legacy, against `gltf_viewer`:
+
+  | Asset | Before (linear LUT output, filly encodes) | After (Filament encodes) |
+  | --- | --- | --- |
+  | DamagedHelmet | MAE 0.4541, max 3 | MAE 0, max 0 |
+  | TransmissionTest | MAE 0.3874, max 4 | MAE 0, max 0 |
+  | ClearCoatTest | MAE 0.4677, max 2 | MAE 0, max 0 |
+  | SheenChair | MAE 0.4597, max 2 | MAE 0, max 0 |
+  | EmissiveStrengthTest (intended divergence) | MAE 0.4166, max 32 | MAE 0.0998, max 32 |
+
+  An RGBA16F buffer for Filament's sRGB output gave MAE 0.0114, max 1 on DamagedHelmet: 1% of
+  pixels one level low. The RGBA8 buffer gives exact parity. A 48-patch unlit chart differed
+  from `gltf_viewer` in 44 of 144 channels (up to 6 levels) before and in none after; the chart
+  is now a test with the viewer's values.
+- GPU frame with ACES legacy: 0.18 to 0.22 ms shorter at 1080p on Intel, 0.045 ms on NVIDIA; the
+  linear control is unchanged. See [performance](performance.md#channel-mixing-tone-mappers-september-30-2026).
+- Examples: `screenshot.py` (twice, byte-identical PNGs), `pyglet_shared.py`,
+  `moderngl_shared.py`, `zengl_shared.py`, `shapes.py`, `stereo.py`, and
+  `drifting_grating.py` with `.venv`; `psychopy_shared.py` (default, and transparent with an
+  orthographic camera) and `psychopy_stress.py --cycles 2` with `.deps\psychopy311`: 60 frames
+  each, exit code 0, resources restored.
+- Packaging: the sdist includes `examples/assets/wooden_playground_horse.glb` with
+  `examples/assets/ATTRIBUTION.md` and `docs/images/horse.png`; the wheel contains only
+  `src/filly` and the native module.
+
+Runs of `tests/test_encoding.py` alone under `xvfb-run` failed to open the X display for 4 to 16
+tests, with the previous wheel as well; the same file passed on headless EGL (llvmpipe), and the
+full suite passed under Xvfb. PsychoPy was not run on Linux.
+
+### Exact output path (September 30)
+
+This revision replaces Filament's color grading as the default output path with filly's encode
+pass: `Scene.output_path` is `"exact"` (default) or `"direct"`; `"graded"` is gone. The scene
+renders scene-linear color into an RGBA16F buffer, and one full-screen pass applies the linear
+clamp, the analytic transfer function in fp32, and the alpha rule. FXAA and dithering are filly's
+own passes after the encoding; Filament's postprocessing runs only for a non-linear tone mapper,
+bloom, depth of field, or vignette, and then writes linear color. See
+[output encoding](../explanation/design.md#output-encoding) and
+[performance](performance.md#output-path-september-30-2026).
+
+| Environment | Build | Result |
+| --- | --- | --- |
+| Windows, Python 3.12, Intel Iris Xe | Runtime (default), `.venv` | 470 passed, 14 skipped, 23 deselected, 395 s |
+| Windows, Python 3.12, Intel Iris Xe | Archive, scratch venv | 457 passed, 27 skipped, 23 deselected; the scratch venv has no Pillow, so more image tests skip |
+| Windows, Python 3.11, PsychoPy | Runtime (default), `.deps\psychopy311` | 23 passed |
+| Windows, Python 3.12, NVIDIA RTX A500 | Runtime, `tests/test_encoding.py` only | 63 passed, 2 skipped |
+| manylinux_2_28 container, Xvfb, Mesa 23.1.4 llvmpipe (GLX) | Runtime wheel, cp312 abi3 | 470 passed, 14 skipped, 23 deselected, 369 s |
+| WSL Ubuntu 22.04, WSLg, Mesa 23.2.1 D3D12 (Intel Iris Xe), offscreen EGL | Same wheel | 470 passed, 14 skipped, 23 deselected, 383 s |
+| WSL Ubuntu 22.04, Xvfb, `LIBGL_ALWAYS_SOFTWARE=1`, llvmpipe | Same wheel | 470 passed, 14 skipped, 23 deselected, 311 s |
+
+The Linux archive wheel was not built. PsychoPy was not run on Linux. The runtime build passes the same
+470 tests on Windows and on the three Linux setups, including the exhaustive fp16 encoding test.
+
+- Encoding: every fp16 value in `[0, 1]` encodes to the rounded analytic value, sRGB and linear,
+  on Intel and NVIDIA (Windows), llvmpipe, and Mesa D3D12 (WSL). The 319-value sweep is exact for the value in the RGBA16F buffer; against
+  the float input, 9 values are one level off (largest deviation 0.538 levels), because both
+  drivers truncate the shader output to fp16. The sweep is identical with FXAA, MSAA 4,
+  refraction, shadows, SSAO, a transparent view, and `tone_mapping = "linear"`; within one level
+  with bloom, depth of field, and dithering; the same through a shared texture.
+- Invariance: a flat field is identical with each of those options, and shadows do not change an
+  unshadowed lit scene.
+- Alpha: opaque views store 255 on the exact path for unlit and lit `OPAQUE`, `BLEND`, and `MASK`
+  materials. Transparent output is srgb(c) * a within one level for alpha 0.25, 0.5, and 0.75,
+  offscreen and through the pyglet, moderngl, and zengl adapters.
+- The direct path is unchanged: its sweep is within one level (23 of 319 values one level off,
+  largest deviation 0.676 levels), and its conflicts raise as before.
+- Intel subpass workaround: still needed for a non-linear tone mapper or the vignette; see
+  [tested assumptions](../explanation/assumptions.md#1-framebuffer-fetch-color-grading-subpass).
+- `docs/images/suzanne.png` (the README image then; now replaced by `horse.png`) was regenerated with the exact path. It differs from the committed
+  color-grading image by at most one level, in 82.6% of pixels.
+- Reference comparison (studio environment, ACES legacy on both sides): DamagedHelmet MAE 0.45,
+  maximum error 3 levels (was 0 and 0 when both sides encoded through color grading); BoxTextured
+  MAE 0.36, maximum 1. filly is brighter by 0.64 levels in red and green on average for
+  DamagedHelmet. The cause is not isolated: filly's color grading now writes linear color through
+  Filament's 3D LUT and filly encodes, while the viewer encodes through its sRGB 3D LUT. An fp16
+  3D LUT in filly did not change the result (MAE 0.4498).
+
+### Material gap closure (September 30)
+
+This revision fixes the emission of diffuse-transmission materials, splits the archive entries so
+that only materials with `KHR_materials_specular` get Filament's specular F90, and removes the
+material warmup and the program binary cache. See
+[material precompilation](../explanation/material-precompilation.md#gap-closure-september-30-2026)
+for causes and measurements.
+
+| Environment | Build | Result |
+| --- | --- | --- |
+| Windows, Python 3.12, Intel Iris Xe | Runtime (default) | 442 passed, 14 skipped, 23 deselected |
+| Windows, Python 3.12, Intel Iris Xe | Archive | 443 passed, 13 skipped, 23 deselected |
+| Windows, Python 3.11, PsychoPy | Runtime (default) | 23 passed |
+| Windows, Python 3.11, PsychoPy | Archive | 23 passed |
+| WSL Ubuntu 22.04, WSLg, D3D12, Python 3.12 | Archive wheel | 443 passed, 13 skipped, 23 deselected; `test_gl_hosts.py` 5 of 5 runs |
+| WSL Ubuntu 22.04, WSLg, D3D12, Python 3.12 | Runtime wheel | 442 passed, 14 skipped, 23 deselected; `test_gl_hosts.py` 5 of 5 runs |
+
+Intermediate builds, before the warmup was removed (its callback already owned its state):
+the archive and runtime wheels passed `test_gl_hosts.py` in 15 of 15 runs each and the close test
+alone in 60 of 60 runs each on WSLg. An ASan build of the archive path passed the full suite on
+llvmpipe with 442 passed, 13 skipped, and 1 failed (pyglet "failed to create drawable"), with no
+ASan report. The manylinux wheels are 2,497,497 bytes (archive) and 5,643,247 bytes (runtime).
+
+The rare segmentation fault of the phase 3 archive wheel on WSLg was a heap-use-after-free at
+renderer close (the material warmup's compile callback). ASan showed it on the first run of the
+pre-fix source; the old wheel failed 2 of 15 runs of `test_gl_hosts.py`.
+
+Open: one full runtime-path run hung for more than 2 minutes in
+`test_features.py::test_texture_pixels` while WSL tests used the same GPU. It did not recur in
+4 later runs. The cause is not known.
+
+### Hybrid CRT, Linux rebuild, and headless EGL (September 29)
+
+Windows now links the static C++ runtime and the dynamic Universal CRT. The extension imports
+no `msvcp140*.dll` or `vcruntime140*.dll`:
+
+| Module | Before | After |
+| --- | ---: | ---: |
+| `_native.pyd` (`cp312-abi3`) | 14,806,016 bytes | 15,104,512 bytes |
+| `_native.cp311-win_amd64.pyd` | 14,812,160 bytes | 15,110,144 bytes |
+
+Imports after the change: `python3.dll` (`python311.dll` for Python 3.11), `KERNEL32`,
+`USER32`, `GDI32`, `OPENGL32`, `SHLWAPI`, and ten `api-ms-win-crt-*` UCRT sets. All 423
+non-PsychoPy tests passed on Python 3.12 (6 skipped: 2 as before, 4 Linux-only). All 23 PsychoPy
+tests passed on Python 3.11.
+
+Linux was rebuilt for the first time since the first pass. The staged SDK lacked `libimage.a`,
+which the SDK tool now builds, so the SDK was rebuilt in manylinux_2_28 with Clang 21.1.8 and the
+GCC 15 toolset headers (about 13 minutes with 7 jobs). The `cp312-abi3` wheel was built in the
+same image and repaired by auditwheel 6.8.2, which assigned `manylinux_2_27_x86_64` and
+`manylinux_2_28_x86_64` and grafted no library. The module needs `GLIBCXX_3.4.22` at most, exports
+only `PyInit__native`, and imports `libGL.so.1`, `libX11.so.6`, and the glibc and GCC runtime
+libraries. The earlier Linux module exported 5,342 symbols. The installed module is 14,368,768
+bytes and the wheel 5,636,783 bytes. The build-tree copy with its symbol table is 17,553,272 bytes.
+
+Three defects were found and corrected:
+
+- `native/gltf_prepare.cpp` used `std::exchange` without `<utility>`; libstdc++ does not include it
+  transitively.
+- The first `OffscreenTarget.read()` after a render hung. Filament's frame-info thread waits on a
+  fence with `FENCE_WAIT_FOR_EVER`; with glibc 2.28, libstdc++ converts the maximum deadline to
+  the system clock, it overflows, and the thread spins on the fence mutex. The SDK tool now adds
+  an untimed wait for that case. See [design](../explanation/design.md#dependencies).
+- The moderngl test host read the default framebuffer, which leaves `GL_INVALID_OPERATION` on
+  Mesa; pyglet reported it when the window closed. The test now clears the error.
+
+The same installed wheel passed these runs with Python 3.12:
+
+| Environment | Offscreen binding | Result | Time |
+| --- | --- | --- | ---: |
+| WSL Ubuntu 22.04, WSLg, Mesa 23.2.1 D3D12 (Intel Iris Xe) | EGL surfaceless, GPU | 424 passed, 5 skipped | 212 s |
+| WSL Ubuntu 22.04, Xvfb, `LIBGL_ALWAYS_SOFTWARE=1`, llvmpipe | GLX | 424 passed, 5 skipped | 268 s |
+| WSL Ubuntu 22.04, no `DISPLAY`, Mesa 23.2.1 D3D12 | EGL surfaceless, GPU | 366 passed, 4 skipped | 160 s |
+| manylinux_2_28, Xvfb, Mesa 23.1.4 software (as CI) | GLX | 423 passed, 6 skipped | 256 s |
+
+Runs deselected the PsychoPy tests; the run without a display also deselected the shared-context
+tests. Skips: 2 `MASK` encoding cases (as on Windows), the raw `opengl32` case, the WGL and
+Windows CRT checks, and in the container the sample IBL, which is not staged there. On WSL
+Ubuntu 24.04 with Mesa 25.2.8, WSLg GLX and EGL both used llvmpipe, not the GPU. Linux PsychoPy
+was not tested. The Docker command in [build](../how-to/build.md#build-the-manylinux-wheel-with-docker)
+was run from PowerShell and produced a repaired wheel. A hosted CI run remains unverified.
 
 ### Native glTF preparation (September 29)
 
@@ -126,7 +314,7 @@ tests passed on Python 3.11 with psychopy-lib 2026.2.4 in 9 seconds. Linux was n
   the first color-grading frame, so these are wall-clock values, not GPU times.
 - Loading: with `precompiled_shaders=True`, the first unlit plane now takes 129 ms, because its
   material is compiled; a lit plane took 14 ms. With the default compiled shaders it took 85 ms.
-- The regenerated `docs/images/suzanne.png` is byte-identical to the committed image, which was
+- The regenerated `docs/images/suzanne.png` (since replaced by `horse.png`) is byte-identical to the committed image, which was
   therefore made with color grading. The direct path differs from it by at most one level in 85%
   of pixels.
 - Reference comparison, DamagedHelmet, studio environment: MAE 0.0000 and maximum error 0 against

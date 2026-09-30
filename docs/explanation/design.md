@@ -2,7 +2,8 @@
 
 The C++ interface in `native/renderer.h` does not include Python or Filament headers.
 Nanobind converts Python values at the boundary. Filament types stay in the native implementation.
-The Windows WGL and Linux GLX adapters are isolated in `native/gl_interop.cpp`.
+The Windows WGL and Linux GLX adapters are isolated in `native/gl_interop.cpp`, and the Linux
+headless EGL platform in `native/egl_platform.cpp`.
 
 ## Ownership
 
@@ -103,15 +104,13 @@ Each `render()` can take a camera and a viewport. The view's camera is replaced 
 restored after it; a camera that follows the target aspect takes the viewport aspect. Filament
 clears whole attachments (the OpenGL backend disables the scissor test for clears), so a clear
 cannot be limited to a viewport. `clear=False` must still not show earlier content inside the
-viewport: on the direct path the view draws over the previous frame, and on the color-grading
-path the intermediate buffer is left uncleared. Filament applies a target's clear only for the
-first view of a frame, while the intermediate buffer's clear follows the current clear options.
-So a `clear=False` call renders two views in one frame: first a view with an empty scene and a
-constant-color skybox in the viewport, with clearing off, then the scene view with clearing on.
-The skybox writes the same value that a clear would, through the same `GL_FRAMEBUFFER_SRGB`
-state, and the scene view's clear reaches only its intermediate buffer. The fill pass cost
-nothing measurable on the direct path and about 1 ms at 960 x 1080 with color grading and 4x
-MSAA on the tested Intel GPU.
+viewport. On the exact path this needs nothing extra: the scene view clears the scene-linear
+buffer, and the output passes write only the viewport. On the direct path the view draws over
+the previous frame, and Filament applies a target's clear only for the first view of a frame.
+So a direct `clear=False` call renders two views in one frame: first a view with an empty scene
+and a constant-color skybox in the viewport, with clearing off, then the scene view. The skybox
+writes the same value that a clear would, through the same `GL_FRAMEBUFFER_SRGB` state. The fill
+pass cost nothing measurable on the tested Intel GPU.
 
 ## Runtime textures and generated meshes
 
@@ -134,12 +133,20 @@ back from a material instance, so a rebuilt material cannot keep other glTF text
 raises an error. When the glTF material already has the slot and other textures, the handle shows
 a duplicate of it instead, which keeps them.
 
+On the archive material path (CMake `FILLY_MATERIALS=archive`), every archive entry has the
+base-color and emissive samplers, with UV set and transform uniforms. An assignment therefore
+always shows a duplicate of the glTF instance with changed parameters, for every material. A
+removal duplicates the glTF instance again, because it still has the glTF texture of the slot,
+and copies the factors and render state from the old handle. Nothing is compiled.
+
 A generated mesh is loaded as a one-triangle glTF with the requested material and attributes,
 then its renderable gets the mesh's own vertex and index buffers (`setGeometryAt()`). The loader
 therefore gives it the same material as a glTF file with those factors, and the model gets
 nodes, material handles, clones, and closing without a second code path. The placeholder's
 accessor bounds are the mesh bounds. Positions, tangent frames, UVs, and colors are separate
-vertex buffers, so an update uploads only what changed. Creation uses Filament's
+vertex buffers, so an update uploads only what changed. A mesh without colors gets a white
+`UBYTE4` color buffer, and `UV1` reads the `UV0` buffer: precompiled materials serve every key,
+so they always read both attributes and multiply by the vertex color. Creation uses Filament's
 `SurfaceOrientation` for tangent frames. It allocates on every build, so updates use a copy of
 its method that writes into the staging buffer; a test checks that both give the same image.
 Missing normals are area-weighted vertex normals, because shared vertices of an indexed mesh
@@ -156,6 +163,19 @@ on a change. A node edit on a skinned model puts the model in its scene's list o
 stale bone matrices; `render()` updates those models once and clears the list, whose storage is
 kept. Frames without such changes do no projection or bone work and allocate nothing.
 
+`model.bounds` does not come from gltfio. `FilamentAsset::getBoundingBox()` moves each mesh's
+accessor box by its node's world transform. For a skinned mesh that transform does not apply:
+glTF places skinned vertices with the joints' world transforms times their inverse bind
+matrices. Sketchfab rigs scale the armature node by 100 and put the 0.01 in the inverse bind
+matrices, so gltfio's box for such a model is about 100 times too large, and a mesh node offset
+from the bind frame moves it away from the geometry. Preparation computes the box once per
+asset: accessor boxes through node transforms for rigid meshes, and every vertex skinned with the
+rest pose for skinned meshes. A 1,000,000-vertex skinned mesh loaded in 120 ms against 65 ms
+for the same mesh without a skin; the difference also includes gltfio's own skin work and the
+joint and weight uploads (Iris Xe laptop, September 30, 2026). Clones share the box, and
+frames do no bounds work. The same rest-pose box, in the mesh node's frame, replaces gltfio's
+culling box for skinned renderables, which had the same fault and could cull a visible mesh.
+
 ## Output encoding
 
 The encoding does not depend on other options. Earlier, disabling postprocessing wrote linear
@@ -165,57 +185,132 @@ The default tone mapper is now the neutral linear clamp.
 
 Two paths write the output, selected by `Scene.output_path`:
 
-- Color grading (`"graded"`, the default): postprocessing is on, `GL_FRAMEBUFFER_SRGB` is off,
-  and the color-grading pass writes encoded values raw.
+- Exact (`"exact"`, the default): the scene view renders scene-linear color into an RGBA16F
+  buffer, and filly's encode pass writes the target. The pass is one full-screen triangle with a
+  filly material (`native/output_pass.cpp`). It clamps to `[0, 1]` (the linear tone mapper), applies
+  the analytic sRGB transfer function in fp32 (or none for linear encoding), applies the alpha
+  rule, and rounds explicitly to 8-bit levels. `GL_FRAMEBUFFER_SRGB` stays off, so the pass
+  writes its values raw into any RGBA8 or sRGB8 storage.
 - Direct (`"direct"`, opt-in): postprocessing is off and `GL_FRAMEBUFFER_SRGB` is on for sRGB
   output, so the GPU encodes each write, clears included. Linear output writes raw values.
 
-Offscreen targets have `SRGB8_A8` storage, and shared targets render into a `GL_SRGB8_ALPHA8`
-view of the host's texture when it has immutable storage. Filament never sets
-`GL_FRAMEBUFFER_SRGB`, so writes to such storage are raw unless the wrapper enables it. With color
-grading it stays off and the storage kind does not matter. The wrapper's platform subclass exists
-for the interop fences; setting `GL_FRAMEBUFFER_SRGB` is needed only for the direct path. The
-subclass sets it on Filament's driver thread, in command order, through the same `createSync()`
-hook that places the fences. It is queued only when the value changes, so steady frames add no
-commands. Readback and host sampling see the stored bytes.
+Every configuration of the exact path ends in the same encode pass, so no option changes how a
+value is encoded:
 
-An earlier revision chose the direct path automatically whenever no option or material needed
-postprocessing. Both paths are within one level of the analytic transfer function, but they round
-differently by up to one level. A stimulus could then change by one level when an unrelated
-setting changed, for example a material's alpha mode. Color grading is now always the default,
-and the direct path is an explicit opt-in. The opt-in never falls back: each option or material
-that it cannot render raises an error when it is set, loaded, or rendered. The options that need
-postprocessing are non-linear tone mapping (linear tone mapping is a clamp, as 8-bit storage
-is), FXAA, MSAA, refraction, SSAO, bloom, dithering, depth of field, vignette, and transparent
-views.
+| Option | What runs before the encode pass | Needs Filament's postprocessing |
+| --- | --- | --- |
+| None (default) | The scene view, rendering straight into the RGBA16F buffer | No |
+| MSAA | Filament's multisampled RGB16F buffer, resolved and copied into the RGBA16F buffer | No |
+| Refraction, SSAO, shadows, fog | Their passes; the color pass as without them | No |
+| Transparent view | Filament's RGBA16F color buffer, blended into the RGBA16F buffer | No |
+| FXAA | Nothing: filly's FXAA pass runs after the encode pass, on the encoded image | No |
+| Dithering | Nothing: the encode pass adds the noise after the transfer function | No |
+| Per-channel tone mapping (`"filmic"`, `"generic"`), bloom, depth of field, vignette | Filament's postprocessing; its color grading writes scene-linear color into the RGBA16F buffer | Yes |
+| Channel-mixing tone mapping (`"aces_legacy"`, `"aces"`, `"pbr_neutral"`, `"gt7"`, AgX, `"display_range"`) | Filament's postprocessing; with sRGB encoding its color grading encodes into an RGBA8 buffer, which the encode pass copies (see below) | Yes |
 
-Opaque views must store alpha one, as color grading does. Without postprocessing, Filament writes
-the fragment shader's alpha. Lit materials write one unless they blend, and blending over a
-cleared alpha of one keeps one, so the wrapper clears opaque views to alpha one. Two cases remain.
-Filament's unlit shader passes base-color alpha through for `OPAQUE` materials. The wrapper
-compiles unlit `OPAQUE` materials with its own generator, which sets the alpha to one, in both
-shader modes; the base-color alpha of an `OPAQUE` material has no other effect. `MASK` materials
-write a sharpened edge alpha that Filament computes after the material code, so the material
-cannot correct it. Loading flags assets with `MASK` materials, and the direct path rejects
-them. Rewriting them (for example `OPAQUE` as `MASK` with cutoff zero) was rejected: with MSAA,
-alpha to coverage would then drop samples.
+These are the Filament 1.77.1 conditions (`FRenderer::renderJob`): bloom, depth of field,
+vignette, color grading, dithering, FXAA, and TAA are skipped when postprocessing is off; MSAA,
+SSAO, screen-space refraction, and the blend of a transparent view run without it.
 
-Transparent views need the color-grading path. That pass premultiplies after encoding,
-srgb(c) * a, which is what hosts that blend in encoded space expect: PsychoPy and plain
-`GL_ONE, GL_ONE_MINUS_SRC_ALPHA` blending into a non-sRGB framebuffer. The direct path would store
-srgb(c * a), premultiplied in linear space, and the adapters' division by alpha would then be
-wrong. A host that blends in linear space would need the other rule, but none of the supported
-hosts does.
+The encode pass rounds exactly. The linear buffer holds fp16 values, and every one of the 15,361
+fp16 values in `[0, 1]` encodes to the rounded analytic value, in both encodings
+(`test_exact_path_rounds_every_half_float_exactly`). An input that is not an fp16 value is first
+stored as one of its two fp16 neighbors: the tested Intel driver truncates toward zero. The stored
+level is then within 0.54 levels of the analytic value of the input: 9 of the 319 sweep values
+move by one level. An RGBA32F buffer removes that step for the default configuration (0 of 319),
+but not for MSAA, transparent views, or refraction, which pass through Filament's own fp16
+buffers. With RGBA16F every configuration stores the same levels, so toggling an option does not
+change a stimulus; RGBA32F would change 9 of 319 levels when MSAA or transparency toggles. The
+RGBA32F buffer also cost 0.05 to 0.08 ms more GPU time per 1080p frame on the tested Intel GPU.
 
-Two Filament 1.77.1 details needed handling. A per-channel tone mapper takes the precise path, a
-512-entry fp16 LUT indexed in linear space, only with the engine feature
-`engine.color_grading.use_1d_lut`; without it, unlit (1, 0, 0) became (247, 0, 0) and
-(0, 1, 0) became (23, 247, 6), because a 32^3 10-bit LUT in Rec.2020 was used. The wrapper sets
-the feature. Linear output from Filament itself always takes the 3D LUT path and wrote 242 for
-linear white. For per-channel tone mappers, the wrapper therefore keeps sRGB output and wraps the
-tone mapper with the inverse sRGB transfer function, so the LUT holds the linear result. Tone
-mappers that mix channels keep Filament's own linear output. The render target uses an RGB16F
-color buffer (`hdrColorBuffer = HIGH`); R11G11B10F keeps only 5 or 6 bits in `[0, 1]`.
+FXAA runs on the encoded image, as Filament's FXAA runs after its color grading. The encode pass
+then writes an RGBA8 buffer with luma in alpha, and filly's FXAA pass (FXAA 3.11 console with the
+G3D patches, as in Filament 1.77.1) writes the target. It fetches the center pixel without
+filtering and rounds its result, so a pixel that FXAA leaves alone keeps its exact level: a flat
+field is identical with and without FXAA. Filament's own FXAA would have forced color grading
+before it, whose 1D LUT (512 fp16 entries) rounds differently: with color grading before the
+encode pass, 19 of the 319 sweep values were one level off, against 9 without it. Taps are clamped to the rendered region, because outside it the buffer holds an earlier
+frame after a `clear=False` call.
+
+Dithering adds Filament's triangular noise pattern (`inline_dithering.fs`) of one level after the
+transfer function, before rounding. Filament's own dithering would add it to scene-linear color,
+where one level of noise in linear light is many levels near black. The pattern changes on every
+frame by a golden-ratio sequence of the frame count.
+
+When Filament's postprocessing runs, its color grading applies the tone mapper and must output
+linear color. In Filament 1.77.1 a per-channel tone mapper takes the precise path, a 512-entry
+fp16 LUT indexed in linear space, only with the engine feature `engine.color_grading.use_1d_lut`;
+without it, unlit (1, 0, 0) became (247, 0, 0) and (0, 1, 0) became (23, 247, 6), because a
+32^3 10-bit LUT in Rec.2020 was used. The wrapper sets the feature. Linear output from Filament
+itself always takes the 3D LUT path and wrote 242 for linear white. For per-channel tone mappers,
+the wrapper therefore keeps sRGB output and wraps the tone mapper with the inverse sRGB transfer
+function, so the LUT holds the linear result. With the linear tone mapper and bloom or depth of
+field, the sweep stays within one level of the analytic value (19 of 319 values move by one level).
+
+Tone mappers that mix channels (`isOneDimensional()` is false: ACES, ACES legacy, PBR Neutral,
+GT7, AgX, display range) run in Rec.2020 between gamut matrices, where the inverse-sRGB wrapper
+is wrong, so they always use Filament's 32^3 3D LUT. Its linear output, encoded by filly, was up to
+3 levels off `gltf_viewer` on DamagedHelmet (MAE 0.45) and up to 6 levels off on an unlit chart
+(44 of 144 channels), because the LUT's 10-bit linear values are coarse near black. With sRGB
+encoding such a scene therefore takes Filament's route, as `gltf_viewer` does: the color grading
+outputs sRGB (`Rec709-sRGB-D65`) into an RGBA8 buffer of the target, the driver rounds to levels
+as for `gltf_viewer`'s swap chain, and a variant of the encode pass copies those levels.
+DamagedHelmet, TransmissionTest, ClearCoatTest, and SheenChair then match `gltf_viewer` exactly
+(MAE 0, maximum 0). An RGBA16F buffer for this output was tried first: 1% of DamagedHelmet's
+pixels were one level lower than `gltf_viewer`'s (MAE 0.011), consistent with the driver's
+truncation to fp16. In this route:
+
+- Filament's color grading also dithers (`View::Dithering::TEMPORAL`) before its 8-bit rounding,
+  with the same triangular noise; filly's encode pass does not dither these pixels.
+- Transparent views: Filament's translucent color grading divides by alpha, grades, and
+  multiplies again (`colorGrading.mat`), so the buffer holds srgb(c) * a, the adapters' rule; the
+  encode pass stores it unchanged.
+- FXAA runs after the encode pass on the encoded image, as in the linear route.
+- With a viewport and a clear, the RGBA8 buffer holds the clear color as 8-bit linear values
+  outside the viewport. The encode pass stores a uniform there instead: the clear color rounded
+  to fp16 and encoded on the CPU, so those pixels match the linear route (without dithering).
+- `encoding = "linear"` keeps the linear route: Filament's linear 3D LUT output in the RGBA16F
+  buffer, stored without a transfer function. Its accuracy is that LUT's: within 3 levels of the
+  sRGB route once encoded, and coarse near black.
+- The Intel framebuffer-fetch subpass stays disabled: `d.renderer.disable_subpasses` is set for
+  the engine, so it applies to every view that runs color grading without MSAA.
+- The encode pass stays, for alpha, luma, and the viewport rule. Its graded variant is a
+  separate material, compiled on the first graded render, with no transfer function: the CPU
+  encodes the clear color once. The viewport test in the default material cost 0.05 ms per
+  1080p frame on the Intel GPU, and the transfer function behind it in the graded material
+  1.0 ms. The route allocates the RGBA8 buffer
+  instead of the RGBA16F one on a target's first graded render.
+
+Opaque views store alpha one: the encode pass writes it. That covers the sharpened edge alpha
+that Filament writes for `MASK` materials in an opaque view, which the material code cannot
+correct. On the direct path, Filament writes the fragment shader's alpha. Lit materials write one
+unless they blend, and blending over a cleared alpha of one keeps one, so the wrapper clears
+opaque views to alpha one. Filament's unlit shader passes base-color alpha through for `OPAQUE`
+materials; the wrapper compiles unlit `OPAQUE` materials with its own generator, which sets the
+alpha to one, in both shader modes, and the archive path's opaque unlit entry does the same. The
+direct path rejects `MASK` materials. Rewriting them (for example `OPAQUE` as `MASK` with cutoff
+zero) was rejected: with MSAA, alpha to coverage would then drop samples.
+
+Transparent views keep premultiplied linear color in the RGBA16F buffer. The encode pass divides
+by alpha, encodes, and multiplies again: srgb(c) * a, which is what hosts that blend in encoded
+space expect (PsychoPy, and plain `GL_ONE, GL_ONE_MINUS_SRC_ALPHA` blending into a non-sRGB
+framebuffer). The direct path would store srgb(c * a), premultiplied in linear space, and the
+adapters' division by alpha would then be wrong, so it rejects transparent views. A host that
+blends in linear space would need the other rule, but none of the supported hosts does.
+
+A render with a viewport encodes the whole target when it clears, because the scene view clears
+the whole linear buffer as the first view of that buffer in the frame; outside the viewport it
+holds the background. With `clear=False` the passes write only the viewport, so the rest of the
+target keeps its contents, and the direct path's background fill view is not needed.
+
+The pass allocates nothing per frame. The linear buffer (and the FXAA input, once FXAA is used)
+is created on a target's first render and lives as long as the target, so it resizes only with
+the target, which cannot change size. It shares the target's depth texture. The pass sets its
+material parameters only when they change, before `beginFrame()`: Filament commits material
+instances when the frame's first view renders, so a change set between views reached the GPU
+inside a render pass and was lost. The encode material is compiled when the renderer is created,
+and the FXAA material when a scene first sets `antialiasing = "fxaa"`, so neither compile falls on
+a frame.
 
 A shared host texture cannot simply have sRGB storage: a host that samples it decodes the values
 back to linear. The `EXT_texture_sRGB_decode` skip setting avoids that for plain texture binds,
@@ -224,56 +319,47 @@ into a `GL_SRGB8_ALPHA8` texture view of the host's `GL_RGBA8` texture, and the 
 own texture. A view needs immutable storage, so the adapters allocate the host texture with
 `glTexStorage2D` in native code and wrap it as a moderngl external texture or a zengl external
 image. Third-party textures with mutable storage from `glTexImage2D` import without a view.
-Filament then renders into the host texture itself, which works with color grading; the direct
+Filament then renders into the host texture itself, which works on the exact path; the direct
 path with sRGB encoding raises `InteropError` for such a target at render time. The wrapper
 deletes a view only after Filament has finished with it and only while the host context is
 current.
 
-The rule for adding the direct path was that it must match the analytic transfer function within
-one 8-bit level, offscreen and shared, and save at least 0.2 ms per 1080p frame. It meets both.
-Every sweep value (the 1/64 grid and every 8-bit input level, 319 values) is within one level,
-offscreen and in shared textures, for both paths and both encodings. The largest
-deviation from the exact value was 0.68 levels for the direct path and 0.59 levels for color
-grading. The direct path saves about 0.6 ms of GPU time per 1080p frame.
+The direct path must match the analytic transfer function within one 8-bit level, offscreen and
+shared. Every sweep value (the 1/64 grid and every 8-bit input level, 319 values) is within one
+level; the largest deviation from the exact value was 0.68 levels.
 
-GPU time per frame from Filament's timer queries (`Renderer::getFrameInfoHistory()`), median of
-five interleaved rounds, 1920 x 1080, Intel Iris Xe (driver 32.0.101.7088), offscreen target:
+### Cost of the output path
 
-| Configuration | Empty (clear only) | DamagedHelmet filling the view |
-| --- | ---: | ---: |
-| Color grading, RGB16F intermediate (before) | 0.60 ms | 1.76 to 1.87 ms |
-| Color grading, R11G11B10F intermediate | 0.57 to 0.59 ms | 1.76 to 1.90 ms |
-| Color grading as a framebuffer-fetch subpass (wrong output) | 0.76 to 0.80 ms | 1.85 to 1.89 ms |
-| Color grading plus FXAA | 0.93 ms | 2.23 ms |
-| Color grading, transparent | 0.67 ms | 1.96 to 1.97 ms |
-| No postprocessing, raw writes | 0.03 ms | 1.13 to 1.18 ms |
-| No postprocessing, GPU sRGB encoding (direct path) | 0.03 ms | 1.18 to 1.20 ms |
+Measured on September 30, 2026; see [Performance](../reference/performance.md#output-path-september-30-2026).
+Intel Iris Xe, 1920 x 1080, GPU frame time from Filament's timer, 60 Hz pacing, median of five
+interleaved rounds:
 
-In a shared 1080p texture the direct path took 0.05 ms and 0.95 ms, against 0.89 ms and 1.53 ms
-for color grading. The breakdown shows where the postprocessing time goes. The intermediate
-format does not matter, so the cost is not bandwidth to the HDR buffer. The separate pass that
-`d.renderer.disable_subpasses` forces is not the cost either: the subpass is slower on this GPU.
-There is no resolve and no final blit in the opaque case; the color-grading pass writes the target
-directly. A transparent view adds a blending blit (0.07 to 0.2 ms). One more full-screen pass,
-FXAA, costs 0.33 to 0.36 ms, so the color-grading full-screen pass itself is most of the 0.6 ms.
-GPU encoding on write costs nothing measurable.
+| Scene | Color grading (before) | Exact | Direct |
+| --- | ---: | ---: | ---: |
+| Empty, offscreen | 1.62 ms | 0.80 ms | 0.11 ms |
+| DamagedHelmet, offscreen | 3.16 ms | 2.32 ms | 1.61 ms |
+| DamagedHelmet, pyglet shared texture | 3.19 ms | 2.33 ms | 1.63 ms |
+| DamagedHelmet, offscreen, FXAA | 4.06 ms | 3.26 ms | - |
 
-These GPU times are from the revision that added the direct path. In the current build,
-`getFrameInfoHistory()` reported no GPU time after the first color-grading frame (cause not
-investigated), so the current cost is measured as wall-clock time per `render()` plus `finish()`: color grading adds 0.55 ms for an empty scene and 0.66 to 0.80 ms for DamagedHelmet.
-See [output path](../reference/api.md#output-path).
+Color grading cost 1.5 ms on this GPU mostly because of its 1D LUT, three fetches of a 3D texture
+per pixel; the buffer format made no difference. The encode pass costs about half of it in the
+same capture. On NVIDIA the exact path takes 0.28 ms for DamagedHelmet, against 0.37 ms with color
+grading and 0.18 ms direct. The encode pass is a second Filament view, which adds about 0.1 ms of
+CPU time per frame.
 
 The pinned SDK's framebuffer-fetch color-grading subpass writes a black frame with a gradient
-tile on the tested Intel Iris Xe driver, offscreen and in shared textures, with compiled and precompiled shaders.
-The wrapper disables that subpass for every engine. Color grading then runs in a separate pass.
-Drivers without `GL_EXT_shader_framebuffer_fetch`, such as the tested NVIDIA driver, never use
-the subpass, so the setting has no effect there.
+tile on the tested Intel Iris Xe driver, offscreen and in shared textures, with compiled and
+precompiled shaders. The wrapper disables that subpass for every engine. It matters only for
+scenes that use Filament's postprocessing without MSAA, bloom, or depth of field, that is, with a
+non-linear tone mapper or the vignette; the default scene never runs color grading. Drivers without
+`GL_EXT_shader_framebuffer_fetch`, such as the tested NVIDIA driver, never use the subpass, so the
+setting has no effect there.
 
 ## Shared OpenGL textures
 
 The default Filament WGL platform does not implement external sync creation. The wrapper supplies
-a small WGL or GLX platform subclass through Filament's public platform interface, for offscreen
-engines too. It places GL fences, waits, and the `GL_FRAMEBUFFER_SRGB` setting in the Filament
+a small WGL, GLX, or EGL platform subclass through Filament's public platform interface, for
+offscreen engines too. It places GL fences, waits, and the `GL_FRAMEBUFFER_SRGB` setting in the Filament
 command stream through `Engine::createSync()`.
 
 The host context is temporarily released while Filament creates its shared context on the driver
@@ -310,7 +396,7 @@ Import validation binds the host texture to check its target. Intel rejects the 
 `GL_TEXTURE_TARGET` query, so there is no bind-free check. Errors that the host left pending are
 discarded first, because they would otherwise read as a failed bind.
 
-Transparent views retain alpha through color grading and produce premultiplied, encoded RGB. The PsychoPy
+Transparent views retain alpha through the encode pass and produce premultiplied, encoded RGB. The PsychoPy
 adapter converts sampled RGB to straight RGB in a shader, before ImageStim applies color, opacity, and masks.
 The temporary shader selection is restored after each draw so regular PsychoPy stimuli keep their
 normal rendering behavior. The host window uses average blending.
@@ -335,6 +421,16 @@ a 9th; this was measured with generated assets. Loading counts texture slots and
 a warning names it. Materials that the wrapper compiles itself raise `AssetError` from the shader
 compiler instead of aborting.
 The extension links only the selected static libraries. The SDK tools are not installed in the wheel.
+
+The archive material path replaces both providers with filly's own
+(`native/archive_materials.cpp`). The build compiles `native/materials` with `matc` and packs
+the packages with `uberz` into one zstd archive, which the module embeds. The provider maps each
+glTF material to an entry by its preparation plan (below), sets defaults, binds the extension
+textures to the entry's generic samplers, and clears the extension texture bits and unsupported
+features in the key that it returns, so that gltfio binds only the core textures and sets only
+parameters that the entry has. It links no material compiler: `filamat` stays on the link line
+in this phase, but the linker drops it (the module is 7.3 MB instead of 15.1 MB). See
+[material precompilation](material-precompilation.md).
 
 ## glTF preparation
 
@@ -361,6 +457,9 @@ A load has these steps:
    version 1 vertex codec or COLOR filter, and cgltf does not know the KHR extension.
 4. Build the tables: node names, visibility, morph weights, cameras, property animation tracks,
    and the anisotropy, iridescence, and diffuse-transmission materials with their texture bytes.
+   On the archive material path, also a plan for each material: its archive entry, the generic
+   sampler of each extension texture, and the image bytes of those textures. Textures over the
+   entry's sampler count are dropped here, so the warning follows the strict setting.
 5. `AssetLoader::createInstancedAsset()` with zero instances. gltfio parses the document and
    builds vertex buffers, but creates no entities or material instances yet.
 6. Patch gltfio's parse (`FilamentAsset::getSourceAsset()`) by index: point its buffers at the
@@ -395,6 +494,9 @@ name identifies, and builds it then, as gltfio's own providers do. For a name th
 provider-built material shares with another material, it returns a lit or unlit placeholder
 with the same attributes. When the marker identifies the material, the provider checks that the
 instance's layout is the one that the vertex buffers have. Other assets keep gltfio's layout.
+The archive material path uses one fixed layout for every material instead: `TEXCOORD_0` in UV0
+and `TEXCOORD_1` in UV1. It then needs no name lookup, and variant materials and runtime
+textures always find their UV sets.
 
 One document rewrite remains. `EXT_mesh_gpu_instancing` becomes one child node per instance.
 gltfio renders one mesh per node and has no instancing, and new nodes cannot be added to a parse
@@ -508,13 +610,45 @@ Closing an asset detaches its active cameras from every scene before destroying 
 The build follows [nanobind's packaging interface](https://nanobind.readthedocs.io/en/latest/packaging.html)
 with CMake and scikit-build-core. Windows links the pinned release SDK. Linux builds the same
 Filament version from source inside manylinux_2_28, with position-independent code, libstdc++,
-and the OpenGL/GLX backend. Vulkan, WebGPU, and EGL are disabled in that build.
+and the OpenGL/GLX backend. Vulkan, WebGPU, and Filament's EGL mode are disabled in that build.
 The system provides the OpenGL driver and X11 libraries; the wheel contains the Filament code.
 
-The Linux source build applies three local corrections. An expired polling deadline
-returns before entering a condition-variable wait. Without this correction, the 10,000-frame
-test can stop in Filament's UBO fence reclamation while the driver waits for more commands.
-The correction preserves asynchronous rendering and does not add GPU completion waits.
+Filament's `FILAMENT_SUPPORTS_EGL_ON_LINUX` replaces GLX and compiles the OpenGL backend
+against OpenGL ES headers, so one SDK cannot hold both. The wrapper adds its own EGL platform
+for offscreen engines instead. It creates an OpenGL 4.1 core context, the same as Filament's
+GLX platform, on an `EGL_EXT_platform_device` GPU or on Mesa's surfaceless platform, with pbuffers
+as headless swap chains. Filament still loads GL entry points through BlueGL from `libGL.so.1`;
+glvnd dispatches them to the current EGL context. `libEGL.so.1` is loaded with `dlopen`, so it
+is not a link dependency: it is outside the manylinux library policy, and GLX users do not need
+it. The device probe runs on a new thread, because glvnd does not make an EGL context current on
+a thread where a GLX context is current. A software EGL renderer is chosen only without an X
+display: on WSLg, GLX reaches the GPU where EGL can offer only llvmpipe. The EGL display is never
+terminated, because it is a process-wide handle that other renderers may share.
+
+The Linux module exports only `PyInit__native`. Filament marks its public API visible, and
+template instantiations from the C++ library are visible regardless of `-fvisibility`; exported,
+they could bind to another copy of Filament, libwebp, or libstdc++ in the process.
+
+On Windows the extension uses the hybrid C runtime: the C++ standard library and vcruntime are
+linked statically (`/MT`, the SDK's `lib/x86_64/mt` libraries), and the Universal CRT is linked
+dynamically. Python ships `vcruntime140.dll` but not `msvcp140.dll`. A module that imports
+`msvcp140.dll` fails to load on a PC without the Visual C++ Redistributable. It can also crash
+in a host process that loaded an older copy first, such as MATLAB or a Qt application, because
+code built with Visual Studio 2022 17.10 or later needs the newer `std::mutex` implementation.
+The UCRT is part of Windows 10 and later, and one shared copy gives all modules in the process
+one heap. The static runtime adds about 0.3 MB to the module.
+`tools/check_native_imports.py` and `tests/test_native_imports.py` reject any other runtime import.
+
+The Linux source build applies four local corrections. Two concern fence waits. glibc 2.28, the
+manylinux_2_28 baseline, lacks `pthread_cond_clockwait`, so libstdc++ converts a steady-clock
+deadline to the system clock. An expired polling deadline returns before entering a
+condition-variable wait. Without this correction, the 10,000-frame test can stop in Filament's
+UBO fence reclamation while the driver waits for more commands. A wait without a deadline
+(`FENCE_WAIT_FOR_EVER`, a `time_point::max()` deadline) uses an untimed wait. The converted
+deadline overflows, so `wait_until()` returns at once; Filament's frame-info thread then spins on
+the fence mutex and starves the driver thread that would signal the fence. The first
+`OffscreenTarget.read()` after a render hung this way. The corrections preserve asynchronous
+rendering and do not add GPU completion waits.
 
 Shared GLX contexts use the host's X display connection. Opening a separate connection can
 produce incorrect shared-texture pixels under contention on Mesa. The platform borrows this
