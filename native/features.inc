@@ -2,8 +2,8 @@
 namespace {
 auto light_instance(const std::shared_ptr<detail::Resource>& owner, uint32_t entity) {
     owner->state->check();
-    if (auto model = std::dynamic_pointer_cast<detail::ModelData>(owner)) model->check();
-    if (auto light = std::dynamic_pointer_cast<detail::LightData>(owner); light && !light->entity)
+    if (auto model = detail::resource_cast<detail::ModelData>(owner)) model->check();
+    if (auto light = detail::resource_cast<detail::LightData>(owner); light && !light->entity)
         throw FillyError("Light is closed");
     auto& manager = owner->state->engine->getLightManager();
     auto instance = manager.getInstance(utils::Entity::import(entity));
@@ -31,10 +31,10 @@ bool Light::same(const Light& other) const { return owner_ == other.owner_ && en
 uintptr_t Light::key() const { return reinterpret_cast<uintptr_t>(owner_.get()) ^ (uintptr_t(entity_) * 0x9E3779B97F4A7C15ull); }
 bool Light::has_node() const {
     owner_->state->check_thread();
-    return bool(std::dynamic_pointer_cast<detail::ModelData>(owner_));
+    return bool(detail::resource_cast<detail::ModelData>(owner_));
 }
 Node Light::node() const {
-    auto model = std::dynamic_pointer_cast<detail::ModelData>(owner_);
+    auto model = detail::resource_cast<detail::ModelData>(owner_);
     if (!model) throw FillyError("Only imported lights have a node");
     model->check();
     // Closing an imported light keeps its node, so the node outlives the light component.
@@ -43,13 +43,13 @@ Node Light::node() const {
 bool Light::closed() const {
     owner_->state->check_thread();
     if (!owner_->state->engine) return true;
-    if (auto model = std::dynamic_pointer_cast<detail::ModelData>(owner_); model && !model->asset) return true;
-    if (auto light = std::dynamic_pointer_cast<detail::LightData>(owner_); light && !light->entity) return true;
+    if (auto model = detail::resource_cast<detail::ModelData>(owner_); model && !model->asset) return true;
+    if (auto light = detail::resource_cast<detail::LightData>(owner_); light && !light->entity) return true;
     return !owner_->state->engine->getLightManager().getInstance(utils::Entity::import(entity_));
 }
 void Light::close() {
     if (closed()) return;
-    if (auto light = std::dynamic_pointer_cast<detail::LightData>(owner_)) {
+    if (auto light = detail::resource_cast<detail::LightData>(owner_)) {
         light->release();
         if (auto scene = light->scene.lock()) std::erase(scene->children, owner_);
     } else {
@@ -513,6 +513,12 @@ void Scene::set_environment(const std::vector<float>& pixels, uint32_t width, ui
         throw std::invalid_argument("Environment must be a 2:1 RGB panorama, height 2..4096");
     for (float value : pixels) nonnegative(value);
     auto& engine = *data_->state->engine;
+    bool uniform = true;
+    for (size_t i = 3; i < pixels.size() && uniform; ++i) uniform = pixels[i] == pixels[i % 3];
+    if (uniform) {
+        set_uniform_environment({pixels[0], pixels[1], pixels[2]}, intensity, rotation);
+        return;
+    }
     auto* source = f::Texture::Builder().width(width).height(height).levels(0xff)
         .sampler(f::Texture::Sampler::SAMPLER_2D).format(f::Texture::InternalFormat::R11F_G11F_B10F)
         .usage(f::Texture::Usage::SAMPLEABLE | f::Texture::Usage::COLOR_ATTACHMENT |
@@ -538,7 +544,42 @@ void Scene::set_environment(const std::vector<float>& pixels, uint32_t width, ui
     data_->environment_rotation = rotation;
     detail::update_diffuse_environment(*data_);
     engine.destroy(source);
-    engine.flushAndWait();
+    detail::flush_and_wait(engine);
+}
+// A constant panorama needs no prefiltering: its cubemap, its prefiltered reflections, and its
+// irradiance are all the same constant. The prefilter path computes weighted averages of the
+// constant and stores them in R11F_G11F_B10F, which reproduces the stored constant; 1 x 1
+// cubemaps of the same format, uploaded the same way as the panorama, hold the same value. This
+// saves the prefilter's shader compilation (about 260 ms in Chrome, 80 ms on the desktop, once
+// per renderer) and its GPU work (about 50 ms on the desktop for each environment).
+void Scene::set_uniform_environment(Vec3 radiance, float intensity, float rotation) {
+    auto& engine = *data_->state->engine;
+    auto cube = [&] {
+        auto* texture = f::Texture::Builder().width(1).height(1).levels(1)
+            .sampler(f::Texture::Sampler::SAMPLER_CUBEMAP).format(f::Texture::InternalFormat::R11F_G11F_B10F)
+            .usage(f::Texture::Usage::SAMPLEABLE | f::Texture::Usage::UPLOADABLE).build(engine);
+        // Six faces of one RGB float pixel each, in face order.
+        auto* upload = new std::vector<float>();
+        for (int face = 0; face < 6; ++face) upload->insert(upload->end(), radiance.begin(), radiance.end());
+        texture->setImage(engine, 0, 0, 0, 0, 1, 1, 6, f::Texture::PixelBufferDescriptor(
+            upload->data(), upload->size() * sizeof(float), f::Texture::Format::RGB, f::Texture::Type::FLOAT,
+            [](void*, size_t, void* p) { delete static_cast<std::vector<float>*>(p); }, upload));
+        return texture;
+    };
+    auto* sky = cube();
+    auto* reflections = cube();
+    auto* irradiance = cube();
+    auto* environment = f::IndirectLight::Builder().reflections(reflections).irradiance(irradiance)
+        .intensity(intensity).rotation(m::mat3f::rotation(rotation * 0.01745329252f, m::float3{0,1,0})).build(engine);
+    auto* skybox = f::Skybox::Builder().environment(sky).showSun(true).build(engine);
+    clear_environment();
+    data_->environment = environment; data_->reflections = reflections; data_->irradiance = irradiance;
+    data_->skybox = skybox; data_->skybox_texture = sky;
+    data_->scene->setIndirectLight(environment);
+    data_->scene->setSkybox(data_->environment_visible ? skybox : nullptr);
+    data_->environment_rotation = rotation;
+    detail::update_diffuse_environment(*data_);
+    detail::flush_and_wait(engine);
 }
 namespace {
 std::vector<uint8_t> read_file(const std::string& path, const char* what) {
@@ -680,7 +721,7 @@ void Scene::load_environment_ktx(const std::string& ibl_path, const std::string&
     data_->scene->setSkybox(data_->environment_visible ? skybox : nullptr);
     data_->environment_rotation = rotation;
     detail::update_diffuse_environment(*data_);
-    engine.flushAndWait();
+    detail::flush_and_wait(engine);
 }
 void Scene::load_environment(const std::string& path, float intensity, float rotation) {
     data_->check();

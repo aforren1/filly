@@ -1,0 +1,82 @@
+// FXAA on filly's encoded image: FXAA 3.11 console variant with the G3D patches, as in Filament
+// 1.77.1 (filament/src/materials/antiAliasing/fxaa/fxaa.fs):
+//   NVIDIA FXAA 3.11 by Timothy Lottes. Copyright (c) 2010, 2011 NVIDIA Corporation. All rights
+//   reserved. Provided "as is"; NVIDIA and its suppliers disclaim all warranties.
+//   G3D Innovation Engine, Copyright 2000-2018 Morgan McGuire. All rights reserved. BSD License.
+// It runs on filly's encoded image instead of Filament's color-grading output, so a flat field
+// keeps exactly the encoded value that the image has without FXAA.
+material {
+    name : "filly fxaa",
+    shadingModel : unlit,
+    vertexDomain : device,
+    blending : opaque,
+    culling : none,
+    depthWrite : false,
+    depthCulling : false,
+    flipUV : false,
+    variantFilter : [ directionalLighting, shadowReceiver, skinning, fog, vsm, ssr, stereo ],
+    parameters : [
+        { type : sampler2d, name : ldr, format : float, precision : high },
+        { type : float4, name : texel, precision : high },
+        { type : float4, name : bounds, precision : high },
+        { type : int, name : transparent }
+    ]
+}
+
+fragment {
+highp vec4 fxaaTap(highp vec2 uv) {
+    // Keep taps inside the rendered viewport; outside it the input holds an earlier frame.
+    return textureLod(materialParams_ldr, clamp(uv, materialParams.bounds.xy, materialParams.bounds.zw), 0.0);
+}
+
+float fxaaLuma(highp vec4 c) {
+    // Transparent views keep alpha, so luma is green there, as in Filament.
+    return materialParams.transparent != 0 ? c.g : c.a;
+}
+
+highp vec4 fxaa(highp vec2 pos, highp vec4 corners, highp vec4 rgbyM, highp vec2 rcpFrame) {
+    const float edgeSharpness = 8.0;
+    const float edgeThreshold = 0.08;
+    const float edgeThresholdMin = 0.04;
+    float lumaNw = fxaaLuma(fxaaTap(corners.xy));
+    float lumaSw = fxaaLuma(fxaaTap(corners.xw));
+    float lumaNe = fxaaLuma(fxaaTap(corners.zy));
+    float lumaSe = fxaaLuma(fxaaTap(corners.zw));
+    float lumaM = fxaaLuma(rgbyM);
+    float lumaMax = max(max(lumaNe, lumaSe), max(lumaNw, lumaSw));
+    float lumaMin = min(min(lumaNe, lumaSe), min(lumaNw, lumaSw));
+    float lumaMinM = min(lumaMin, lumaM);
+    float lumaMaxM = max(lumaMax, lumaM);
+    float range = lumaMaxM - lumaMinM;
+    if (range < max(edgeThresholdMin, lumaMax * edgeThreshold)) return rgbyM;
+    float dirSwMinusNe = lumaSw - lumaNe;
+    float dirSeMinusNw = lumaSe - lumaNw;
+    highp vec2 dir = vec2(dirSwMinusNe + dirSeMinusNw, dirSwMinusNe - dirSeMinusNw);
+    float dirLength = length(dir);
+    if (dirLength < 1.0e-6) return rgbyM;
+    highp vec2 dir1 = dir / dirLength;
+    highp vec4 rgbyN1 = fxaaTap(pos - dir1 * rcpFrame);
+    highp vec4 rgbyP1 = fxaaTap(pos + dir1 * rcpFrame);
+    float dirAbsMinTimesC = max(abs(dir1.x), abs(dir1.y)) * edgeSharpness * 0.015;
+    highp vec2 dir2 = dir1 * min(range / dirAbsMinTimesC, 3.0);
+    highp vec4 rgbyN2 = fxaaTap(pos - dir2 * 2.0 * rcpFrame);
+    highp vec4 rgbyP2 = fxaaTap(pos + dir2 * 2.0 * rcpFrame);
+    highp vec4 rgbyA = rgbyN1 + rgbyP1;
+    highp vec4 rgbyB = (rgbyN2 + rgbyP2) * 0.25 + rgbyA * 0.25;
+    float lumaB = fxaaLuma(rgbyB);
+    if (lumaB < lumaMin || lumaB > lumaMax) rgbyB.xyz = rgbyA.xyz * 0.5;
+    return rgbyB * 0.75 + rgbyM * 0.25;
+}
+
+void material(inout MaterialInputs material) {
+    prepareMaterial(material);
+    highp vec2 texel = materialParams.texel.xy;
+    highp vec2 pos = gl_FragCoord.xy * texel;
+    highp vec4 corners = vec4(pos - 0.5 * texel, pos + 0.5 * texel);
+    // The center is fetched, not filtered, so an untouched pixel keeps its exact level.
+    highp vec4 rgbyM = texelFetch(materialParams_ldr, ivec2(gl_FragCoord.xy), 0);
+    highp vec4 o = fxaa(pos, corners, rgbyM, texel);
+    if (materialParams.transparent == 0) o.a = 1.0;
+    material.baseColor = floor(clamp(o, 0.0, 1.0) * 255.0 + 0.5) * (1.0 / 255.0);
+}
+}

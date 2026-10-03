@@ -145,10 +145,12 @@ HostTexture Renderer::import_gl_input(uint32_t texture, int64_t width, int64_t h
     using View = detail::GlInterop::SrgbView;
     const auto name = state_->interop->import_texture(texture, uint32_t(width), uint32_t(height),
                                                       srgb ? View::REQUIRED : View::NONE);
+    // The web build has no views: it samples sRGB storage that the page allocated.
+    const bool has_view = name != texture;
     std::shared_ptr<detail::TextureData> data;
     try { data = state_->track(std::make_shared<detail::TextureData>(state_)); }
-    catch (...) { if (srgb) state_->interop->delete_host_texture(name); throw; }
-    if (srgb) data->host_view = name;
+    catch (...) { if (has_view) state_->interop->delete_host_texture(name); throw; }
+    if (has_view) data->host_view = name;
     data->host = true;
     data->width = uint32_t(width);
     data->height = uint32_t(height);
@@ -200,7 +202,7 @@ void HostTexture::close() {
     if (data_->state->interop->host_current()) data_->state->interop->finish_host();
     data_->writing = false;
     data_->release();
-    data_->state->engine->flushAndWait();
+    detail::flush_and_wait(*data_->state->engine);
     data_->state->delete_views();
 }
 

@@ -367,6 +367,11 @@ NB_MODULE(_native, module) {
         .def_prop_ro("width", &ImportedTarget::width)
         .def_prop_ro("height", &ImportedTarget::height);
 
+    nb::class_<Preparation>(module, "Preparation")
+        .def("ready", &Preparation::ready,
+             "Let the backend make progress, then report whether every program is compiled.")
+        .def_prop_ro("pending", &Preparation::pending);
+
     nb::class_<Renderer>(module, "Renderer")
         .def("__init__", [](Renderer* self, nb::object context, bool precompiled) {
             uintptr_t handle = context.is_none() ? 0 : nb::cast<uintptr_t>(context);
@@ -406,6 +411,7 @@ NB_MODULE(_native, module) {
                                         color_space, filter, wrap);
         }, "texture_id"_a, nb::kw_only(), "width"_a, "height"_a, "color_space"_a, "filter"_a = "linear",
            "wrap"_a = "repeat")
+        .def("prepare", &Renderer::prepare, "scene"_a)
         .def("finish", &Renderer::finish, nb::call_guard<nb::gil_scoped_release>())
         .def("close", &Renderer::close, nb::call_guard<nb::gil_scoped_release>())
         .def_prop_ro("closed", &Renderer::closed)

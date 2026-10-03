@@ -41,8 +41,8 @@ third. The list below is complete for the current source.
 
 Features that do not compile materials: fog (a Filament variant, present in every package), the
 output paths and color grading (view and post-process state; filly's encode and FXAA materials
-are compiled once per renderer, in both material modes), texture transforms after load
-(uniforms), and property animation (uniforms).
+are precompiled at build time since October 3, 2026, in both material modes), texture transforms
+after load (uniforms), and property animation (uniforms).
 
 The texture-count limit follows from the sampler budget. See [Sampler budget](#sampler-budget).
 In compiled mode a lit material with more than 8 textures raises `AssetError`. In precompiled mode
@@ -452,7 +452,8 @@ first use of a large entry. Two points stay open for phase 3:
    dropped on September 30: warmup made first frames slower (see
    [gap closure](#gap-closure-september-30-2026)).
 5. **Web.** Build the same `.mat` sources with `-p mobile`, and link the provider into the
-   Emscripten build.
+   Emscripten build. *Done October 3, 2026: `web/`, [the web build](web.md). The output-pass
+   materials moved from `filamat` to precompiled packages for it, in every build.*
 
 ### Risks
 
@@ -852,7 +853,7 @@ the design estimated (7.3 to 7.4 MB). The Linux archive wheel is 2,488,650 bytes
 - The NVIDIA frame times beyond the noisy first round.
 - Materials over the slot limit in real assets; only generated test assets exercise the drop.
 - `TEXCOORD_2` and higher in real assets; none in the sample set.
-- The web build (phase 5) and removal of `filamat` (phase 4).
+- Removal of `filamat` (phase 4). The web build (phase 5) runs; see [the web build](web.md).
 
 ## Gap closure (September 30, 2026)
 

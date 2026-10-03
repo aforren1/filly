@@ -15,4 +15,15 @@ inline filament::Engine::Config engine_config() {
     config.driverHandleArenaSizeMB = 32;
     return config;
 }
+
+// Engine::flushAndWait() that also covers Filament 1.77.1's single-threaded (WebAssembly) build.
+// There, flushAndWait() executes only the commands that an earlier flush submitted; the current
+// command buffer, including the finish() that flushAndWait() queues, waits for the next flush.
+// Callers free upload sources after the wait, so the uploads would read freed memory later.
+inline void flush_and_wait(filament::Engine& engine) {
+#if defined(__EMSCRIPTEN__)
+    engine.flush();
+#endif
+    engine.flushAndWait();
+}
 }

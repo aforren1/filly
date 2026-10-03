@@ -258,7 +258,7 @@ void TextureData::release() noexcept {
             host_done = nullptr;
             state->interop->destroy(*state->engine, read_done);
         }
-        if (upload.busy()) state->engine->flushAndWait();
+        if (upload.busy()) detail::flush_and_wait(*state->engine);
         state->engine->destroy(texture);
     }
     if (host_view) state->stale_views.push_back(host_view);

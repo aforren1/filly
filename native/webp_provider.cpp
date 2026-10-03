@@ -2,7 +2,8 @@
 // WebP, so its createWebpProvider() returns null. This follows gltfio's own WebpProvider
 // (libs/gltfio/src/WebpProvider.cpp in Filament 1.77.1, Apache 2.0): RGBA8 texels, sRGB when
 // requested, and a full mip chain from generateMipmaps(). The SDK does not ship the JobSystem
-// header that gltfio's provider decodes with, so decoding runs in std::async tasks instead.
+// header that gltfio's provider decodes with, so decoding runs in std::async tasks instead,
+// or at once in the single-threaded web build.
 
 #include "webp_provider.h"
 
@@ -48,13 +49,19 @@ public:
         info.texture = texture;
         info.source.assign(data, data + size);
         auto* job_info = &info;
-        info.job = std::async(std::launch::async, [job_info] {
+        auto decode = [job_info] {
             int w = 0, h = 0;
             uint8_t* texels = WebPDecodeRGBA(job_info->source.data(), job_info->source.size(), &w, &h);
             job_info->source.clear();
             job_info->source.shrink_to_fit();
             job_info->texels.store(texels ? intptr_t(texels) : error);
-        });
+        };
+#if defined(__EMSCRIPTEN__)
+        // The web build has no threads: decode now. updateQueue() uploads it as usual.
+        decode();
+#else
+        info.job = std::async(std::launch::async, decode);
+#endif
         return texture;
     }
 

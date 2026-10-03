@@ -308,9 +308,10 @@ is created on a target's first render and lives as long as the target, so it res
 the target, which cannot change size. It shares the target's depth texture. The pass sets its
 material parameters only when they change, before `beginFrame()`: Filament commits material
 instances when the frame's first view renders, so a change set between views reached the GPU
-inside a render pass and was lost. The encode material is compiled when the renderer is created,
-and the FXAA material when a scene first sets `antialiasing = "fxaa"`, so neither compile falls on
-a frame.
+inside a render pass and was lost. The encode and FXAA materials are compiled at build time from
+`native/materials/encode.mat.in` and `fxaa.mat` and embedded in the module, as the material
+archive is. The renderer creates the encode material when it is created, and the FXAA material
+when a scene first sets `antialiasing = "fxaa"`, so neither falls on a frame.
 
 A shared host texture cannot simply have sRGB storage: a host that samples it decodes the values
 back to linear. The `EXT_texture_sRGB_decode` skip setting avoids that for plain texture binds,

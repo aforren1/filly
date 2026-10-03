@@ -26,6 +26,7 @@
 #include <filament/MaterialInstance.h>
 #include <filament/Material.h>
 #include <filament/RenderableManager.h>
+#include <utils/tribool.h>
 #include <filament/Options.h>
 #include <filament/Renderer.h>
 #include <filament/RenderTarget.h>
@@ -194,7 +195,7 @@ struct State {
     // an earlier delete, but it is not needed and leaves more to the driver.
     void delete_views() noexcept {
         if (stale_views.empty() || !interop->shared() || !interop->host_current()) return;
-        if (engine) engine->flushAndWait();
+        if (engine) flush_and_wait(*engine);
         for (auto name : stale_views) interop->delete_host_texture(name);
         stale_views.clear();
     }
@@ -208,11 +209,19 @@ struct State {
 };
 
 struct Resource {
+    // The resource types that code looks up from a Resource pointer.
+    enum class Kind { other, scene, model, light };
     std::shared_ptr<State> state;
     explicit Resource(std::shared_ptr<State> owner) : state(std::move(owner)) {}
+    virtual Kind kind() const noexcept { return Kind::other; }
     virtual void release() noexcept = 0;
     virtual ~Resource() = default;
 };
+
+// dynamic_pointer_cast without RTTI: the web build compiles with -fno-rtti, as Filament does.
+template <class T> std::shared_ptr<T> resource_cast(const std::shared_ptr<Resource>& resource) noexcept {
+    return resource && resource->kind() == T::tag ? std::static_pointer_cast<T>(resource) : nullptr;
+}
 
 struct CameraData : Resource {
     using Resource::Resource;
@@ -262,6 +271,8 @@ struct CameraData : Resource {
 struct ModelData;
 struct SceneData : Resource {
     using Resource::Resource;
+    static constexpr Kind tag = Kind::scene;
+    Kind kind() const noexcept override { return tag; }
     f::Scene* scene = nullptr;
     f::View* view = nullptr;
     std::shared_ptr<CameraData> active_camera;
@@ -371,7 +382,7 @@ void update_dithering(SceneData& scene) {
 // Scenes must not keep a camera whose component is gone.
 void detach_closed_cameras(State& state) noexcept {
     for (const auto& entry : state.resources) {
-        auto scene = std::dynamic_pointer_cast<SceneData>(entry.lock());
+        auto scene = resource_cast<SceneData>(entry.lock());
         if (scene && scene->active_camera && !scene->active_camera->camera) {
             if (scene->view) scene->view->setCamera(nullptr);
             scene->active_camera.reset();
@@ -436,7 +447,7 @@ struct Staging {
     Slot& take(f::Engine& engine) {
         auto& slot = slots[next];
         next = (next + 1) % slots.size();
-        if (slot.busy) engine.flushAndWait();
+        if (slot.busy) flush_and_wait(engine);
         if (slot.busy) throw FillyError("A previous upload did not complete");
         if (!slot.bytes) slot.bytes = std::make_unique<uint8_t[]>(size);
         slot.busy = true;
@@ -463,7 +474,7 @@ struct MeshGeometry {
     std::vector<utils::Entity> renderables;
     void release(f::Engine& engine) noexcept {
         for (const auto* ring : {&position_upload, &tangent_upload, &uv_upload, &color_upload})
-            if (ring->busy()) { engine.flushAndWait(); break; }
+            if (ring->busy()) { flush_and_wait(engine); break; }
         if (vertices) engine.destroy(vertices);
         if (indices) engine.destroy(indices);
         vertices = nullptr;
@@ -530,6 +541,8 @@ struct SharedOverride {
 
 struct ModelData : Resource, std::enable_shared_from_this<ModelData> {
     using Resource::Resource;
+    static constexpr Kind tag = Kind::model;
+    Kind kind() const noexcept override { return tag; }
     std::weak_ptr<SceneData> scene;
     std::shared_ptr<AssetData> shared;
     // Null once the model is closed.
@@ -682,6 +695,8 @@ void CameraData::check() const {
 
 struct LightData : Resource {
     using Resource::Resource;
+    static constexpr Kind tag = Kind::light;
+    Kind kind() const noexcept override { return tag; }
     std::weak_ptr<SceneData> scene;
     utils::Entity entity;
     void release() noexcept override {
@@ -811,7 +826,7 @@ void CameraData::fit_aspect(double target) {
 void update_diffuse_environment(SceneData& scene) {
     const float intensity = scene.environment ? scene.environment->getIntensity() : 0;
     for (const auto& child : scene.children) {
-        auto model = std::dynamic_pointer_cast<ModelData>(child);
+        auto model = resource_cast<ModelData>(child);
         if (!model || !model->asset) continue;
         auto* instance = model->instance;
         for (size_t i=0; i<instance->getMaterialInstanceCount(); ++i)
@@ -940,7 +955,7 @@ g::FilamentInstance* create_instance(State& state, AssetData& shared, std::vecto
 
 void State::close() noexcept {
     if (!engine) return;
-    engine->flushAndWait();
+    flush_and_wait(*engine);
     prefilter.reset();
     // Dependents are registered after their owners and must be destroyed first.
     for (auto it = resources.rbegin(); it != resources.rend(); ++it)
@@ -1281,9 +1296,16 @@ OffscreenTarget Renderer::create_render_target(int64_t width, int64_t height,
     data->width = uint32_t(width);
     data->height = uint32_t(height);
     using T = f::Texture;
-    // sRGB storage lets the GPU encode on write; read() returns the stored bytes unchanged.
+    // sRGB storage lets the GPU encode on write for the direct path; read() returns the stored
+    // bytes unchanged. WebGL2 always encodes writes to sRGB storage, which would encode the
+    // exact path's output twice, so the web build stores RGBA8 and has no direct sRGB path.
+#if defined(__EMSCRIPTEN__)
+    constexpr auto color_format = T::InternalFormat::RGBA8;
+#else
+    constexpr auto color_format = T::InternalFormat::SRGB8_A8;
+#endif
     data->color = T::Builder().width(data->width).height(data->height).levels(1)
-        .sampler(T::Sampler::SAMPLER_2D).format(T::InternalFormat::SRGB8_A8)
+        .sampler(T::Sampler::SAMPLER_2D).format(color_format)
         .usage(T::Usage::COLOR_ATTACHMENT | T::Usage::SAMPLEABLE | T::Usage::BLIT_SRC)
         .build(*state_->engine);
     attach(*data, *state_->engine, depth);
@@ -1508,8 +1530,102 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
 void Renderer::finish() {
     state_->check();
     const auto start = std::chrono::steady_clock::now();
-    state_->engine->flushAndWait();
+    detail::flush_and_wait(*state_->engine);
     state_->stats.finish_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+namespace detail {
+struct PrepareData {
+    std::shared_ptr<State> state;
+    size_t pending = 0;
+};
+}
+Preparation Renderer::prepare(const Scene& scene) {
+    state_->check();
+    auto& data = *scene.data_;
+    if (data.state != state_) throw std::invalid_argument("Scene must belong to this renderer");
+    data.check();
+    auto result = std::make_shared<detail::PrepareData>();
+    result->state = state_;
+    auto& engine = *state_->engine;
+    std::vector<const f::Material*> materials;
+    auto add = [&](const f::MaterialInstance* instance) {
+        if (!instance) return;
+        const auto* material = instance->getMaterial();
+        if (std::find(materials.begin(), materials.end(), material) == materials.end()) materials.push_back(material);
+    };
+    bool skinned = false;
+    auto& renderables = engine.getRenderableManager();
+    for (const auto& child : data.children) {
+        auto model = detail::resource_cast<detail::ModelData>(child);
+        if (!model || !model->asset || !model->instance) continue;
+        const auto* instances = model->instance->getMaterialInstances();
+        for (size_t i = 0; i < model->instance->getMaterialInstanceCount(); ++i) add(instances[i]);
+        // Node-local copies and variants can bind instances that the list above lacks.
+        const auto* entities = model->instance->getEntities();
+        for (size_t i = 0; i < model->instance->getEntityCount(); ++i) {
+            const auto renderable = renderables.getInstance(entities[i]);
+            if (!renderable) continue;
+            for (size_t p = 0; p < renderables.getPrimitiveCount(renderable); ++p)
+                add(renderables.getMaterialInstanceAt(renderable, p));
+        }
+        skinned = skinned || model->instance->getSkinCount() > 0;
+    }
+    auto done = [result] { return [result](f::Material*) { --result->pending; }; };
+    // Engine::compile() would pick the exact variants, but in Filament 1.77.1 it takes the
+    // lighting specialization constants from the view's last render, so before a first render it
+    // compiles programs without the directional light. Material::compile() instead compiles both
+    // settings of each variant bit that the mask allows; the mask allows only what this scene
+    // can use.
+    bool directional = false, dynamic = false;
+    auto& lights = engine.getLightManager();
+    data.scene->forEach([&](utils::Entity entity) {
+        const auto light = lights.getInstance(entity);
+        if (!light) return;
+        (lights.isDirectional(light) ? directional : dynamic) = true;
+    });
+    using Bit = f::UserVariantFilterBit;
+    f::UserVariantFilterMask mask = 0;
+    if (directional) mask |= f::UserVariantFilterMask(Bit::DIRECTIONAL_LIGHTING);
+    if (dynamic) mask |= f::UserVariantFilterMask(Bit::DYNAMIC_LIGHTING);
+    if (data.shadows) mask |= f::UserVariantFilterMask(Bit::SHADOW_RECEIVER);
+    if (data.fog) mask |= f::UserVariantFilterMask(Bit::FOG);
+    if (skinned) mask |= f::UserVariantFilterMask(Bit::SKINNING);
+    for (const auto* material : materials) {
+        ++result->pending;
+        const_cast<f::Material*>(material)->compile(f::backend::CompilerPriorityQueue::HIGH, mask, nullptr, done());
+    }
+    // The output passes are unlit and have one variant each, so the view decides them exactly.
+    auto compile_pass = [&](const detail::State::Pass& pass) {
+        ++result->pending;
+        engine.compile(f::backend::CompilerPriorityQueue::HIGH, pass.material, pass.view, utils::tribool(false),
+                       utils::tribool(false), nullptr, done());
+    };
+    if (!data.direct) {
+        compile_pass(data.filament_encodes
+            ? detail::output_pass(*state_, state_->encode_graded, detail::PassKind::encode_graded) : state_->encode);
+        if (data.antialiasing == "fxaa") compile_pass(detail::output_pass(*state_, state_->fxaa, detail::PassKind::fxaa));
+    }
+    engine.flush();
+    return Preparation(result);
+}
+Preparation::Preparation(std::shared_ptr<detail::PrepareData> data) : data_(std::move(data)) {}
+size_t Preparation::pending() const { return data_->pending; }
+bool Preparation::ready() {
+    if (!data_->pending) return true;
+    auto& state = *data_->state;
+    state.check();
+    // A frame begin ticks the backend, which advances compilation and queues the completion
+    // callbacks; the message queue delivers them. The frame renders nothing.
+    if (state.renderer->beginFrame(state.frame_chain)) state.renderer->endFrame();
+    state.engine->flush();
+    state.engine->pumpMessageQueues();
+    return !data_->pending;
+}
+void Renderer::reset_gl_state() {
+    state_->check();
+#if defined(__EMSCRIPTEN__)
+    state_->engine->resetBackendState();
+#endif
 }
 void Renderer::close() {
     state_->check_thread();
@@ -1533,12 +1649,12 @@ Stats Renderer::stats() const {
     auto& lights = state_->engine->getLightManager();
     for (const auto& entry : state_->resources) {
         auto resource = entry.lock();
-        if (auto model = std::dynamic_pointer_cast<detail::ModelData>(resource); model && model->asset) {
+        if (auto model = detail::resource_cast<detail::ModelData>(resource); model && model->asset) {
             ++result.live_models;
             result.material_copies += model->locals.size();
             for (const auto entity : model->lights) result.live_lights += bool(lights.getInstance(entity));
         }
-        if (auto light = std::dynamic_pointer_cast<detail::LightData>(resource); light && light->entity)
+        if (auto light = detail::resource_cast<detail::LightData>(resource); light && light->entity)
             ++result.live_lights;
     }
     return result;
@@ -1708,7 +1824,7 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
         resources.addTextureProvider("image/webp", webp.get());
         if (!resources.loadResources(asset)) throw AssetError("Could not load glTF resources");
         // Upload lifetimes do not need this wait. It keeps the upload out of the first trial frame.
-        state->engine->flushAndWait();
+        detail::flush_and_wait(*state->engine);
     }
     auto model = state->track(std::make_shared<detail::ModelData>(state));
     model->scene = data_;
@@ -2375,31 +2491,67 @@ void OffscreenTarget::close() {
     data_->state->check_thread();
     if (!data_->target || !data_->state->engine) return;
     data_->release();
-    data_->state->engine->flushAndWait();
+    detail::flush_and_wait(*data_->state->engine);
 }
-std::vector<uint8_t> OffscreenTarget::read() const {
+namespace detail {
+struct ReadbackData {
+    std::shared_ptr<State> state;
+    std::vector<uint8_t> pixels;
+    bool complete = false, taken = false;
+    std::chrono::steady_clock::time_point start;
+};
+}
+Readback OffscreenTarget::begin_read() const {
     auto state = data_->state;
     data_->check();
     if (!data_->rendered) throw FillyError("Render to the target before reading it");
-    const auto start = std::chrono::steady_clock::now();
-    struct Readback { std::vector<uint8_t> pixels; bool complete = false; };
-    auto result = std::make_shared<Readback>();
+    auto result = std::make_shared<detail::ReadbackData>();
+    result->state = state;
+    result->start = std::chrono::steady_clock::now();
     result->pixels.resize(size_t(data_->width) * data_->height * 4);
     // The callback retains storage even if the driver cannot complete the read.
-    auto* owner = new std::shared_ptr<Readback>(result);
+    auto* owner = new std::shared_ptr<detail::ReadbackData>(result);
     f::backend::PixelBufferDescriptor buffer(result->pixels.data(), result->pixels.size(),
         f::backend::PixelDataFormat::RGBA, f::backend::PixelDataType::UBYTE,
         [](void*, size_t, void* user) {
-            std::unique_ptr<std::shared_ptr<Readback>> hold(static_cast<std::shared_ptr<Readback>*>(user));
+            std::unique_ptr<std::shared_ptr<detail::ReadbackData>> hold(static_cast<std::shared_ptr<detail::ReadbackData>*>(user));
             (*hold)->complete = true;
         }, owner);
     state->renderer->readPixels(data_->target, 0, 0, data_->width, data_->height, std::move(buffer));
-    state->engine->flushAndWait();
-    state->engine->pumpMessageQueues();
-    if (!result->complete) throw FillyError("GPU readback did not complete");
-    state->stats.readback_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    state->engine->flush();
+    return Readback(result);
+}
+Readback::Readback(std::shared_ptr<detail::ReadbackData> data) : data_(std::move(data)) {}
+bool Readback::ready() {
+    if (!data_->complete) {
+        data_->state->check();
+        // The driver's finish() checks the readback's fence; the user callback then arrives
+        // through the message queue.
+        detail::flush_and_wait(*data_->state->engine);
+        data_->state->engine->pumpMessageQueues();
+        if (data_->complete)
+            data_->state->stats.readback_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - data_->start).count();
+    }
+    return data_->complete;
+}
+std::vector<uint8_t> Readback::take() {
+    if (!data_->complete) throw FillyError("The readback has not completed");
+    if (data_->taken) throw FillyError("The readback's pixels were already taken");
+    data_->taken = true;
     // Filament already normalizes readPixels output to an upper-left origin.
-    return std::move(result->pixels);
+    return std::move(data_->pixels);
+}
+std::vector<uint8_t> OffscreenTarget::read() const {
+    auto readback = begin_read();
+#if defined(__EMSCRIPTEN__)
+    if (!readback.ready())
+        throw FillyError("WebGL completes readbacks only after control returns to the browser; "
+                         "use begin_read() and poll ready()");
+#else
+    if (!readback.ready()) throw FillyError("GPU readback did not complete");
+#endif
+    return readback.take();
 }
 
 ImportedTarget::ImportedTarget(std::shared_ptr<detail::TargetData> data) : data_(std::move(data)) {}
@@ -2441,7 +2593,7 @@ void ImportedTarget::close() {
     // Without the host context, only Filament's side can be fenced; see Renderer::close().
     if (data_->state->interop->host_current()) data_->state->interop->finish_host();
     data_->release();
-    data_->state->engine->flushAndWait();
+    detail::flush_and_wait(*data_->state->engine);
     data_->state->delete_views();
 }
 #include "features.inc"

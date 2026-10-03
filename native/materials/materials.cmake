@@ -2,21 +2,19 @@
 # matc, packed with uberz, and embedded in the module as a byte array. See
 # docs/explanation/material-precompilation.md for the entry list.
 #
-# Inputs: FILAMENT_ROOT. Outputs: the target filly_material_archive, a static library that
-# defines filly_material_archive_data and filly_material_archive_size.
+# Inputs: FILAMENT_ROOT, FILLY_SOURCE_DIR, and FILLY_MATERIAL_TOOLS and FILLY_MATC from
+# output.cmake. Outputs: the target filly_material_archive, a static library that defines
+# filly_material_archive_data and filly_material_archive_size.
 
-set(FILLY_MATERIAL_TOOLS "${FILAMENT_ROOT}/bin" CACHE PATH
-  "Directory with matc and uberz from the same Filament version as the SDK")
-find_program(FILLY_MATC matc PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH)
-find_program(FILLY_UBERZ uberz PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH)
-find_program(FILLY_MATINFO matinfo PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH)
+find_program(FILLY_UBERZ uberz PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+find_program(FILLY_MATINFO matinfo PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
 if(NOT FILLY_MATC OR NOT FILLY_UBERZ)
   message(FATAL_ERROR "FILLY_MATERIALS=archive needs matc and uberz in ${FILLY_MATERIAL_TOOLS}. "
     "See docs/how-to/build.md.")
 endif()
 
 set(_dir "${CMAKE_CURRENT_BINARY_DIR}/materials")
-set(_src "${CMAKE_CURRENT_SOURCE_DIR}/native/materials")
+set(_src "${FILLY_SOURCE_DIR}/native/materials")
 file(MAKE_DIRECTORY "${_dir}")
 # Desktop GL only. filly uses no stereo, screen-space reflection, or VSM shadow variants.
 set(FILLY_MATC_FLAGS -a opengl -p desktop -V stereo,ssr,vsm CACHE STRING "matc flags for the archive")
@@ -60,7 +58,7 @@ set(_core
 
 # Refraction code shared with the runtime path: the three raw strings in native/refraction.h,
 # in variables rather than a list because the GLSL contains semicolons.
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/native/refraction.h" _hook)
+file(READ "${FILLY_SOURCE_DIR}/native/refraction.h" _hook)
 foreach(_i RANGE 2)
   string(FIND "${_hook}" "R\"SHADER(" _start)
   string(FIND "${_hook}" ")SHADER\"" _end)
@@ -227,7 +225,7 @@ endforeach()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${_src}/surface.mat.in" "${_src}/unlit.mat.in" "${_src}/specular_glossiness.mat.in"
   "${_src}/diffuse_transmission.mat.in" "${_src}/materials.cmake" "${_src}/embed.cmake"
-  "${CMAKE_CURRENT_SOURCE_DIR}/native/refraction.h")
+  "${FILLY_SOURCE_DIR}/native/refraction.h")
 
 add_custom_command(OUTPUT "${_dir}/filly.uberz"
   COMMAND "${FILLY_UBERZ}" -q -o filly.uberz ${_names}

@@ -187,6 +187,10 @@ Renderer creation compiles the encode material: 0.88 to 0.96 s against 0.70 to 0
 runs each). Part of this is the material compiler's first use, which a runtime-path load paid
 before. Setting `antialiasing = "fxaa"` compiles the FXAA material: 35 to 39 ms.
 
+Since October 3, 2026, both materials are precompiled at build time. Renderer creation took 0.60
+to 0.82 s (four processes, runtime material path, Intel), and the first render with FXAA,
+including the creation of its material, 17 to 21 ms.
+
 ### Per-pass GPU time of the new path
 
 RenderDoc replay, 10 replays, captured on Intel on AC at 10:41 to 10:43, and the same captures

@@ -7,8 +7,8 @@ execute_process(COMMAND "${MATINFO}" "${PACKAGE}" OUTPUT_VARIABLE info RESULT_VA
 if(status)
   message(FATAL_ERROR "matinfo failed on ${PACKAGE}")
 endif()
-# The first fragment shader of the default variant.
-string(REGEX MATCH "#([0-9]+) +desktop fs 0x00" match "${info}")
+# The first fragment shader of the default variant: desktop GLSL, or GLSL ES for the web build.
+string(REGEX MATCH "#([0-9]+) +(desktop|mobile) fs 0x00" match "${info}")
 if(NOT match)
   message(FATAL_ERROR "No default fragment shader in ${PACKAGE}")
 endif()

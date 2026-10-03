@@ -40,6 +40,8 @@ struct CameraData;
 struct ModelData;
 struct TargetData;
 struct TextureData;
+struct ReadbackData;
+struct PrepareData;
 }
 
 struct AnimationInfo {
@@ -337,6 +339,7 @@ public:
 private:
     Model load_document(std::vector<uint8_t> bytes, const std::string& path, bool strict, bool clonable,
                         std::vector<std::string>& warnings);
+    void set_uniform_environment(Vec3 radiance, float intensity, float rotation);
     std::shared_ptr<detail::SceneData> data_;
     friend class Renderer;
 };
@@ -394,6 +397,33 @@ private:
     std::shared_ptr<detail::TextureData> data_;
 };
 
+// A readback that OffscreenTarget::begin_read() started. WebGL completes GPU readbacks only
+// after control returns to the browser, so the web build polls ready() on later turns of its
+// event loop; on the desktop the first ready() completes it.
+class Readback {
+public:
+    explicit Readback(std::shared_ptr<detail::ReadbackData> data);
+    // Runs pending GPU work, then reports whether the pixels arrived.
+    bool ready();
+    // RGBA rows from the top. Valid once, after ready() returned true.
+    std::vector<uint8_t> take();
+private:
+    std::shared_ptr<detail::ReadbackData> data_;
+};
+
+// Shader compilation that Renderer::prepare() started. Compilation runs in the background:
+// on the desktop in Filament's compiler threads, in browsers with KHR_parallel_shader_compile.
+class Preparation {
+public:
+    explicit Preparation(std::shared_ptr<detail::PrepareData> data);
+    // Lets the backend make progress, then reports whether every material has its programs.
+    bool ready();
+    // Materials whose programs are not compiled yet.
+    size_t pending() const;
+private:
+    std::shared_ptr<detail::PrepareData> data_;
+};
+
 // A Filament-owned color texture that supports readback.
 class OffscreenTarget {
 public:
@@ -401,6 +431,7 @@ public:
     uint32_t width() const;
     uint32_t height() const;
     std::vector<uint8_t> read() const;
+    Readback begin_read() const;
     void close();
     bool closed() const;
 private:
@@ -444,11 +475,19 @@ public:
                                 const std::string& color_space, const std::string& filter,
                                 const std::string& wrap);
     void finish();
+    // Starts compiling the GPU programs that rendering this scene needs, for its current models,
+    // settings, and output path, without waiting. A render after ready() returns true does not
+    // stop to compile them.
+    Preparation prepare(const Scene& scene);
+    // The web build shares the page's WebGL2 context: after the page changed GL state, this makes
+    // Filament set the state it needs again instead of trusting its cache. On the desktop,
+    // Filament has its own context, and this does nothing.
+    void reset_gl_state();
     void close();
     bool closed() const;
     bool precompiled_shaders() const;
     uintptr_t shared_context() const;
-    // "wgl", "glx", or "egl".
+    // "wgl", "glx", "egl", or "webgl".
     std::string gl_platform() const;
     Stats stats() const;
 private:

@@ -17,6 +17,7 @@ from ._native import (
     Model,
     Node,
     OffscreenTarget,
+    Preparation,
     Renderer,
     Scene,
     Stats,
@@ -33,6 +34,6 @@ __version__ = "0.1.0.dev0"
 __all__ = [
     "AnimationInfo", "AssetCompatibilityWarning", "AssetError", "BackendError", "Camera",
     "FillyError", "HostTexture", "ImportedTarget", "InteropError", "Light", "Material", "Model",
-    "Node", "OffscreenTarget", "Renderer", "Scene", "Stats", "Texture", "current_gl_context",
+    "Node", "OffscreenTarget", "Preparation", "Renderer", "Scene", "Stats", "Texture", "current_gl_context",
     "set_log_level", "shapes",
 ]

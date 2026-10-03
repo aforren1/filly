@@ -500,3 +500,25 @@ def test_material_mode_compatibility(triangle_glb):
             scene.refraction = True
             scene.tone_mapping = "aces_legacy"
             assert scene.load(pack(doc,binary),strict=True).material_names == ["red"]
+
+
+@pytest.mark.parametrize("radiance", [(1, 1, 1), (0.37, 0.52, 0.9)])
+@pytest.mark.parametrize("roughness", [0.05, 0.8])
+def test_uniform_environment_matches_prefiltered(renderer, scene, triangle_glb, radiance, roughness):
+    # A uniform panorama takes a fast path without prefiltering. One slightly different pixel
+    # forces the prefiltered path, which must give almost the same light.
+    doc, binary = unpack(triangle_glb); lit(doc)
+    doc["materials"][0]["pbrMetallicRoughness"].update(metallicFactor=1, roughnessFactor=roughness)
+    scene.load(pack(doc, binary))
+    scene.environment_visible = True
+    target = renderer.create_render_target(width=32, height=32)
+    panorama = np.tile(np.asarray(radiance, np.float32), (8, 16, 1))
+    images = []
+    for nudge in (0, 1e-4):
+        panorama[0, 0, 0] += nudge
+        scene.set_environment(panorama, intensity=20000, rotation_deg=30)
+        renderer.render(scene, target)
+        images.append(target.read().astype(int))
+    uniform, prefiltered = images
+    assert uniform[16, 16, 0] > 20
+    assert np.abs(uniform - prefiltered).max() <= 2

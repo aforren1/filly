@@ -80,8 +80,9 @@ path on Windows, add the option to the install command:
 uv pip install --python .venv\Scripts\python.exe --no-build-isolation -e . -Ccmake.define.FILLY_MATERIALS=archive
 ```
 
-The archive step needs `matc`, `uberz`, and optionally `matinfo` from the same Filament version
-as the SDK. The build looks for them in `FILAMENT_ROOT/bin`. The Windows SDK archive contains them.
+Every build compiles the materials of filly's output passes (encode and FXAA) with `matc`. The
+archive step also needs `uberz`, and optionally `matinfo`. All come from the same Filament
+version as the SDK. The build looks for them in `FILAMENT_ROOT/bin`. The Windows SDK archive contains them.
 The Linux SDK tool builds them (see [Build on Linux](#build-on-linux)). To use other copies, set
 `-Ccmake.define.FILLY_MATERIAL_TOOLS=<directory>`. `matinfo` lets the build check that the
 optimized refraction shader still contains filly's orthographic refraction hook; without it,
@@ -187,6 +188,44 @@ non-PsychoPy tests; the tests use Pillow only to encode PNG fixtures. The modern
 host tests also need `moderngl` and `zengl`. Software tests do not measure GPU performance.
 Native Wayland, macOS, and ARM builds are not implemented.
 
+## Build for the web
+
+The web build compiles filly's core with Emscripten for WebGL2 into `filly-core.mjs` and
+`filly-core.wasm`, which `web/filly.mjs` loads. It always uses the material archive. See
+[the web build](../explanation/web.md) for the design and [use filly in a web
+page](web.md) for the API.
+
+Requirements: Linux x86_64 with glibc 2.38 or later (Ubuntu 24.04; WSL works), `curl`, `git`,
+`python3`, and `ninja`. No native compiler is needed: the host tools come from Filament's Linux
+release archive. The scripts download a pinned CMake (3.31.6) and Emscripten (emsdk 5.0.4, the
+version that Filament 1.77.1 uses), and check the archives' SHA-256 hashes.
+
+1. Build the Filament WebAssembly SDK once. It took less than 10 minutes on the test laptop
+   (8 cores):
+
+   ```bash
+   tools/build_filament_web.sh ~/filly-web
+   ```
+
+   To use local copies of the pinned archives, set `FILAMENT_SOURCE_TGZ` and
+   `FILAMENT_LINUX_TGZ`.
+
+2. Build filly's module:
+
+   ```bash
+   tools/build_filly_web.sh build/web ~/filly-web
+   ```
+
+   `build/web` then holds `filly.mjs`, `filly-core.mjs`, `filly-core.wasm`, and `licenses/`.
+   Copy all of them together.
+
+From Windows, run both scripts in WSL, for example
+`wsl -d Ubuntu-24.04 -- bash tools/build_filly_web.sh build/web`. The build tree stays in
+`~/filly-web/filly-build`, on the Linux file system.
+
+For a debugging build, configure `web/` yourself with
+`-DFILLY_WEB_EXTRA_FLAGS="-fsanitize=address -g"`.
+
 ## Test
 
 ```powershell
@@ -198,6 +237,19 @@ The test suite generates its own GLB asset. No model download is necessary.
 Shared-context tests require pyglet. The PsychoPy adapter test requires psychopy-lib.
 These optional tests skip when their dependencies are absent. The PsychoPy setup includes both.
 To compare images with Filament's own `gltf_viewer`, see [reference comparison](reference-comparison.md).
+
+`tests/test_web.py` runs the web build's JavaScript API in a browser and compares its output
+with the desktop module. It needs the [web build](#build-for-the-web) in `build/web`, Node.js,
+and an installed browser, and skips otherwise:
+
+```powershell
+cd tests\web; npm install; cd ..\..
+uv run --no-sync python -m pytest -q -m browser
+```
+
+It uses Chrome by default; set `FILLY_TEST_BROWSERS=chrome,edge,firefox` for more browsers.
+Do not run it while another test run uses the GPU: on the test laptop, filly's desktop tests
+crashed once while browsers rendered at the same time.
 
 To generate the README screenshot, install the examples extra and run:
 

@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 import gc
 import json
 import struct
+import time
 
 import numpy as np
 import pytest
@@ -261,3 +262,20 @@ def test_entity_indices_are_recycled(renderer, scene):
     for _ in range(8):
         batch()
     assert batch() < 10 * first
+
+
+def test_prepare_compiles_without_rendering(renderer, scene, triangle_glb):
+    scene.load(triangle_glb)
+    scene.add_directional_light(direction=(0, 0, -1), intensity=50000)
+    scene.antialiasing = "fxaa"
+    preparation = renderer.prepare(scene)
+    assert isinstance(preparation, filly.Preparation)
+    deadline = time.monotonic() + 30
+    while not preparation.ready():
+        assert time.monotonic() < deadline, f"{preparation.pending} programs still compiling"
+        time.sleep(0.005)
+    assert preparation.pending == 0
+    assert renderer.stats.frames_rendered == 0
+    target = renderer.create_render_target(width=64, height=64)
+    renderer.render(scene, target)
+    assert target.read()[32, 32, 0] > 0

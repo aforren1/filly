@@ -1,6 +1,8 @@
 # API reference
 
-The Python package is `filly`. This page describes the implemented subset of the spec.
+The Python package is `filly`. This page describes the implemented subset of the spec. The
+web build has a JavaScript API with the same structure; see
+[use filly in a web page](../how-to/web.md).
 
 ## Logging
 
@@ -51,7 +53,8 @@ its F90 from F0, which is lower for dark metals and low IOR. See
 [material precompilation](../explanation/material-precompilation.md).
 
 On both paths, the GPU driver compiles each GL program at its first draw, so render one warmup
-frame after loading and before a timing-critical trial. The driver keeps compiled programs in its
+frame after loading and before a timing-critical trial, or [prepare the scene](#prepare-a-scene)
+first. The driver keeps compiled programs in its
 own disk cache, so the first frames are much slower on a machine or driver that has not seen the
 programs. With six sample assets on the test machine, the first frame of each took 1.3 s in
 total on the archive path and 2.8 s on the runtime path with cold driver caches (Intel Iris Xe),
@@ -85,6 +88,7 @@ Assets with roughly 18,000 or more meshes can still exceed the ring and abort th
 | `render(scene, target, *, camera=None, viewport=None, clear=True)` | Submit one frame to an `OffscreenTarget` or `ImportedTarget` and flush it to the driver. See [render calls](#render-calls). Return `None`. |
 | `create_texture(pixels, *, color_space, mipmaps=False, filter="linear", wrap="repeat")` | Return a [`Texture`](#texture) with the pixels of a NumPy array. |
 | `import_gl_input(texture_id, *, width, height, color_space, filter="linear", wrap="repeat")` | Return a [`HostTexture`](#hosttexture) that materials sample. Requires a shared context. |
+| `prepare(scene)` | Start to compile the programs of the scene and return a [`Preparation`](#prepare-a-scene). Does not block. |
 | `finish()` | Block until prior GPU work finishes. |
 | `close()` | Release native resources. Repeated calls are valid. |
 | `closed` | Report whether the engine is closed. |
@@ -113,6 +117,24 @@ and transfer, but excludes conversion to a NumPy array.
 lights and clones. Closed Python handles do not contribute. `material_copies` counts node-local
 materials. These counts do not measure GPU memory or shader caches.
 `frames_rendered` counts submissions. Statistics do not measure display latency or GPU time.
+
+### Prepare a scene
+
+`prepare(scene)` starts to compile the GL programs that the scene needs and returns a
+`Preparation` immediately. `Preparation.ready()` returns `True` when all of them are compiled.
+Each call also lets Filament make progress, so call it once per frame, or poll it with a short
+sleep. `Preparation.pending` is the number of materials and output passes that are not
+compiled.
+
+Call `prepare()` after you set the lights, shadows, fog, antialiasing, and output options of the
+scene. It compiles the variants that those settings can use, for every material of the scene and
+for the output passes. It does not compile Filament's own post-processing materials, for example
+the blit of a transparent scene or the SSAO and bloom passes. Those compile at their first use, once
+for each renderer.
+
+On the test machine (Intel Iris Xe, warm driver cache), `ready()` was `True` after 133 to 160 ms,
+and the first render of a lit sphere took 11 to 13 ms instead of 17 to 24 ms. For browsers, see
+[web](../explanation/web.md#shader-compilation).
 
 ### Render calls
 
@@ -380,7 +402,13 @@ stimuli behind the shared image.
 
 Panorama height must be 2 through 4096. Rotation is about the Y axis in degrees. Loading filters
 the panorama for diffuse lighting and specular reflections and waits for GPU completion. Do this
-before the frame loop. The environment lights the scene even when hidden. Set
+before the frame loop.
+
+If all pixels of a panorama have the same value, `set_environment()` does not filter it: a
+uniform environment is the same for all roughness levels. This took 0.8 ms instead of 54 ms on
+the test machine, and 2 to 30 ms instead of about 260 ms in Chrome. The light is the same as
+with filtering for values that R11F_G11F_B10F holds exactly, such as 1.0. For other values, 8-bit
+output pixels can differ by up to 2 levels. The environment lights the scene even when hidden. Set
 `scene.environment_visible = True` to show it instead of the background color. Skybox brightness
 uses environment intensity and camera exposure; its output alpha is one, including in a transparent
 view. Leave it hidden to composite over PsychoPy stimuli. The source cubemap remains resident so
@@ -1137,6 +1165,9 @@ image.
 | `moderngl` | `SharedTarget(renderer, ctx, width, height)` | `pyglet.create_renderer(window)` |
 | `zengl` | `SharedTarget(renderer, ctx, width, height, framebuffer=None)` | `pyglet.create_renderer(window)` |
 | `psychopy` | `SharedTarget(renderer, win, width, height)` | `create_renderer(win)` |
+
+Both `create_renderer()` functions accept `precompiled_shaders`, with the meaning of the
+[`Renderer`](#renderer) argument.
 
 | Member | Behavior |
 | --- | --- |

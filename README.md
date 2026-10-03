@@ -93,6 +93,9 @@ Close the target, then the renderer, then the window. The same pattern works wit
   same pixels on every frame.
 - **Several views per frame:** each `render()` call can take its own camera and viewport, for
   example for side-by-side stereo.
+- **Browsers:** the same core compiles to WebAssembly for WebGL2. It renders into a texture
+  that the page's own renderer draws, such as PIXI in PsychoJS. See
+  [the web build](docs/explanation/web.md).
 
 ## Examples
 
@@ -113,12 +116,14 @@ Each example is in `examples/` and runs with `python examples/<name>.py`.
 - How-to guides: [build and test](docs/how-to/build.md),
   [use PsychoPy](docs/how-to/psychopy.md), [use other OpenGL hosts](docs/how-to/gl-hosts.md),
   [measure timing](docs/how-to/stress-test.md), [profile a frame](docs/how-to/profile.md),
-  [compare with Filament's viewer](docs/how-to/reference-comparison.md)
+  [compare with Filament's viewer](docs/how-to/reference-comparison.md),
+  [use filly in a web page](docs/how-to/web.md)
 - Reference: [API](docs/reference/api.md), [performance](docs/reference/performance.md),
   [validation](docs/reference/validation.md), [sample assets](docs/reference/sample-assets.md)
 - Explanation: [design and limits](docs/explanation/design.md),
   [tested assumptions](docs/explanation/assumptions.md),
-  [material precompilation](docs/explanation/material-precompilation.md)
+  [material precompilation](docs/explanation/material-precompilation.md),
+  [the web build](docs/explanation/web.md)
 
 ## License
 

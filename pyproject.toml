@@ -33,4 +33,4 @@ sdist.exclude = [".deps", ".venv", "build", "dist", "Microsoft", ".vscode"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["gpu: requires a working OpenGL driver", "interop: requires a host WGL or GLX context", "psychopy: requires psychopy-lib and a display"]
+markers = ["gpu: requires a working OpenGL driver", "interop: requires a host WGL or GLX context", "psychopy: requires psychopy-lib and a display", "browser: runs the web build in a browser (see tests/test_web.py)"]

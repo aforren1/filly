@@ -1,0 +1,9 @@
+{
+  "name": "filly-web-tests",
+  "private": true,
+  "description": "Runs filly's web build in installed browsers for tests/test_web.py",
+  "type": "module",
+  "dependencies": {
+    "puppeteer-core": "^24.0.0"
+  }
+}

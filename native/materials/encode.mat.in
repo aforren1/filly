@@ -1,0 +1,72 @@
+// filly's encode pass: turns the scene-linear intermediate into the 8-bit output. output.cmake
+// writes two packages: FILLY_GRADED 0 (filly encodes) and 1 (Filament's color grading encoded).
+// The pass draws one triangle in clip space that covers the viewport: no camera transform, no
+// culling, no depth. See native/output_pass.h for the flags.
+material {
+    name : "@NAME@",
+    shadingModel : unlit,
+    vertexDomain : device,
+    blending : opaque,
+    culling : none,
+    depthWrite : false,
+    depthCulling : false,
+    flipUV : false,
+    // No lighting, skinning, fog, shadows, or stereo: fewer variants to compile.
+    variantFilter : [ directionalLighting, shadowReceiver, skinning, fog, vsm, ssr, stereo ],
+    parameters : [
+        { type : sampler2d, name : source, format : float, precision : high },
+        { type : int, name : flags },
+        // x: temporal noise in [0, 1); yz: 1 / viewport size, for the dithering pattern.
+        { type : float4, name : frame, precision : high }@GRADED_PARAMETERS@
+    ]
+}
+
+fragment {
+#define FILLY_GRADED @GRADED@
+// The analytic transfer function in fp32, then an explicit rounding to 8-bit levels, so the
+// stored value does not depend on how a driver converts floats to UNORM8.
+float triangleNoise(highp vec2 n) {
+    // Filament's temporal dithering noise (inline_dithering.fs), in [-1, 1).
+    n = fract(n * vec2(5.3987, 5.4421));
+    n += dot(n.yx, n.xy + vec2(21.5351, 14.3137));
+    highp float xy = n.x * n.y;
+    return fract(xy * 95.4307) + fract(xy * 75.04961) - 1.0;
+}
+
+void material(inout MaterialInputs material) {
+    prepareMaterial(material);
+    int flags = materialParams.flags;
+    bool transparent = (flags & 2) != 0;
+    highp vec2 p = gl_FragCoord.xy;
+    highp vec4 c = texelFetch(materialParams_source, ivec2(p), 0);
+#if FILLY_GRADED
+    // Filament's color grading already encoded, dithered, and rounded the viewport's pixels;
+    // when transparent, as srgb(c) * a. Outside the viewport the CPU encoded the clear color.
+    // With the transfer function behind the viewport test, this pass cost 1.0 ms more per 1080p
+    // frame on the Intel GPU; the test in the default material cost 0.05 ms.
+    bool inside = all(greaterThanEqual(p, materialParams.inner.xy)) && all(lessThan(p, materialParams.inner.zw));
+    highp vec4 o = inside ? (transparent ? c : vec4(c.rgb, 1.0)) : materialParams.background;
+#else
+    highp float a = transparent ? clamp(c.a, 0.0, 1.0) : 1.0;
+    // Transparent input is premultiplied in linear space; the encoding applies to the straight
+    // color, and the output is premultiplied again after encoding.
+    highp vec3 s = transparent ? (a > 0.0 ? c.rgb / a : vec3(0.0)) : c.rgb;
+    // The linear tone mapper is a clamp. Other tone mappers already ran in Filament.
+    s = clamp(s, 0.0, 1.0);
+    if ((flags & 1) != 0) {
+        for (int i = 0; i < 3; ++i)
+            s[i] = s[i] <= 0.0031308 ? 12.92 * s[i] : 1.055 * pow(s[i], 1.0 / 2.4) - 0.055;
+    }
+    highp vec4 o = vec4(s * a, a);
+    if ((flags & 4) != 0) {
+        highp vec2 uv = gl_FragCoord.xy * materialParams.frame.yz + vec2(0.07 * materialParams.frame.x);
+        highp float n = triangleNoise(uv) / 255.0;
+        o += transparent ? vec4(n) : vec4(n, n, n, 0.0);
+    }
+#endif
+    o = floor(clamp(o, 0.0, 1.0) * 255.0 + 0.5) * (1.0 / 255.0);
+    // FXAA reads perceptual luma from alpha for opaque views, as after Filament's color grading.
+    if ((flags & 8) != 0) o.a = dot(o.rgb, vec3(0.2126, 0.7152, 0.0722));
+    material.baseColor = o;
+}
+}
