@@ -335,3 +335,16 @@ def test_dispersion_requires_volume_before_native_shader_compilation(scene, tria
     doc["materials"][0]["extensions"] = {"KHR_materials_dispersion": {"dispersion": 1}}
     with pytest.raises(filly.AssetError, match="Dispersion requires"):
         scene.load(pack(doc, binary))
+
+
+@pytest.mark.gpu
+def test_animations_report_material_properties(scene, triangle_glb):
+    doc, binary = unpack(triangle_glb)
+    lit(doc)
+    add_clip(doc, binary, "/materials/0/pbrMetallicRoughness/baseColorFactor", [1, 0, 0, 1, 0, 1, 0, 1], kind="VEC4")
+    add_clip(doc, binary, "/materials/0/pbrMetallicRoughness/roughnessFactor", [0, 1])
+    doc["animations"][1]["name"] = "rough"
+    model = scene.load(pack(doc, binary))
+    clips = model.animations
+    assert clips[0].material_properties == [("red", "baseColorFactor")]
+    assert clips[1].material_properties == [("red", "roughnessFactor")]

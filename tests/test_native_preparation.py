@@ -101,7 +101,7 @@ def test_python_has_no_gltf_preparation(triangle_glb):
     """)
     result = subprocess.run([sys.executable, "-c", script], input=triangle_glb, capture_output=True, timeout=120)
     assert result.returncode == 0, result.stderr.decode(errors="replace")[-400:]
-    assert result.stdout.decode().strip() == "['filly', 'filly._native', 'filly._native.shapes', 'filly.shapes']"
+    assert result.stdout.decode().strip() == "['filly', 'filly._native', 'filly._native.shapes', 'filly.samples', 'filly.shapes']"
     package = Path(filly.__file__).parent
     for name in ("_assets", "_animation", "_geometry", "_accessors", "_mesh", "shapes"):
         assert not (package / f"{name}.py").exists()

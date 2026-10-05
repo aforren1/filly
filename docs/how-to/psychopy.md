@@ -144,8 +144,11 @@ The shared target has no `read()`: no image upload or CPU framebuffer copy is ne
 The texture holds sRGB-encoded values, which PsychoPy samples as plain RGBA8 and shows as they are.
 
 Use `useFBO=False`, which is PsychoPy's default. With PsychoPy 2026.2.4 and pyglet 1.4.11,
-`useFBO=True` does not present stimuli: the window alternates between the clear color and black.
-This occurs on Intel and NVIDIA GPUs, with a plain PsychoPy rectangle and no Filament renderer.
+reads of a `useFBO=True` window alternated between the clear color and black, on Intel and
+NVIDIA GPUs, with a plain PsychoPy rectangle and no Filament renderer. On 2026-10-03, a
+`useFBO=True` window in the PsychoPy 2026.1.2 app showed a filly stimulus on screen, and a read
+of the back buffer before the swap had it; only the front buffer read back empty. Whether the
+earlier result was a display failure or only a readback artifact is not settled.
 The shared texture does not require PsychoPy's extra FBO. The adapter leaves the host window's
 setting unchanged.
 

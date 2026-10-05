@@ -4,7 +4,7 @@ import ctypes
 
 from pyglet import gl
 
-from .. import InteropError
+from .. import InteropError, current_gl_context
 from .._native import _create_host_texture, _delete_host_texture
 from ._host import HostTarget, shared_renderer
 
@@ -46,6 +46,11 @@ class SharedTarget(HostTarget):
         return _is_open(self._window)
 
     def _make_host_current(self):
+        # switch_to() costs about 30 us per acquire(). The native check guards against code that
+        # switched contexts without pyglet, which pyglet's bookkeeping misses.
+        if (self._context and current_gl_context() == self._context and _is_open(self._window)
+                and gl.current_context is self._window.context):
+            return
         _current(self._window)
 
     def _create_host_texture(self, width, height):

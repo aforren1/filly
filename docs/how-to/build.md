@@ -190,8 +190,8 @@ Native Wayland, macOS, and ARM builds are not implemented.
 
 ## Build for the web
 
-The web build compiles filly's core with Emscripten for WebGL2 into `filly-core.mjs` and
-`filly-core.wasm`, which `web/filly.mjs` loads. It always uses the material archive. See
+The web build compiles filly's core with Emscripten for WebGL2 into `filly-core.js` and
+`filly-core.wasm`, which `web/filly.js` loads. It always uses the material archive. See
 [the web build](../explanation/web.md) for the design and [use filly in a web
 page](web.md) for the API.
 
@@ -216,7 +216,7 @@ version that Filament 1.77.1 uses), and check the archives' SHA-256 hashes.
    tools/build_filly_web.sh build/web ~/filly-web
    ```
 
-   `build/web` then holds `filly.mjs`, `filly-core.mjs`, `filly-core.wasm`, and `licenses/`.
+   `build/web` then holds `filly.js`, `filly-core.js`, `filly-core.wasm`, and `licenses/`.
    Copy all of them together.
 
 From Windows, run both scripts in WSL, for example
@@ -299,5 +299,40 @@ with abi3audit. After the build, `tools/check_native_imports.py` rejects a wheel
 imports a library outside its allowed list, such as `msvcp140.dll`. Windows CI runs CPU smoke tests because hosted runners lack a reliable OpenGL
 device; run the full suite on a Windows machine with a GPU.
 
-Download wheels from the workflow artifacts. The workflow does not publish packages.
+Download wheels from the workflow artifacts. The same workflow builds the sdist and publishes
+releases; see [publish a release](#publish-a-release).
 Source archives are pinned and hash checked; build dependencies and container images are not fully locked.
+
+## Publish a release
+
+A pushed tag `vX.Y.Z` publishes the wheels and the sdist of that run to PyPI, after all builds
+and tests pass. The tag must match the version in `pyproject.toml`; otherwise the sdist job
+fails and nothing is published. `filly.__version__` reads the installed version, so
+`pyproject.toml` is the only place to change it.
+
+The workflow publishes with PyPI trusted publishing: PyPI trusts this repository's workflow, and
+no API token is stored in GitHub.
+
+Set up once:
+
+1. On pypi.org, open **Your account**, then **Publishing**, and add a pending publisher: project
+   `filly`, owner `aforren1`, repository `filly`, workflow `wheels.yml`, environment `pypi`.
+2. On test.pypi.org, do the same with environment `testpypi`.
+3. On GitHub, in the repository settings, create the environments `pypi` and `testpypi`. To
+   approve each release by hand, add yourself as a required reviewer of `pypi`.
+
+Publish:
+
+1. Set `version` in `pyproject.toml`, for example `0.1.0`, and commit.
+2. Optional rehearsal: run **Build wheels** by hand (Actions, then **Run workflow**) with
+   **Publish the build to TestPyPI** selected. TestPyPI does not accept a version twice.
+3. Tag the commit and push the tag:
+
+   ```powershell
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+Publish filly before psychopy-filly: the plugin's release workflow installs filly from PyPI.
+PyPI shows `README.md` as the project description. Relative links and images in it do not work
+there.

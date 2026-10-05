@@ -279,7 +279,9 @@ public:
         if (!compiled) archive = std::make_unique<ArchiveSpecs>(UBERARCHIVE_DEFAULT_DATA, UBERARCHIVE_DEFAULT_SIZE);
         // The material compiler has a reference-counted process-wide initialization.
         filamat::MaterialBuilder::init();
-        delegate = compiled ? g::createJitShaderProvider(e) : g::createUbershaderProvider(e, UBERARCHIVE_DEFAULT_DATA, UBERARCHIVE_DEFAULT_SIZE);
+        // The same filter as unused_variants, in the names that gltfio accepts.
+        delegate = compiled ? g::createJitShaderProvider(e, false, utils::FixedCapacityVector<const char*>{"stereo", "vsm", "ssr"})
+                            : g::createUbershaderProvider(e, UBERARCHIVE_DEFAULT_DATA, UBERARCHIVE_DEFAULT_SIZE);
         dummy = f::Texture::Builder().width(1).height(1).levels(1).format(f::Texture::InternalFormat::RGBA8).build(*e);
         dummy_cube = f::Texture::Builder().width(1).height(1).levels(1).sampler(f::Texture::Sampler::SAMPLER_CUBEMAP).format(f::Texture::InternalFormat::RGBA8).build(*e);
         static const uint8_t pixel[] = {255,255,255,255};
@@ -400,7 +402,7 @@ public:
             .customSurfaceShading(true).doubleSided(true).material(source)
             .require(f::VertexAttribute::UV0).require(f::VertexAttribute::UV1).require(f::VertexAttribute::COLOR)
             .platform(B::Platform::DESKTOP).targetApi(B::TargetApi::OPENGL)
-            .optimization(B::Optimization::NONE);
+            .optimization(B::Optimization::NONE).variantFilter(unused_variants);
         // Thickness uses the complete model-to-world scale, as for the volume materials.
         builder.variable(B::Variable::CUSTOM0, "volumeScale").materialVertex(R"MAT(
             void materialVertex(inout MaterialVertexInputs material) {
@@ -436,11 +438,17 @@ public:
     }
     f::Texture* decode(const AssetTexture& data, bool srgb) {
         if (data.bytes.empty()) return dummy;
+        // Clones reuse the prototype's copy: decoding again cost the clone the decode time and
+        // the texture's GPU memory, which stayed until the asset closed.
+        if (asset)
+            for (const auto& entry : asset->decoded)
+                if (entry.source == &data && entry.srgb == srgb) return entry.texture;
         auto* provider = decoder(data.mime);
         auto* texture = provider->pushTexture(data.bytes.data(),data.bytes.size(),data.mime.c_str(),
             srgb ? g::TextureProvider::TextureFlags::sRGB : g::TextureProvider::TextureFlags::NONE);
         if (!texture) throw AssetError("Could not decode material texture");
         textures.push_back(texture);
+        if (asset) asset->decoded.push_back({&data, srgb, texture});
         provider->waitForCompletion(); provider->updateQueue(); provider->popTexture();
         if (const char* error = provider->getPopMessage()) throw AssetError(error);
         return texture;

@@ -12,7 +12,6 @@ enum EncodeFlag : int {
     ENCODE_SRGB = 1,
     ENCODE_TRANSPARENT = 2,  // input is premultiplied, in the space it is stored in; output is srgb(c) * a
     ENCODE_DITHER = 4,       // add triangular noise of one level before rounding
-    ENCODE_LUMA = 8,         // store luma in alpha, as FXAA's input for opaque views
 };
 // graded: the source is Filament's 8-bit sRGB output, already dithered. Inside the "inner"
 // rectangle it is stored as it is; outside it, the "background" color, which the CPU encoded.

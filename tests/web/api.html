@@ -3,7 +3,7 @@
      window.testResult; tests/test_web.py compares them with desktop filly. -->
 <html><body><canvas width="16" height="16"></canvas>
 <script type="module">
-import { AssetError, createRenderer, FillyError, HostTexture, shapes, Texture } from "./filly/filly.mjs";
+import { AssetError, createRenderer, FillyError, HostTexture, shapes, Texture } from "./filly/filly.js";
 
 const gl = document.querySelector("canvas").getContext("webgl2");
 const renderer = await createRenderer(gl);
@@ -84,6 +84,23 @@ await check("prepare", async () =>
 });
 
 await check("solid", async () => pixel(await plane({ baseColor: [0.5, 0.5, 0.5, 1] }), 32, 32));
+
+// An explicit camera and a viewport in the left half.
+await check("render_options", async () =>
+{
+	const scene = renderer.createScene();
+	scene.createMesh({ ...shapes.plane({ width: 2, height: 2 }), unlit: true, baseColor: [0.5, 0.5, 0.5, 1] });
+	const camera = scene.createCamera();
+	camera.setOrthographic({ height: 2, near: 0.1, far: 10 });
+	camera.position = [0, 0, 1];
+	camera.lookAt([0, 0, 0]);
+	const target = renderer.createRenderTarget(SIZE, SIZE);
+	renderer.render(scene, target, { camera, viewport: [0, 0, SIZE / 2, SIZE], clear: true });
+	const pixels = await target.read();
+	target.close();
+	scene.close();
+	return pixel(pixels, SIZE / 4, SIZE / 2);
+});
 
 // 2 x 2 sRGB texture, nearest filter: red, green / blue, white, rows from the top.
 const quadrants = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]);
@@ -245,6 +262,41 @@ await check("model_tree", async () =>
 	return result;
 });
 
+// Through the in-memory file system, which uses the bytes without a copy; they stay unchanged.
+await check("load_files", async () =>
+{
+	const scene = renderer.createScene();
+	const bytes = new Uint8Array(await (await fetch("tree.glb")).arrayBuffer());
+	const before = bytes.slice();
+	const model = scene.loadFiles("tree.glb", { "tree.glb": bytes });
+	const result = { names: model.nodeNames, unchanged: bytes.every((value, index) => value === before[index]) };
+	scene.close();
+	return result;
+});
+
+// A model cache: the size decides clonable before the load, clones go into another scene, and
+// the memory estimate counts what the prototype and its clones share.
+await check("model_cache", async () =>
+{
+	const first = renderer.createScene();
+	const second = renderer.createScene();
+	let decided = null;
+	const prototype = await first.loadUrl("tree.glb", { clonable: (bytes) => { decided = bytes; return bytes < 1e6; } });
+	prototype.visible = false;
+	const clone = prototype.clone({ scene: second });
+	const memory = clone.memory;
+	const result = { decided, fetchedBytes: prototype.fetchedBytes, memory, liveModels: renderer.stats.liveModels };
+	first.close();
+	result.prototypeClosed = prototype.closed;
+	result.cloneClosed = clone.closed;
+	result.modelsAfterClose = clone.memory.models;
+	const again = clone.clone();
+	result.againModels = again.memory.models;
+	second.close();
+	result.liveAfter = renderer.stats.liveModels;
+	return result;
+});
+
 await check("scene_effects", async () =>
 {
 	const scene = renderer.createScene();
@@ -289,8 +341,11 @@ await check("errors", async () =>
 	await attempt("badSlot", () => scene.createMesh({ ...shapes.box() }).material("mesh").setTextureTransform("normal"));
 	await attempt("badUpdate", () => renderer.createTexture(quadrants, { width: 2, height: 2, colorSpace: "srgb" }).update(new Float32Array(16)));
 	await attempt("missingUrl", () => scene.loadUrl("missing.glb"));
+	let unknownMaterial = null;
+	try { scene.createMesh({ ...shapes.box() }).material("wood"); }
+	catch (error) { unknownMaterial = error.message; }
 	scene.close();
-	return { caught, assetIsFilly: new AssetError("x") instanceof FillyError };
+	return { caught, unknownMaterial, assetIsFilly: new AssetError("x") instanceof FillyError };
 });
 
 results.platform = renderer.glPlatform;

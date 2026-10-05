@@ -170,6 +170,36 @@ def test_visibility_hides_lights_but_keeps_cameras(renderer, scene, triangle_glb
 
 
 @pytest.mark.gpu
+def test_clip_switch_restores_morph_weights(renderer, scene, triangle_glb):
+    doc, binary = unpack(triangle_glb)
+    offsets = accessor(doc, binary, [0, 0.3, 0] * 3, "VEC3")
+    doc["meshes"][0]["primitives"][0]["targets"] = [{"POSITION": offsets}]
+    doc["nodes"][0]["weights"] = [0.5]
+    times = accessor(doc, binary, [0, 2])
+    weights = accessor(doc, binary, [0, 1])
+    shift = accessor(doc, binary, [0, 0, 0, 0, -0.2, 0], "VEC3")
+    doc["animations"] = [
+        {"name": "lift", "samplers": [{"input": times, "output": weights}], "channels": [{"sampler": 0, "target": {"node": 0, "path": "weights"}}]},
+        {"name": "drop", "samplers": [{"input": times, "output": shift}], "channels": [{"sampler": 0, "target": {"node": 0, "path": "translation"}}]},
+    ]
+    document = pack(doc, binary)
+    target = renderer.create_render_target(width=64, height=64)
+    fresh = scene.load(document)
+    fresh.apply_animation("drop", 1)
+    renderer.render(scene, target)
+    expected = target.read()
+    fresh.close()
+    model = scene.load(document)
+    model.apply_animation("lift", 2, loop=False)
+    renderer.render(scene, target)
+    assert not np.array_equal(expected, target.read())
+    # The authored weight returns, not the last weight of "lift".
+    model.apply_animation("drop", 1)
+    renderer.render(scene, target)
+    np.testing.assert_array_equal(expected, target.read())
+
+
+@pytest.mark.gpu
 def test_instance_normalized_sparse_rotation_and_morph_channels(renderer, scene, triangle_glb):
     doc, binary = unpack(triangle_glb)
     # A morph target that lifts the triangle, driven by a weights channel on the instanced node.

@@ -19,6 +19,8 @@
 #define FILLY_MATERIALS_ARCHIVE 0
 #endif
 
+namespace filament { class Texture; }
+
 namespace filly::detail {
 
 struct AssetTexture {
@@ -128,6 +130,9 @@ struct AnimationSource {
     std::string name;
     // The gltfio animation that holds this clip's node channels, or -1 if it has none.
     int native_index = -1;
+    // False when the clip writes every node channel that the rest animation writes, so the rest
+    // animation need not run before it. Set by patch_source().
+    bool needs_rest = true;
     std::vector<PropertyTrackSource> tracks;
 };
 
@@ -152,8 +157,31 @@ struct PreparedAsset {
     // (minimum above maximum without one), and its parent's index (UINT32_MAX at the top).
     std::vector<std::array<Vec3, 2>> node_boxes;
     std::vector<uint32_t> parents;
+    // The gltfio animation that patch_source() appends, or -1: one constant keyframe pair for
+    // each node channel that any clip animates, holding its authored value (see RestSource).
+    int rest_animation = -1;
+    // GPU bytes of the vertex and index buffers that gltfio uploads once per asset, of the
+    // buffers that each instance adds, and the CPU bytes that each instance's animator copies.
+    // See estimate_geometry().
+    uint64_t geometry_bytes = 0, instance_geometry_bytes = 0, instance_cpu_bytes = 0;
+    // Textures that the material provider decoded for custom materials, by source and color
+    // space. Instances of the asset share them; the asset owns them.
+    struct DecodedTexture { const AssetTexture* source; bool srgb; filament::Texture* texture; };
+    mutable std::vector<DecodedTexture> decoded;
     bool masked = false;
     bool custom_materials() const { return !diffuse.empty() || !surfaces.empty(); }
+};
+
+// The accessors of the rest animation. gltfio's animator keeps a node's translation, rotation,
+// and scale apart and writes back all three when a channel changes one of them, so a channel
+// that one clip animates and the next clip does not would keep the first clip's value. Setting
+// the TransformManager transform does not reach these values; only an animation does.
+struct RestSource {
+    std::vector<float> floats;
+    cgltf_buffer buffer{};
+    cgltf_buffer_view view{};
+    // Fixed after patch_source(): the animation's samplers point into it.
+    std::vector<cgltf_accessor> accessors;
 };
 
 // Buffer memory that cgltf reads in place. gltfio uses it until its source data is released.
@@ -166,6 +194,7 @@ struct BufferStore {
     };
     std::vector<Entry> buffers;
     std::vector<std::vector<uint8_t>> storage;
+    std::unique_ptr<RestSource> rest;
 };
 
 // Changes to gltfio's parse of the document, by index, made before gltfio loads resources.
@@ -202,8 +231,9 @@ std::vector<uint8_t> read_file(const std::filesystem::path& file);
 // Compatibility messages are appended to warnings; with strict, the first one throws.
 Prepared prepare_asset(std::vector<uint8_t> bytes, const std::string& path, const PrepareOptions& options,
                        std::vector<std::string>& warnings);
-// Applies the buffers and patches to gltfio's parse of prepared.bytes.
-void patch_source(cgltf_data* data, const Prepared& prepared);
+// Applies the buffers and patches to gltfio's parse of prepared.bytes, and appends the rest
+// animation (PreparedAsset::rest_animation).
+void patch_source(cgltf_data* data, Prepared& prepared);
 // Returns count * stride decoded bytes. mode: ATTRIBUTES, TRIANGLES, or INDICES; filter: NONE,
 // OCTAHEDRAL, QUATERNION, EXPONENTIAL, or COLOR. Throws AssetError for invalid input.
 std::vector<uint8_t> decode_meshopt(const uint8_t* source, size_t size, size_t count, size_t stride,

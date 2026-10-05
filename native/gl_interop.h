@@ -7,6 +7,8 @@ namespace filament { class Engine; class Sync; namespace backend { class Platfor
 
 namespace filly::detail {
 struct Signal;
+// Copies share one GL fence: one render's frame can be waited on by its target and by every host
+// texture that it sampled. Release each copy with GlInterop::destroy().
 struct SyncPoint {
     filament::Sync* sync = nullptr;
     std::shared_ptr<Signal> signal;

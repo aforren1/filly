@@ -4,20 +4,22 @@
 //
 // The page and Filament each cache GL state in one context. filly enters the context before its
 // first call after the page drew, and hands it back before the page draws again:
-//   enter     saves the page's pixel-store state and sets GL defaults, unbinds the page's vertex
-//             array object (Filament assumes the default one and would otherwise rebind the
-//             page's buffers), and makes Filament set all of its state again.
-//   hand back unbinds what Filament leaves bound (samplers and textures on every unit, buffers,
-//             framebuffers), restores GL defaults that the page may rely on and the page's
-//             pixel-store state, then calls the page's onHandBack hook (PIXI: renderer.reset()).
-// Call renderer.handBack() before the page draws, or hook it into the page's frame.
+//   enter     sets the pixel-store state to GL defaults, unbinds the page's vertex array object
+//             (Filament assumes the default one and would otherwise rebind the page's
+//             buffers), and makes Filament set all of its state again.
+//   hand back unbinds what Filament leaves bound (samplers and textures on the units that it
+//             used, buffers, framebuffers), restores GL defaults that the page may rely on,
+//             including the pixel-store state, then calls the page's onHandBack hook (PIXI:
+//             renderer.reset()). The page's own pixel-store values are not kept.
+// Call renderer.handBack() before the page draws, or hook it into the page's frame. Property
+// reads do not enter the context.
 //
 // API: createRenderer(gl, options) -> Renderer. The classes follow filly's Python API
 // (docs/reference/api.md) with JavaScript names; option objects replace keyword arguments.
 // Vectors are arrays. Transforms are row-major arrays of 16 numbers for column vectors: the
 // translation is in elements 3, 7, and 11, as in matrix[:3, 3] in Python.
 
-import createFillyModule from "./filly-core.mjs";
+import createFillyModule from "./filly-core.js";
 
 export class FillyError extends Error
 {
@@ -96,21 +98,30 @@ function callNative(module, fn)
 	}
 	catch (error)
 	{
-		if (typeof WebAssembly.Exception === "function" && error instanceof WebAssembly.Exception)
-		{
-			const [type, message] = module.getExceptionMessage(error);
-			module.decrementExceptionRefcount(error);
-			const ErrorType = ERROR_TYPES[type] ?? FillyError;
-			throw new ErrorType(message);
-		}
-		throw error;
+		throw nativeError(module, error);
 	}
 }
 
+function nativeError(module, error)
+{
+	if (typeof WebAssembly.Exception === "function" && error instanceof WebAssembly.Exception)
+	{
+		const [type, message] = module.getExceptionMessage(error);
+		module.decrementExceptionRefcount(error);
+		const ErrorType = ERROR_TYPES[type] ?? FillyError;
+		return new ErrorType(message);
+	}
+	return error;
+}
+
 // Pixel-store state is context state that both sides set; PIXI sets the WebGL-only flags.
-const PIXEL_STORE = ["UNPACK_FLIP_Y_WEBGL", "UNPACK_PREMULTIPLY_ALPHA_WEBGL", "UNPACK_COLORSPACE_CONVERSION_WEBGL",
-	"UNPACK_ALIGNMENT", "PACK_ALIGNMENT", "UNPACK_ROW_LENGTH", "UNPACK_IMAGE_HEIGHT", "UNPACK_SKIP_PIXELS",
-	"UNPACK_SKIP_ROWS", "UNPACK_SKIP_IMAGES", "PACK_ROW_LENGTH", "PACK_SKIP_PIXELS", "PACK_SKIP_ROWS"];
+// Filament assumes the GL defaults of these.
+const PIXEL_STORE = ["UNPACK_FLIP_Y_WEBGL", "UNPACK_PREMULTIPLY_ALPHA_WEBGL",
+	"UNPACK_COLORSPACE_CONVERSION_WEBGL", "UNPACK_IMAGE_HEIGHT", "UNPACK_SKIP_PIXELS", "UNPACK_SKIP_ROWS",
+	"UNPACK_SKIP_IMAGES", "PACK_SKIP_PIXELS", "PACK_SKIP_ROWS", "UNPACK_ALIGNMENT", "UNPACK_ROW_LENGTH",
+	"PACK_ALIGNMENT", "PACK_ROW_LENGTH"];
+// The bits that web/gl_tracking.js records for the texture targets that the core binds.
+const TEXTURE_TARGETS = ["TEXTURE_2D", "TEXTURE_CUBE_MAP", "TEXTURE_2D_ARRAY", "TEXTURE_3D"];
 
 class Context
 {
@@ -126,10 +137,38 @@ class Context
 		this.renderers = new Set();
 		this.onHandBack = new Set();
 		this.entered = false;
-		this.saved = null;
-		this.units = gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS);
-		this.defaults = {
-			UNPACK_COLORSPACE_CONVERSION_WEBGL: gl.BROWSER_DEFAULT_WEBGL, UNPACK_ALIGNMENT: 4, PACK_ALIGNMENT: 4,
+		const units = gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS);
+		// What the core changes while it has the context; web/gl_tracking.js fills it in.
+		this.tracking = module.GL.contexts[this.handle].filly = {
+			unit: 0,
+			targets: new Uint8Array(units),  // bits of TEXTURE_TARGETS bound on each unit
+			samplers: new Uint8Array(units),
+			dirty: [],  // units with a texture or a sampler
+			pixelStore: new Map(),  // parameter -> last value
+		};
+		this.textureTargets = TEXTURE_TARGETS.map((name) => gl[name]);
+		this.bufferTargets = [gl.ARRAY_BUFFER, gl.UNIFORM_BUFFER, gl.PIXEL_PACK_BUFFER, gl.PIXEL_UNPACK_BUFFER,
+			gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER];
+		this.pixelStore = PIXEL_STORE.map((name) => gl[name]);
+		this.pixelStoreDefaults = PIXEL_STORE.map((name) => name.endsWith("_ALIGNMENT") ? 4
+			: name === "UNPACK_COLORSPACE_CONVERSION_WEBGL" ? gl.BROWSER_DEFAULT_WEBGL : 0);
+		// Hand back must restore the page's pixel-store state, because a page renderer may cache
+		// it (Babylon.js caches UNPACK_FLIP_Y_WEBGL). Querying it in each enter costs a round trip
+		// to the GPU process (see below), so it is read once here, and the page's later sets are
+		// recorded by a wrapper on this context. The core's sets bypass the wrapper
+		// (web/gl_tracking.js). Looked up at each call, so that wrappers that a page installs on
+		// the prototype later still see filly's calls.
+		const own = Object.prototype.hasOwnProperty.call(gl, "pixelStorei") ? gl.pixelStorei : null;
+		const setPixelStore = (name, value) => (own ?? WebGL2RenderingContext.prototype.pixelStorei).call(gl, name, value);
+		this.setPixelStore = this.tracking.setPixelStore = setPixelStore;
+		const page = this.pagePixelStore = new Map(this.pixelStore.map((name) => [name, Number(gl.getParameter(name))]));
+		gl.pixelStorei = (name, value) =>
+		{
+			if (page.has(name))
+			{
+				page.set(name, Number(value));
+			}
+			setPixelStore(name, value);
 		};
 	}
 
@@ -141,11 +180,23 @@ class Context
 		}
 		const gl = this.gl;
 		this.module.GL.makeContextCurrent(this.handle);
-		this.saved = PIXEL_STORE.map((name) => gl.getParameter(gl[name]));
-		for (const name of PIXEL_STORE)
+		// No queries: Chrome answers some pixel-store queries, and Firefox ACTIVE_TEXTURE, with a
+		// round trip to the GPU process of about 0.2 to 0.7 ms. The page's values are known.
+		const { pixelStore, pixelStoreDefaults, pagePixelStore, tracking } = this;
+		for (let index = 0; index < pixelStore.length; index++)
 		{
-			gl.pixelStorei(gl[name], this.defaults[name] ?? 0);
+			if (pagePixelStore.get(pixelStore[index]) !== pixelStoreDefaults[index])
+			{
+				this.setPixelStore(pixelStore[index], pixelStoreDefaults[index]);
+			}
 		}
+		// Emscripten sizes the core's uploads from its own copy of these two.
+		this.module.GL.unpackAlignment = 4;
+		this.module.GL.unpackRowLength = 0;
+		tracking.pixelStore.clear();
+		// The core's own GL calls can run before Filament's reset sets the active unit.
+		gl.activeTexture(gl.TEXTURE0);
+		tracking.unit = 0;
 		gl.bindVertexArray(null);
 		gl.bindBuffer(gl.ARRAY_BUFFER, null);
 		gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -154,7 +205,14 @@ class Context
 		// Queued in Filament's command stream, so it runs before Filament's next GL call.
 		for (const renderer of this.renderers)
 		{
-			callNative(this.module, () => renderer.resetGlState());
+			try
+			{
+				renderer.resetGlState();
+			}
+			catch (error)
+			{
+				throw nativeError(this.module, error);
+			}
 		}
 	}
 
@@ -165,23 +223,36 @@ class Context
 			return;
 		}
 		const gl = this.gl;
-		for (let unit = 0; unit < this.units; unit++)
+		const { tracking, textureTargets } = this;
+		// Only the units that the core bound. A texture that stays bound can form a feedback loop
+		// with the page's framebuffer, or mismatch a sampler type of the page's programs, even
+		// on units that the page does not sample.
+		for (let index = 0; index < tracking.dirty.length; index++)
 		{
+			const unit = tracking.dirty[index];
 			gl.activeTexture(gl.TEXTURE0 + unit);
-			gl.bindTexture(gl.TEXTURE_2D, null);
-			gl.bindTexture(gl.TEXTURE_CUBE_MAP, null);
-			gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
-			gl.bindTexture(gl.TEXTURE_3D, null);
+			for (let bit = 0; bit < textureTargets.length; bit++)
+			{
+				if (tracking.targets[unit] & (1 << bit))
+				{
+					gl.bindTexture(textureTargets[bit], null);
+				}
+			}
 			// The page sampling through Filament's sampler objects would read its textures with
 			// Filament's filtering, and WebGL rejects draws whose samplers mismatch the texture.
-			gl.bindSampler(unit, null);
+			if (tracking.samplers[unit])
+			{
+				gl.bindSampler(unit, null);
+			}
+			tracking.targets[unit] = 0;
+			tracking.samplers[unit] = 0;
 		}
+		tracking.dirty.length = 0;
 		gl.activeTexture(gl.TEXTURE0);
 		gl.bindVertexArray(null);
-		for (const target of [gl.ARRAY_BUFFER, gl.UNIFORM_BUFFER, gl.PIXEL_PACK_BUFFER, gl.PIXEL_UNPACK_BUFFER,
-			gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER])
+		for (let index = 0; index < this.bufferTargets.length; index++)
 		{
-			gl.bindBuffer(target, null);
+			gl.bindBuffer(this.bufferTargets[index], null);
 		}
 		gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 		gl.bindRenderbuffer(gl.RENDERBUFFER, null);
@@ -195,7 +266,18 @@ class Context
 		gl.colorMask(true, true, true, true);
 		gl.depthMask(true);
 		gl.stencilMask(0xFFFFFFFF);
-		PIXEL_STORE.forEach((name, index) => gl.pixelStorei(gl[name], this.saved[index]));
+		// After enter, each value is the default unless the core set it.
+		const { pixelStore, pixelStoreDefaults, pagePixelStore } = this;
+		for (let index = 0; index < pixelStore.length; index++)
+		{
+			const name = pixelStore[index];
+			const current = tracking.pixelStore.get(name) ?? pixelStoreDefaults[index];
+			const page = pagePixelStore.get(name);
+			if (current !== page)
+			{
+				this.setPixelStore(name, page);
+			}
+		}
 		this.entered = false;
 		for (const hook of this.onHandBack)
 		{
@@ -265,7 +347,30 @@ class Handle
 
 	_call(method, ...args)
 	{
-		return this._context.call(() => this._native[method](...args));
+		const context = this._context;
+		context.enter();
+		try
+		{
+			return this._native[method](...args);
+		}
+		catch (error)
+		{
+			throw nativeError(context.module, error);
+		}
+	}
+
+	// For native calls that neither call GL nor queue GL work for later: they leave the
+	// context with the page, so that the page can call them between hand-back and its draw.
+	_get(method, ...args)
+	{
+		try
+		{
+			return this._native[method](...args);
+		}
+		catch (error)
+		{
+			throw nativeError(this._context.module, error);
+		}
 	}
 
 	/** Whether two handles refer to the same filly object. */
@@ -275,7 +380,7 @@ class Handle
 		{
 			return false;
 		}
-		return typeof this._native.same === "function" ? this._call("same", other._native) : this === other;
+		return typeof this._native.same === "function" ? this._get("same", other._native) : this === other;
 	}
 
 	/** Release the JavaScript handle. The filly object stays alive while others refer to it. */
@@ -354,7 +459,7 @@ export class Renderer extends Handle
 	render(scene, target, { camera = null, viewport = null, clear = true } = {})
 	{
 		const method = target instanceof OffscreenTarget ? "renderOffscreen" : "render";
-		this._call(method, scene._native, target._native, { camera: camera ? camera._native : null, viewport, clear });
+		this._call(method, scene._native, target._native, camera ? camera._native : null, viewport, clear);
 	}
 
 	/**
@@ -422,7 +527,7 @@ export class Renderer extends Handle
 	get stats()
 	{
 		// 64-bit counters arrive as BigInt; their values fit a Number.
-		const stats = this._call("stats");
+		const stats = this._get("stats");
 		for (const key of Object.keys(stats))
 		{
 			stats[key] = Number(stats[key]);
@@ -432,12 +537,12 @@ export class Renderer extends Handle
 
 	get glPlatform()
 	{
-		return this._call("glPlatform");
+		return this._get("glPlatform");
 	}
 
 	get closed()
 	{
-		return this._call("closed");
+		return this._get("closed");
 	}
 
 	close()
@@ -453,6 +558,7 @@ export class Renderer extends Handle
 }
 
 let fileCounter = 0;
+const GLB_MAGIC = 0x46546C67;
 
 export class Scene extends Handle
 {
@@ -463,7 +569,7 @@ export class Scene extends Handle
 
 	get camera()
 	{
-		return new Camera(this._context, this._call("camera"));
+		return new Camera(this._context, this._get("camera"));
 	}
 
 	set camera(camera)
@@ -488,25 +594,46 @@ export class Scene extends Handle
 			this._model(this._call("loadPath", `${dir}/${main}`, strict, clonable)));
 	}
 
-	/** Fetch and load a .glb, or a .gltf with the buffers and images it references. */
-	async loadUrl(url, options = {})
+	/**
+	 * Fetch and load a .glb, or a .gltf with the buffers and images it references. `clonable` can
+	 * also be a function of the number of bytes fetched, which decides it before the load, as a
+	 * model cache with a size limit needs. The model's fetchedBytes is that number.
+	 */
+	async loadUrl(url, { clonable = false, ...options } = {})
 	{
 		const base = new URL(url, document.baseURI);
 		const bytes = await fetchBytes(base);
-		if (!base.pathname.toLowerCase().endsWith(".gltf"))
+		const keep = (size) => (typeof clonable === "function" ? Boolean(clonable(size)) : clonable);
+		// The content decides, not the URL, which can lack an extension or carry a query.
+		if (bytes.length >= 4 && new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true) === GLB_MAGIC)
 		{
-			return this.load(bytes, options);
+			const model = this.load(bytes, { ...options, clonable: keep(bytes.length) });
+			model.fetchedBytes = bytes.length;
+			return model;
 		}
-		const gltf = JSON.parse(new TextDecoder().decode(bytes));
+		let gltf;
+		try
+		{
+			gltf = JSON.parse(new TextDecoder().decode(bytes));
+		}
+		catch
+		{
+			throw new AssetError(`${base.href} is neither a GLB file nor a glTF document`);
+		}
 		const uris = [...(gltf.buffers ?? []), ...(gltf.images ?? [])]
 			.map((item) => item.uri).filter((uri) => uri && !uri.startsWith("data:"));
 		const main = "model.gltf";
 		const files = { [main]: bytes };
+		let size = bytes.length;
 		await Promise.all(uris.map(async (uri) =>
 		{
-			files[decodeURIComponent(uri)] = await fetchBytes(new URL(uri, base));
+			const file = await fetchBytes(new URL(uri, base));
+			files[decodeURIComponent(uri)] = file;
+			size += file.length;
 		}));
-		return this.loadFiles(main, files, options);
+		const model = this.loadFiles(main, files, { ...options, clonable: keep(size) });
+		model.fetchedBytes = size;
+		return model;
 	}
 
 	_model(result)
@@ -531,7 +658,9 @@ export class Scene extends Handle
 			{
 				const path = `${dir}/${name}`;
 				FS.mkdirTree(path.slice(0, path.lastIndexOf("/")));
-				FS.writeFile(path, data instanceof Uint8Array ? data : new Uint8Array(data));
+				// canOwn: the file uses the caller's bytes instead of a copy. Nothing writes to the
+				// file, and it is removed before this returns.
+				FS.writeFile(path, data instanceof Uint8Array ? data : new Uint8Array(data), { canOwn: true });
 				written.push(path);
 			}
 			return fn(dir);
@@ -621,7 +750,7 @@ export class Scene extends Handle
 
 	get closed()
 	{
-		return this._call("closed");
+		return this._get("closed");
 	}
 }
 
@@ -637,7 +766,7 @@ function defineProperty(cls, name)
 {
 	const setter = `set${name[0].toUpperCase()}${name.slice(1)}`;
 	Object.defineProperty(cls.prototype, name, {
-		get() { return this._call(name); },
+		get() { return this._get(name); },
 		set(value) { this._call(setter, value); },
 	});
 }
@@ -700,17 +829,17 @@ export class Camera extends Handle
 	/** The glTF node of an imported camera; null for a camera that a scene created. */
 	get node()
 	{
-		return this._call("hasNode") ? new Node(this._context, this._call("node")) : null;
+		return this._get("hasNode") ? new Node(this._context, this._get("node")) : null;
 	}
 
 	get viewMatrix()
 	{
-		return this._call("viewMatrix");
+		return this._get("viewMatrix");
 	}
 
 	get projection()
 	{
-		return this._call("projection");
+		return this._get("projection");
 	}
 }
 for (const name of ["position", "transform", "exposure", "focusDistance", "aperture"])
@@ -722,45 +851,60 @@ export class Model extends Handle
 {
 	get bounds()
 	{
-		return this._call("bounds");
+		return this._get("bounds");
 	}
 
 	root()
 	{
-		return new Node(this._context, this._call("root"));
+		return new Node(this._context, this._get("root"));
 	}
 
 	node(key)
 	{
-		return new Node(this._context, typeof key === "number" ? this._call("nodeByIndex", key) : this._call("nodeByName", key));
+		return new Node(this._context, typeof key === "number" ? this._get("nodeByIndex", key) : this._get("nodeByName", key));
 	}
 
 	get nodeNames()
 	{
-		return this._call("nodeNames");
+		return this._get("nodeNames");
 	}
 
 	/** All nodes in glTF order. */
 	get nodes()
 	{
-		return this._call("nodes").map((node) => new Node(this._context, node));
+		return this._get("nodes").map((node) => new Node(this._context, node));
 	}
 
-	/** Another instance of an asset loaded with clonable, or of a generated mesh. */
-	clone()
+	/**
+	 * Another instance of an asset loaded with clonable, or of a generated mesh, in this model's
+	 * scene or in `scene`, another scene of the same renderer.
+	 */
+	clone({ scene = null } = {})
 	{
-		return new Model(this._context, this._call("clone"));
+		return new Model(this._context, scene ? this._call("cloneInto", scene._native) : this._call("clone"));
+	}
+
+	/**
+	 * Memory that the model's asset holds, shared with its clones and its prototype and freed when
+	 * the last of them closes: { gpuTextureBytes, gpuGeometryBytes, gpuBytes, cpuBytes,
+	 * cloneGpuBytes, cloneCpuBytes, models }. See Model.memory in docs/reference/api.md. The CPU
+	 * part lives in the WebAssembly heap, which never shrinks: freed memory is reused, but the
+	 * page keeps its high-water mark.
+	 */
+	get memory()
+	{
+		return this._get("memory");
 	}
 
 	/** Whether the model is a generated mesh, which updateMesh() can change. */
 	get isMesh()
 	{
-		return this._call("isMesh");
+		return this._get("isMesh");
 	}
 
 	get vertexCount()
 	{
-		return this._call("vertexCount");
+		return this._get("vertexCount");
 	}
 
 	/** Replace vertex data of a generated mesh: positions, normals, uvs, or colors, as in createMesh. */
@@ -771,18 +915,18 @@ export class Model extends Handle
 
 	material(name)
 	{
-		return new Material(this._context, this._call("material", name));
+		return new Material(this._context, this._get("material", name));
 	}
 
 	get materialNames()
 	{
-		return this._call("materialNames");
+		return this._get("materialNames");
 	}
 
 	/** [{ name, duration }] in glTF order. */
 	get animations()
 	{
-		return this._call("animations");
+		return this._get("animations");
 	}
 
 	applyAnimation(key, time, { loop = true } = {})
@@ -797,7 +941,7 @@ export class Model extends Handle
 
 	get variants()
 	{
-		return this._call("variants");
+		return this._get("variants");
 	}
 
 	applyVariant(key)
@@ -807,23 +951,23 @@ export class Model extends Handle
 
 	get lights()
 	{
-		return this._call("lights").map((light) => new Light(this._context, light));
+		return this._get("lights").map((light) => new Light(this._context, light));
 	}
 
 	/** The light on the node with this name or glTF index. */
 	light(key)
 	{
-		return new Light(this._context, this._call(typeof key === "number" ? "lightByIndex" : "lightByName", key));
+		return new Light(this._context, this._get(typeof key === "number" ? "lightByIndex" : "lightByName", key));
 	}
 
 	camera(key)
 	{
-		return new Camera(this._context, this._call(typeof key === "number" ? "cameraByIndex" : "cameraByName", key));
+		return new Camera(this._context, this._get(typeof key === "number" ? "cameraByIndex" : "cameraByName", key));
 	}
 
 	get cameras()
 	{
-		return this._call("cameras").map((camera) => new Camera(this._context, camera));
+		return this._get("cameras").map((camera) => new Camera(this._context, camera));
 	}
 
 	close()
@@ -833,7 +977,7 @@ export class Model extends Handle
 
 	get closed()
 	{
-		return this._call("closed");
+		return this._get("closed");
 	}
 }
 for (const name of ["transform", "position", "visible"])
@@ -843,44 +987,41 @@ for (const name of ["transform", "position", "visible"])
 // Rotation and scale apply to the model's root node, as in the Python API.
 for (const name of ["scale", "quaternion", "rotationEulerRad", "rotationEulerDeg"])
 {
-	Object.defineProperty(Model.prototype, name, {
-		get() { const root = this.root(); try { return root[name]; } finally { root.dispose(); } },
-		set(value) { const root = this.root(); try { root[name] = value; } finally { root.dispose(); } },
-	});
+	defineProperty(Model, name);
 }
 
 export class Node extends Handle
 {
 	get name()
 	{
-		return this._call("name");
+		return this._get("name");
 	}
 
 	get index()
 	{
-		return this._call("index");
+		return this._get("index");
 	}
 
 	get meshName()
 	{
-		return this._call("meshName");
+		return this._get("meshName");
 	}
 
 	/** The parent node; null for a top-level node. */
 	get parent()
 	{
-		const parent = this._call("parent");
+		const parent = this._get("parent");
 		return parent ? new Node(this._context, parent) : null;
 	}
 
 	get children()
 	{
-		return this._call("children").map((node) => new Node(this._context, node));
+		return this._get("children").map((node) => new Node(this._context, node));
 	}
 
 	get morphTargetCount()
 	{
-		return this._call("morphTargetCount");
+		return this._get("morphTargetCount");
 	}
 
 	setMorphWeights(weights)
@@ -890,12 +1031,13 @@ export class Node extends Handle
 
 	material(slot = 0)
 	{
+		// Not _get: the first access duplicates the node's material instance, an engine command.
 		return new Material(this._context, this._call("material", slot));
 	}
 
 	get bounds()
 	{
-		return this._call("bounds");
+		return this._get("bounds");
 	}
 }
 for (const name of ["transform", "position", "scale", "quaternion", "rotationEulerRad", "rotationEulerDeg"])
@@ -918,7 +1060,7 @@ export class Material extends Handle
 {
 	_texture(slot)
 	{
-		const native = this._call("texture", slot);
+		const native = this._get("texture", slot);
 		if (!native)
 		{
 			return null;
@@ -983,7 +1125,7 @@ export class Light extends Handle
 {
 	get type()
 	{
-		return this._call("type");
+		return this._get("type");
 	}
 
 	setShadowOptions({ mapSize = 1024, constantBias = 0.001, normalBias = 1.0 } = {})
@@ -999,7 +1141,7 @@ export class Light extends Handle
 	/** The glTF node that places an imported light; null for a light that a scene created. */
 	get node()
 	{
-		return this._call("hasNode") ? new Node(this._context, this._call("node")) : null;
+		return this._get("hasNode") ? new Node(this._context, this._get("node")) : null;
 	}
 
 	close()
@@ -1009,7 +1151,7 @@ export class Light extends Handle
 
 	get closed()
 	{
-		return this._call("closed");
+		return this._get("closed");
 	}
 }
 for (const name of ["color", "intensity", "position", "direction", "range", "castsShadows"])
@@ -1028,12 +1170,12 @@ export class Target extends Handle
 
 	get width()
 	{
-		return this._call("width");
+		return this._get("width");
 	}
 
 	get height()
 	{
-		return this._call("height");
+		return this._get("height");
 	}
 
 	/**
@@ -1078,7 +1220,7 @@ export class Target extends Handle
 
 	get closed()
 	{
-		return this._call("closed");
+		return this._get("closed");
 	}
 }
 
@@ -1087,12 +1229,12 @@ export class OffscreenTarget extends Handle
 {
 	get width()
 	{
-		return this._call("width");
+		return this._get("width");
 	}
 
 	get height()
 	{
-		return this._call("height");
+		return this._get("height");
 	}
 
 	/**
@@ -1128,7 +1270,7 @@ export class OffscreenTarget extends Handle
 
 	get closed()
 	{
-		return this._call("closed");
+		return this._get("closed");
 	}
 }
 
@@ -1137,33 +1279,33 @@ export class Texture extends Handle
 {
 	get width()
 	{
-		return this._call("width");
+		return this._get("width");
 	}
 
 	get height()
 	{
-		return this._call("height");
+		return this._get("height");
 	}
 
 	get channels()
 	{
-		return this._call("channels");
+		return this._get("channels");
 	}
 
 	/** "uint8" or "float32". */
 	get dtype()
 	{
-		return this._call("isFloat") ? "float32" : "uint8";
+		return this._get("isFloat") ? "float32" : "uint8";
 	}
 
 	get colorSpace()
 	{
-		return this._call("colorSpace");
+		return this._get("colorSpace");
 	}
 
 	get mipmaps()
 	{
-		return this._call("mipmaps");
+		return this._get("mipmaps");
 	}
 
 	/** New pixels of the same size and type. */
@@ -1179,7 +1321,7 @@ export class Texture extends Handle
 
 	get closed()
 	{
-		return this._call("closed");
+		return this._get("closed");
 	}
 }
 
@@ -1191,17 +1333,17 @@ export class HostTexture extends Handle
 {
 	get width()
 	{
-		return this._call("width");
+		return this._get("width");
 	}
 
 	get height()
 	{
-		return this._call("height");
+		return this._get("height");
 	}
 
 	get colorSpace()
 	{
-		return this._call("colorSpace");
+		return this._get("colorSpace");
 	}
 
 	beginWrite()
@@ -1231,7 +1373,7 @@ export class HostTexture extends Handle
 
 	get writing()
 	{
-		return this._call("writing");
+		return this._get("writing");
 	}
 
 	close()
@@ -1241,6 +1383,6 @@ export class HostTexture extends Handle
 
 	get closed()
 	{
-		return this._call("closed");
+		return this._get("closed");
 	}
 }

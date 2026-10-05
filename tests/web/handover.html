@@ -1,0 +1,264 @@
+<!doctype html>
+<!-- Measures the hand-over of the page's context: WebGL calls and times of filly's enter,
+     render, and hand-back in a frame loop, property reads after the hand-back, and the state
+     that the page gets back. Also times Texture.update() of a full-HD texture and loads.
+     tests/test_web.py checks the call counts and the state; the times are for reports. -->
+<html><body><canvas width="16" height="16"></canvas>
+<script type="module">
+import { createRenderer, shapes } from "./filly/filly.js";
+
+const gl = document.querySelector("canvas").getContext("webgl2");
+const params = new URLSearchParams(location.search);
+const FRAMES = Number(params.get("frames") ?? 300);
+const results = {};
+
+// The page's own state between frames, as PIXI leaves it: textures on its units, premultiplied
+// uploads.
+const pageTextures = [];
+for (let unit = 0; unit < 4; unit++)
+{
+	const texture = gl.createTexture();
+	gl.activeTexture(gl.TEXTURE0 + unit);
+	gl.bindTexture(gl.TEXTURE_2D, texture);
+	gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 4, 4);
+	pageTextures.push(texture);
+}
+function pageFrame()
+{
+	for (let unit = 0; unit < pageTextures.length; unit++)
+	{
+		gl.activeTexture(gl.TEXTURE0 + unit);
+		gl.bindTexture(gl.TEXTURE_2D, pageTextures[unit]);
+	}
+	gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+}
+pageFrame();
+// Pixel-store state that the page sets once and may cache: before filly attaches (read by
+// its one query) and after (seen by its wrapper).
+gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+const renderer = await createRenderer(gl);
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+gl.pixelStorei(gl.PACK_ALIGNMENT, 8);
+const pixelStoreState = () => ({ flipY: gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL),
+	premultiply: gl.getParameter(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL),
+	unpackAlignment: gl.getParameter(gl.UNPACK_ALIGNMENT), packAlignment: gl.getParameter(gl.PACK_ALIGNMENT) });
+const scene = renderer.createScene();
+scene.background = [0.1, 0.2, 0.3, 1];
+const model = scene.createMesh({ ...shapes.box(), baseColor: [0.8, 0.5, 0.2, 1], roughness: 0.6 });
+const camera = scene.createCamera();
+camera.setPerspective({ fovY: 35, near: 0.5, far: 10 });
+camera.position = [0, 0, 3];
+camera.lookAt([0, 0, 0]);
+scene.camera = camera;
+scene.addDirectionalLight({ direction: [-1, -2, -1], intensity: 80000 });
+scene.setEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8, { intensity: 15000 });
+renderer.handBack();
+const targetTexture = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, targetTexture);
+gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 512, 512);
+const target = renderer.importTexture(targetTexture, 512, 512);
+await renderer.prepare(scene);
+
+// Counts calls of WebGL methods while counting is on.
+const counts = { on: false, total: 0, byName: {} };
+const proto = WebGL2RenderingContext.prototype;
+const originals = {};
+for (const name of Object.getOwnPropertyNames(proto))
+{
+	const descriptor = Object.getOwnPropertyDescriptor(proto, name);
+	if (typeof descriptor.value !== "function" || name === "constructor")
+	{
+		continue;
+	}
+	originals[name] = descriptor.value;
+}
+function wrap()
+{
+	for (const [name, fn] of Object.entries(originals))
+	{
+		proto[name] = function (...args)
+		{
+			if (counts.on)
+			{
+				counts.total++;
+				counts.byName[name] = (counts.byName[name] ?? 0) + 1;
+			}
+			return fn.apply(this, args);
+		};
+	}
+}
+function unwrap()
+{
+	for (const [name, fn] of Object.entries(originals))
+	{
+		proto[name] = fn;
+	}
+}
+function counted(fn)
+{
+	counts.total = 0;
+	counts.byName = {};
+	counts.on = true;
+	try
+	{
+		fn();
+	}
+	finally
+	{
+		counts.on = false;
+	}
+	return { total: counts.total, byName: { ...counts.byName } };
+}
+
+let angle = 0;
+const setter = () => { model.rotationEulerDeg = [20, angle++, 0]; };  // enters the context
+const render = () => renderer.render(scene, target);
+const handBack = () => renderer.handBack();
+// Warm up, so that later frames compile nothing.
+for (let i = 0; i < 10; i++)
+{
+	setter(); render(); handBack(); pageFrame();
+}
+
+wrap();
+const frame = { enter: counted(setter), render: counted(render), handBack: counted(handBack) };
+pageFrame();
+// Reads after the hand-back must not enter the context.
+setter(); render(); handBack(); pageFrame();
+frame.reads = counted(() =>
+{
+	results.readValues = { width: target.width, height: target.height, closed: target.closed,
+		frames: renderer.stats.framesRendered, position: model.position, scale: model.scale,
+		names: model.materialNames, sceneClosed: scene.closed };
+});
+unwrap();
+results.calls = frame;
+
+// The state that the core sees, and the state that the page gets back.
+setter();
+results.entered = pixelStoreState();
+render(); handBack();
+const units = gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS);
+const leftovers = [];
+for (let unit = 0; unit < units; unit++)
+{
+	gl.activeTexture(gl.TEXTURE0 + unit);
+	const bound = { 2: gl.getParameter(gl.TEXTURE_BINDING_2D), cube: gl.getParameter(gl.TEXTURE_BINDING_CUBE_MAP),
+		array: gl.getParameter(gl.TEXTURE_BINDING_2D_ARRAY), 3: gl.getParameter(gl.TEXTURE_BINDING_3D),
+		sampler: gl.getParameter(gl.SAMPLER_BINDING) };
+	for (const [key, value] of Object.entries(bound))
+	{
+		if (value && !(key === "2" && pageTextures[unit] === value))
+		{
+			leftovers.push(`${key}@${unit}`);
+		}
+	}
+}
+gl.activeTexture(gl.TEXTURE0);
+results.state = { units, leftovers, ...pixelStoreState(), error: gl.getError() };
+pageFrame();
+
+// Times, unwrapped: the mean of each phase over FRAMES frames.
+const times = { enter: 0, render: 0, handBack: 0 };
+for (let i = 0; i < FRAMES; i++)
+{
+	let start = performance.now();
+	setter();
+	let end = performance.now();
+	times.enter += end - start;
+	start = end;
+	render();
+	end = performance.now();
+	times.render += end - start;
+	start = end;
+	handBack();
+	end = performance.now();
+	times.handBack += end - start;
+	pageFrame();
+}
+for (const key of Object.keys(times))
+{
+	times[key] = times[key] * 1000 / FRAMES;  // microseconds
+}
+// Enter and hand-back alone, with no render between them.
+{
+	const start = performance.now();
+	for (let i = 0; i < FRAMES; i++)
+	{
+		setter(); handBack(); pageFrame();
+	}
+	times.enterHandBackOnly = (performance.now() - start) * 1000 / FRAMES;
+}
+// Thirteen pixel-store queries against thirteen pixel-store sets.
+{
+	const names = [gl.UNPACK_ALIGNMENT, gl.PACK_ALIGNMENT, gl.UNPACK_ROW_LENGTH, gl.UNPACK_IMAGE_HEIGHT,
+		gl.UNPACK_SKIP_PIXELS, gl.UNPACK_SKIP_ROWS, gl.UNPACK_SKIP_IMAGES, gl.PACK_ROW_LENGTH, gl.PACK_SKIP_PIXELS,
+		gl.PACK_SKIP_ROWS, gl.UNPACK_FLIP_Y_WEBGL, gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, gl.UNPACK_COLORSPACE_CONVERSION_WEBGL];
+	const values = names.map((name) => gl.getParameter(name));
+	const repeats = 2000;
+	let start = performance.now();
+	for (let i = 0; i < repeats; i++)
+	{
+		for (const name of names) gl.getParameter(name);
+	}
+	times.pixelStoreQuery13 = (performance.now() - start) * 1000 / repeats;
+	start = performance.now();
+	for (let i = 0; i < repeats; i++)
+	{
+		for (let n = 0; n < names.length; n++) gl.pixelStorei(names[n], values[n]);
+	}
+	times.pixelStoreSet13 = (performance.now() - start) * 1000 / repeats;
+}
+results.times = times;
+
+// Texture.update() of 1920 x 1080 RGBA bytes.
+{
+	const pixels = new Uint8Array(1920 * 1080 * 4).fill(128);
+	const texture = renderer.createTexture(pixels, { width: 1920, height: 1080, colorSpace: "srgb" });
+	const samples = [];
+	for (let i = 0; i < 40; i++)
+	{
+		pixels[i] = i;
+		const start = performance.now();
+		texture.update(pixels);
+		samples.push(performance.now() - start);
+		// Renders, so the queued upload runs and frees its staging slot.
+		render();
+		handBack();
+	}
+	samples.sort((a, b) => a - b);
+	results.textureUpdateMs = { median: samples[samples.length >> 1], min: samples[0] };
+	texture.close();
+	handBack();
+}
+
+// Loads of the same GLB from bytes and from files.
+if (params.get("model"))
+{
+	const bytes = new Uint8Array(await (await fetch(params.get("model"))).arrayBuffer());
+	const load = { bytes: [], files: [] };
+	for (let i = 0; i < 5; i++)
+	{
+		for (const kind of ["bytes", "files"])
+		{
+			const loadScene = renderer.createScene();
+			const start = performance.now();
+			const loaded = kind === "bytes" ? loadScene.load(bytes) : loadScene.loadFiles("model.glb", { "model.glb": bytes });
+			load[kind].push(performance.now() - start);
+			loaded.close();
+			loadScene.close();
+			renderer.handBack();
+		}
+	}
+	for (const kind of ["bytes", "files"])
+	{
+		load[kind].sort((a, b) => a - b);
+		load[kind] = load[kind][2];
+	}
+	results.loadMs = load;
+}
+
+renderer.close();
+window.testResult = results;
+</script></body></html>

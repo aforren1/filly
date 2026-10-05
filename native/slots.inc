@@ -258,6 +258,9 @@ void TextureData::release() noexcept {
             host_done = nullptr;
             state->interop->destroy(*state->engine, read_done);
         }
+        // A slot from begin_update() has no upload that would mark it free.
+        if (pending) pending->busy = false;
+        pending = nullptr;
         if (upload.busy()) detail::flush_and_wait(*state->engine);
         state->engine->destroy(texture);
     }

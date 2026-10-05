@@ -483,3 +483,20 @@ def test_channel_mixing_viewport(renderer, clear):
     outside = [124, 124, 124, 255] if clear else [63, 63, 63, 255]
     np.testing.assert_array_equal(image[2, 2], outside)
     np.testing.assert_array_equal(image[30, 30], outside)
+
+
+def test_fxaa_matches_between_transparent_and_opaque_views(renderer, scene, triangle_glb):
+    """With an opaque background, a transparent view's pixels are all opaque, so FXAA must give
+    the opaque view's result. Both modes measure luma from the encoded color."""
+    doc, binary = unpack(triangle_glb)
+    doc["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"] = [0.9, 0.6, 0.2, 1]
+    scene.load(pack(doc, binary))
+    scene.background = (0.1, 0.3, 0.5, 1)
+    scene.antialiasing = "fxaa"
+    images = []
+    for transparent in (False, True):
+        scene.transparent = transparent
+        images.append(render_image(renderer, scene, 64))
+    np.testing.assert_array_equal(images[1], images[0])
+    # FXAA changed the edges: some pixels are between the two colors.
+    assert len(np.unique(images[0].reshape(-1, 4), axis=0)) > 2

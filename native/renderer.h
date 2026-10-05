@@ -44,9 +44,37 @@ struct ReadbackData;
 struct PrepareData;
 }
 
+// A material parameter that a clip animates through KHR_animation_pointer: the material's name
+// in Model::material_names() and the parameter, for example "baseColorFactor". Texture transforms
+// are reported as the parameter of their matrix, for example "baseColorUvMatrix".
+struct AnimatedProperty {
+    std::string material, property;
+};
+
 struct AnimationInfo {
     std::string name;
     float duration;
+    std::vector<AnimatedProperty> material_properties;
+};
+
+// Memory that a model's asset holds, which the model shares with its clones and its prototype.
+// It is freed when the last of them closes. GPU sizes follow each texture's internal format and
+// mip levels and each buffer's layout as gltfio uploads it; drivers add their own overhead.
+struct ModelMemory {
+    uint64_t gpu_texture_bytes = 0;
+    // Vertex, index, and morph target buffers.
+    uint64_t gpu_geometry_bytes = 0;
+    // The source data that clone() needs (the document, its buffers, and filly's tables for
+    // custom materials and property animation) if the asset is clonable, and the instances'
+    // animators. Generated meshes also keep their vertex arrays and staging buffers.
+    uint64_t cpu_bytes = 0;
+    // Bytes that each instance adds: on the GPU its bone and morph target buffers, on the CPU its
+    // animator's copy of the clips. gltfio keeps them until the asset goes, also after the
+    // instance's model closes; cpu_bytes and gpu_geometry_bytes include them for every
+    // instance created so far.
+    uint64_t clone_gpu_bytes = 0, clone_cpu_bytes = 0;
+    // Live models that share the asset.
+    size_t models = 0;
 };
 
 // Borrowed views of caller arrays. Null members are absent.
@@ -160,7 +188,7 @@ public:
     // Model.bounds restricted to this node and its descendants.
     std::array<Vec3, 2> bounds() const;
     size_t morph_target_count() const;
-    void set_morph_weights(const std::vector<float>& values);
+    void set_morph_weights(const float* values, size_t count);
     bool same(const Node& other) const;
     uintptr_t key() const;
 private:
@@ -223,7 +251,10 @@ public:
     explicit Model(std::shared_ptr<detail::ModelData> data);
     void close();
     bool closed() const;
-    Model clone();
+    // Another instance of the asset in `scene`, which must belong to the same renderer; null
+    // selects this model's scene.
+    Model clone(const class Scene* scene = nullptr);
+    ModelMemory memory() const;
     std::array<Vec3, 2> bounds() const;
     Matrix transform() const;
     void set_transform(const Matrix& value);
@@ -278,7 +309,8 @@ public:
     // warnings; with strict, the first one throws AssetError instead, as do unsupported
     // required extensions. clonable keeps the source data that Model::clone() needs.
     Model load(const std::string& path, bool strict, bool clonable, std::vector<std::string>& warnings);
-    Model load(std::vector<uint8_t> bytes, bool strict, bool clonable, std::vector<std::string>& warnings);
+    // Copies the bytes.
+    Model load(const uint8_t* bytes, size_t size, bool strict, bool clonable, std::vector<std::string>& warnings);
     // A model with one node and one glTF material whose geometry is the caller's arrays.
     // arrays.indices and arrays.triangles are required.
     Model create_mesh(const MeshArrays& arrays, const MeshMaterial& material);
@@ -322,7 +354,8 @@ public:
     bool vignette() const;
     void set_vignette(bool value);
     void set_vignette_options(float midpoint, float roundness, float feather, Vec3 color);
-    void set_environment(const std::vector<float>& pixels, uint32_t width, uint32_t height,
+    // pixels: width * height * 3 values (count), rows from the top. They are copied.
+    void set_environment(const float* pixels, size_t count, uint32_t width, uint32_t height,
                          float intensity, float rotation);
     void load_environment(const std::string& path, float intensity, float rotation);
     void load_environment_ktx(const std::string& ibl_path, const std::string& skybox_path,
@@ -342,6 +375,7 @@ private:
     void set_uniform_environment(Vec3 radiance, float intensity, float rotation);
     std::shared_ptr<detail::SceneData> data_;
     friend class Renderer;
+    friend class Model;
 };
 
 // Vertex arrays for simple shapes, as Scene::create_mesh takes them: positions and normals are
@@ -368,6 +402,13 @@ public:
     bool mipmaps() const;
     // Pixels are rows from the top, tightly packed, in the type and channel count of creation.
     void update(const void* pixels, size_t bytes);
+    // update() in two steps, for callers that can write the pixels straight into the upload
+    // storage and save update()'s copy. begin_update() returns storage for `bytes` bytes in the
+    // layout of update(); commit_update() uploads it. A second begin_update() before the commit
+    // returns the same storage. 1-channel sRGB textures expand to RGBA on upload and must use
+    // update().
+    uint8_t* begin_update(size_t bytes);
+    void commit_update();
     void close();
     bool closed() const;
     bool same(const Texture& other) const;
@@ -397,6 +438,13 @@ private:
     std::shared_ptr<detail::TextureData> data_;
 };
 
+// RGBA bytes, rows from the top. The storage is not zero-filled before the GPU writes it: at
+// 1920 x 1080 the fill cost about 2 ms per read.
+struct PixelBuffer {
+    std::unique_ptr<uint8_t[]> data;
+    size_t size = 0;
+};
+
 // A readback that OffscreenTarget::begin_read() started. WebGL completes GPU readbacks only
 // after control returns to the browser, so the web build polls ready() on later turns of its
 // event loop; on the desktop the first ready() completes it.
@@ -409,6 +457,7 @@ public:
     std::vector<uint8_t> take();
 private:
     std::shared_ptr<detail::ReadbackData> data_;
+    friend class OffscreenTarget;
 };
 
 // Shader compilation that Renderer::prepare() started. Compilation runs in the background:
@@ -430,7 +479,7 @@ public:
     explicit OffscreenTarget(std::shared_ptr<detail::TargetData> data);
     uint32_t width() const;
     uint32_t height() const;
-    std::vector<uint8_t> read() const;
+    PixelBuffer read() const;
     Readback begin_read() const;
     void close();
     bool closed() const;

@@ -37,12 +37,12 @@ context before the page's next draw, and no fences are needed. The page needs no
 ## Handing the context over
 
 The page's renderer and Filament each cache GL state. Each must not trust state that the other
-changed. `filly.mjs` therefore keeps the context in one of two modes:
+changed. `filly.js` therefore keeps the context in one of two modes:
 
 | Step | When | What it does | Why |
 | --- | --- | --- | --- |
-| Enter | Before the first filly call after the page drew | Saves the page's pixel-store state and sets GL defaults; unbinds the page's vertex array object, array buffer, framebuffer, and program; queues `Engine::resetBackendState()` | PIXI leaves `UNPACK_PREMULTIPLY_ALPHA_WEBGL` set, which WebGL forbids for 3D texture uploads, such as the color-grading LUT in the spike. Filament assumes the default vertex array object when it binds buffers. `resetBackendState()` makes Filament set its state again |
-| Hand back | Before the page draws (PIXI: its `prerender` event) | Unbinds textures and sampler objects on every unit, buffers, framebuffers, and the program; restores GL defaults and the page's pixel-store state; calls the page's reset hook (PIXI: `renderer.reset()`) | After a render, Filament leaves sampler objects bound on units 0 to 7, and a sampler object overrides the filtering of the texture on its unit. PIXI's `reset()` forgets its texture bindings without unbinding them, and its batch shader declares a sampler for every unit |
+| Enter | Before the first filly call after the page drew, except property reads | Sets the pixel-store values that the page changed to GL defaults; unbinds the page's vertex array object, array buffer, framebuffer, and program; queues `Engine::resetBackendState()` | PIXI leaves `UNPACK_PREMULTIPLY_ALPHA_WEBGL` set, which WebGL forbids for 3D texture uploads, such as the color-grading LUT in the spike. Filament assumes the default vertex array object when it binds buffers. `resetBackendState()` makes Filament set its state again |
+| Hand back | Before the page draws (PIXI: its `prerender` event) | Unbinds textures and sampler objects on the units that the core used, buffers, framebuffers, and the program; restores GL defaults; restores the page's pixel-store values; calls the page's reset hook (PIXI: `renderer.reset()`) | After a render, Filament leaves sampler objects bound on units 0 to 7, and a sampler object overrides the filtering of the texture on its unit. PIXI's `reset()` forgets its texture bindings without unbinding them, and its batch shader declares a sampler for every unit |
 
 Before these steps, the spike showed two failures in PsychoJS. PIXI's draws failed with
 `INVALID_OPERATION` once Filament's engine existed, also without a render; unbinding PIXI's vertex
@@ -50,6 +50,41 @@ array object before each Filament call fixed it. Filament's image was black, and
 reported a rejected 3D texture upload with `UNPACK_PREMULTIPLY_ALPHA_WEBGL` set; resetting the
 pixel-store state fixed it. The texture and sampler unbinding is a precaution: no failure was
 traced to it.
+
+### Cost of the hand-over
+
+Each frame enters the context once and hands it back once. The steps use few WebGL calls and no
+queries:
+
+- **No queries.** Chrome answers queries of `PACK_ALIGNMENT`, `UNPACK_ROW_LENGTH`,
+  `UNPACK_IMAGE_HEIGHT`, and `PACK_ROW_LENGTH` with a round trip to the GPU process, about 0.2 ms
+  each. Firefox does the same for `ACTIVE_TEXTURE`, about 0.7 ms. Thus enter does not query the
+  page's pixel-store state. `filly.js` reads it once, when it attaches to the context, and
+  replaces `pixelStorei` on that context with a function that records the page's values. The
+  core's calls skip that function. Hand back restores the page's values, because a page renderer
+  can cache them: PIXI 6 sets its values before each upload, but Babylon.js caches
+  `UNPACK_FLIP_Y_WEBGL`.
+- **Only the units that the core used.** `web/gl_tracking.js` replaces Emscripten's
+  `glBindTexture`, `glBindSampler`, `glActiveTexture`, and `glPixelStorei`. Only the core calls
+  these, never the page. They record what the core binds and sets, and hand back undoes only
+  that. A lit scene uses about 8 units.
+- **Property reads.** Reads such as `target.width` or `renderer.stats` call no GL and queue no
+  GL work, so they do not enter the context. A read after hand back thus does not take the
+  context from the page again.
+
+Filament's own reset still unbinds every unit at the next render: 6 calls per unit, with 32
+units on ANGLE. The core reports at most 32 units to Filament, the limit of its samplers on
+WebGL2, so drivers with more units do not add calls.
+
+In a frame loop that rendered a lit box, with Chrome on the test laptop (provisional: measured
+while other GPU work ran):
+
+| | Before | After |
+| --- | --- | --- |
+| WebGL calls in enter | 30 (13 queries) | 14 (no queries) |
+| WebGL calls in hand back | 224 | 44 |
+| WebGL calls of a property read | 30 | 0 |
+| Time of enter and hand back | 0.51 ms | 0.007 ms |
 
 ## Workarounds in the core
 
@@ -65,7 +100,7 @@ traced to it.
 - **RTTI.** Filament's WebAssembly libraries have no RTTI, and filly subclasses their types, so
   the core uses no `dynamic_pointer_cast`.
 - **Exceptions.** The core throws C++ exceptions as on the desktop, as WebAssembly exceptions.
-  `filly.mjs` turns them into `FillyError`, `AssetError`, `InteropError`, `BackendError`, or
+  `filly.js` turns them into `FillyError`, `AssetError`, `InteropError`, `BackendError`, or
   `RangeError`, with the message of the C++ exception.
 - **Threads.** WebP images decode at once instead of in a `std::async` task.
 

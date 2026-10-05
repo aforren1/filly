@@ -90,6 +90,20 @@ void set_log_level(const std::string& level) {
 }
 
 namespace {
+// The error for a name that a model does not have. It lists the names that it has, because users
+// often know a clip or material only from a modeling tool, where names can differ.
+AssetError unknown_name(const char* what, const std::string& name, const std::vector<std::string>& names) {
+    constexpr size_t shown = 20;
+    std::string list;
+    size_t count = 0;
+    for (const auto& candidate : names) {
+        if (candidate.empty()) continue;
+        if (count++ < shown) list += (list.empty() ? "'" : ", '") + candidate + "'";
+    }
+    if (count > shown) list += ", and " + std::to_string(count - shown) + " more";
+    return AssetError(std::string("Unknown ") + what + " '" + name + "'; " +
+                      (count ? "the model has: " + list : std::string("the model has no named ") + what + "s"));
+}
 template <class T> void finite(T value) {
     if (!std::isfinite(value)) throw std::invalid_argument("Values must be finite");
 }
@@ -132,13 +146,21 @@ struct State {
     f::SwapChain* frame_chain = nullptr;
     // Reused for every environment. Destroying these objects after each prefilter made later
     // frames black when set_environment() ran before a model was loaded.
+    // Each filter builds its material on first use: KTX environments need only the irradiance
+    // filter, and only for diffuse-transmission materials.
     struct Prefilter {
         IBLPrefilterContext context;
-        IBLPrefilterContext::EquirectangularToCubemap to_cube;
-        IBLPrefilterContext::SpecularFilter specular;
-        IBLPrefilterContext::IrradianceFilter irradiance;
-        explicit Prefilter(f::Engine& engine)
-            : context(engine), to_cube(context), specular(context), irradiance(context) {}
+        std::unique_ptr<IBLPrefilterContext::EquirectangularToCubemap> cube_filter;
+        std::unique_ptr<IBLPrefilterContext::SpecularFilter> specular_filter;
+        std::unique_ptr<IBLPrefilterContext::IrradianceFilter> irradiance_filter;
+        explicit Prefilter(f::Engine& engine) : context(engine) {}
+        template <class T> T& filter(std::unique_ptr<T>& value) {
+            if (!value) value = std::make_unique<T>(context);
+            return *value;
+        }
+        auto& to_cube() { return filter(cube_filter); }
+        auto& specular() { return filter(specular_filter); }
+        auto& irradiance() { return filter(irradiance_filter); }
     };
     std::unique_ptr<Prefilter> prefilter;
     g::MaterialProvider* materials = nullptr;
@@ -288,6 +310,15 @@ struct SceneData : Resource {
     f::IndirectLight* environment = nullptr;
     f::Texture* reflections = nullptr;
     f::Texture* irradiance = nullptr;
+    // Level 0 of a KTX environment's IBL, kept until a material needs `irradiance`.
+    struct PendingIrradiance {
+        std::vector<uint8_t> faces;
+        uint32_t size = 0;
+        f::Texture::InternalFormat format{};
+        f::Texture::Format pixels{};
+        f::Texture::Type type{};
+    };
+    std::unique_ptr<PendingIrradiance> pending_irradiance;
     f::Texture* skybox_texture = nullptr;
     f::Skybox* skybox = nullptr;
     bool environment_visible = false;
@@ -329,6 +360,7 @@ struct SceneData : Resource {
         environment = nullptr;
         skybox = nullptr; skybox_texture = nullptr;
         reflections = irradiance = nullptr;
+        pending_irradiance.reset();
         active_camera.reset();
         children.clear();
         dirty_bones.clear();
@@ -423,6 +455,8 @@ struct LightCone {
 struct AnimationClip {
     std::string name;
     int native_index = -1;
+    // See AnimationSource::needs_rest.
+    bool needs_rest = true;
     float duration = 0;
     std::vector<PropertyTrack> tracks;
 };
@@ -497,6 +531,13 @@ struct AssetData : Resource {
     // Provider-built material textures of every instance. Their material instances live until
     // the asset is destroyed, so the textures must too.
     std::vector<f::Texture*> textures;
+    // The textures that gltfio decoded for the asset, which gltfio owns. Only Model::memory()
+    // reads them; Filament's texture getters issue no commands.
+    std::vector<const f::Texture*> loaded_textures;
+    // CPU bytes of gltfio's source data, measured at load; 0 once it is released.
+    uint64_t source_bytes = 0;
+    // Instances created, each of which keeps per-instance buffers until the asset goes.
+    size_t instances = 0;
     // Set for generated meshes, whose renderables use these buffers instead of the asset's.
     std::unique_ptr<MeshGeometry> mesh;
     void release() noexcept override {
@@ -508,6 +549,8 @@ struct AssetData : Resource {
         asset = nullptr;
         buffers.reset();
         textures.clear();
+        loaded_textures.clear();
+        if (prepared) prepared->decoded.clear();
         mesh.reset();
     }
     ~AssetData() override { release(); }
@@ -550,6 +593,8 @@ struct ModelData : Resource, std::enable_shared_from_this<ModelData> {
     g::FilamentInstance* instance = nullptr;
     bool visible = true, skinned = false, bones_dirty = false;
     g::Animator* animator = nullptr;
+    // The animator's rest animation (PreparedAsset::rest_animation), or -1.
+    int rest_animation = -1;
     // Entities by glTF node index; null for nodes that gltfio did not instantiate.
     std::vector<utils::Entity> nodes;
     // (entity id, glTF node index) for this instance's node entities, sorted by entity id.
@@ -740,7 +785,9 @@ struct TargetData : Resource {
     // filly's encode pass writes `color` through `output`. With FXAA, the encode pass writes
     // `ldr` and FXAA writes `color`. When Filament's color grading encodes (a channel-mixing tone
     // mapper with sRGB encoding), the scene renders into the RGBA8 `graded` instead, as
-    // gltf_viewer renders into its RGBA8 swap chain, and the encode pass copies it.
+    // gltf_viewer renders into its RGBA8 swap chain, and the encode pass copies it. Allocating
+    // the default route with the target instead made no measurable difference to the first
+    // frame, and would cost a target that only the direct path renders 8 bytes per pixel.
     f::Texture* linear = nullptr;
     f::Texture* linear_depth = nullptr;
     f::RenderTarget* linear_target = nullptr;
@@ -789,6 +836,8 @@ struct TextureData : Resource {
     bool expand = false;
     size_t input_bytes = 0;
     Staging upload;
+    // The slot that begin_update() handed out and commit_update() has not uploaded.
+    Staging::Slot* pending = nullptr;
     // Models whose materials sample this texture. Closing the texture removes it from them.
     std::vector<std::weak_ptr<ModelData>> users;
     // Host input: its sRGB view (or zero), the fence of the last host write, and the frame
@@ -797,6 +846,8 @@ struct TextureData : Resource {
     void* host_done = nullptr;
     SyncPoint read_done;
     bool writing = false;
+    // Whether a model of the scene being rendered samples it; set by each render.
+    bool sampled = false;
     void check() const {
         state->check();
         if (!texture) throw FillyError("Texture is closed");
@@ -823,7 +874,44 @@ void CameraData::fit_aspect(double target) {
     apply_fit();
 }
 
+// Prefilters a KTX environment's irradiance cubemap. The IBL file has fewer mip levels than the
+// irradiance filter needs, so its level 0 goes into a texture with a full mip chain, in the
+// same face layout as the KTX upload.
+void build_pending_irradiance(SceneData& scene) {
+    auto pending = std::move(scene.pending_irradiance);
+    auto& engine = *scene.state->engine;
+    auto* faces = new std::vector<uint8_t>(std::move(pending->faces));
+    auto* source = f::Texture::Builder().width(pending->size).height(pending->size).levels(0xff)
+        .sampler(f::Texture::Sampler::SAMPLER_CUBEMAP).format(pending->format)
+        .usage(f::Texture::Usage::SAMPLEABLE | f::Texture::Usage::COLOR_ATTACHMENT |
+               f::Texture::Usage::GEN_MIPMAPPABLE | f::Texture::Usage::UPLOADABLE).build(engine);
+    source->setImage(engine, 0, 0, 0, 0, pending->size, pending->size, 6,
+        f::Texture::PixelBufferDescriptor(faces->data(), faces->size(), pending->pixels, pending->type,
+            [](void*, size_t, void* user) { delete static_cast<std::vector<uint8_t>*>(user); }, faces));
+    source->generateMipmaps(engine);
+    auto& prefilter = scene.state->prefilter;
+    if (!prefilter) prefilter = std::make_unique<State::Prefilter>(engine);
+    IBLPrefilterContext::IrradianceFilter::Options options;
+    options.generateMipmap = false;
+    scene.irradiance = prefilter->irradiance()(options, source);
+    engine.destroy(source);
+    // Loading, not the first frame, pays for the filter's GPU work.
+    flush_and_wait(engine);
+}
+
 void update_diffuse_environment(SceneData& scene) {
+    if (scene.pending_irradiance) {
+        bool needed = false;
+        auto needs = [](const f::MaterialInstance* instance) { return instance->getMaterial()->hasParameter("backlightIntensity"); };
+        for (const auto& child : scene.children) {
+            auto model = resource_cast<ModelData>(child);
+            if (!model || !model->asset) continue;
+            for (size_t i = 0; i < model->instance->getMaterialInstanceCount(); ++i)
+                needed = needed || needs(model->instance->getMaterialInstances()[i]);
+            for (const auto& local : model->locals) needed = needed || needs(local.copy);
+        }
+        if (needed) build_pending_irradiance(scene);
+    }
     const float intensity = scene.environment ? scene.environment->getIntensity() : 0;
     for (const auto& child : scene.children) {
         auto model = resource_cast<ModelData>(child);
@@ -1107,7 +1195,7 @@ void configure_output(State& state, const SceneData& scene, const TargetData& ta
     const bool fxaa = scene.antialiasing == "fxaa";
     const bool graded = scene.filament_encodes;
     const int flags = (scene.encoding == "srgb" ? ENCODE_SRGB : 0) | (scene.transparent ? ENCODE_TRANSPARENT : 0)
-                      | (scene.dithering ? ENCODE_DITHER : 0) | (fxaa && !scene.transparent ? ENCODE_LUMA : 0);
+                      | (scene.dithering ? ENCODE_DITHER : 0);
     auto& encode = graded ? state.encode_graded : state.encode;
     auto* source = graded ? target.graded : target.linear;
     if (encode.input != source) {
@@ -1364,7 +1452,6 @@ void Renderer::render(const Scene& scene, const ImportedTarget& target, const Re
     state_->interop->enqueue_wait(*state_->engine, data.host_done);
     data.host_done = nullptr;
     submit(scene, data, options);
-    data.ready = state_->interop->signal(*state_->engine);
     data.access = detail::TargetData::Access::SUBMITTED;
     state_->engine->flush();
     state_->stats.cpu_submit_ms = std::chrono::duration<double, std::milli>(
@@ -1459,8 +1546,16 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
         state_->interop->set_srgb_writes(*state_->engine, gpu_srgb);
         state_->srgb_writes = gpu_srgb;
     }
-    // Host writes to sampled textures finish before this frame reads them.
+    // Host writes to sampled textures finish before this frame reads them. Inputs that no model
+    // of this scene samples keep their write fence for a frame that does.
+    bool sampling = false;
     for (auto* input : state_->host_inputs) {
+        input->sampled = std::any_of(input->users.begin(), input->users.end(), [&](const auto& user) {
+            const auto model = user.lock();
+            return model && model->asset && model->scene.lock().get() == &data;
+        });
+        if (!input->sampled) continue;
+        sampling = true;
         state_->interop->enqueue_wait(*state_->engine, input->host_done);
         input->host_done = nullptr;
     }
@@ -1516,10 +1611,17 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
     if (fill) { fill->setRenderTarget(nullptr); fill->setCamera(nullptr); }
     if (camera != data.active_camera.get())
         view->setCamera(data.active_camera ? data.active_camera->camera : nullptr);
-    // The host waits for this frame before it writes a sampled texture again.
-    for (auto* input : state_->host_inputs) {
-        state_->interop->destroy(*state_->engine, input->read_done);
-        input->read_done = state_->interop->signal(*state_->engine);
+    // The host waits for this frame before it samples the target, or writes a texture that the
+    // frame sampled. Each fence costs a glFlush() on Filament's thread, so they share one.
+    if (target.imported || sampling) {
+        auto done = state_->interop->signal(*state_->engine);
+        for (auto* input : state_->host_inputs) {
+            if (!input->sampled) continue;
+            state_->interop->destroy(*state_->engine, input->read_done);
+            input->read_done = done;
+        }
+        if (target.imported) target.ready = std::move(done);
+        else state_->interop->destroy(*state_->engine, done);
     }
     if (!target.imported) state_->engine->flush();
     target.rendered = true;
@@ -1709,6 +1811,47 @@ struct ProviderResults {
         records = detail::take_material_records(provider);
     }
 };
+// Forwards to a gltfio texture provider and records the textures it creates, for
+// Model::memory(). gltfio exposes no list of an asset's textures.
+struct RecordingProvider final : g::TextureProvider {
+    RecordingProvider(g::TextureProvider* inner, std::vector<const f::Texture*>& out) : inner(inner), out(out) {}
+    f::Texture* pushTexture(const uint8_t* data, size_t size, const char* mime, TextureFlags flags) override {
+        auto* texture = inner->pushTexture(data, size, mime, flags);
+        if (texture) out.push_back(texture);
+        return texture;
+    }
+    f::Texture* popTexture() override { return inner->popTexture(); }
+    void updateQueue() override { inner->updateQueue(); }
+    const char* getPushMessage() const override { return inner->getPushMessage(); }
+    const char* getPopMessage() const override { return inner->getPopMessage(); }
+    void waitForCompletion() override { inner->waitForCompletion(); }
+    void cancelDecoding() override { inner->cancelDecoding(); }
+    size_t getPushedCount() const override { return inner->getPushedCount(); }
+    size_t getPoppedCount() const override { return inner->getPoppedCount(); }
+    size_t getDecodedCount() const override { return inner->getDecodedCount(); }
+    g::TextureProvider* inner;
+    std::vector<const f::Texture*>& out;
+};
+// Approximate CPU bytes of a cgltf parse beyond the document bytes that it points into.
+uint64_t parse_bytes(const cgltf_data& d) {
+    uint64_t total = sizeof(d) + d.nodes_count * sizeof(cgltf_node) + d.meshes_count * sizeof(cgltf_mesh)
+        + d.accessors_count * sizeof(cgltf_accessor) + d.buffer_views_count * sizeof(cgltf_buffer_view)
+        + d.buffers_count * sizeof(cgltf_buffer) + d.materials_count * sizeof(cgltf_material)
+        + d.textures_count * sizeof(cgltf_texture) + d.images_count * sizeof(cgltf_image)
+        + d.samplers_count * sizeof(cgltf_sampler) + d.skins_count * sizeof(cgltf_skin)
+        + d.cameras_count * sizeof(cgltf_camera) + d.lights_count * sizeof(cgltf_light)
+        + d.animations_count * sizeof(cgltf_animation);
+    for (size_t i = 0; i < d.meshes_count; ++i) {
+        total += d.meshes[i].primitives_count * sizeof(cgltf_primitive);
+        for (size_t p = 0; p < d.meshes[i].primitives_count; ++p)
+            total += d.meshes[i].primitives[p].attributes_count * sizeof(cgltf_attribute)
+                     + d.meshes[i].primitives[p].targets_count * sizeof(cgltf_morph_target);
+    }
+    for (size_t i = 0; i < d.animations_count; ++i)
+        total += d.animations[i].samplers_count * sizeof(cgltf_animation_sampler)
+                 + d.animations[i].channels_count * sizeof(cgltf_animation_channel);
+    return total;
+}
 std::filesystem::path utf8_path(const std::string& value) {
     const auto* first = reinterpret_cast<const char8_t*>(value.data());
     return std::filesystem::path(std::u8string(first, first + value.size()));
@@ -1730,9 +1873,9 @@ Model Scene::load(const std::string& path, bool strict, bool clonable, std::vect
     }
     return load_document(std::move(bytes), absolute, strict, clonable, warnings);
 }
-Model Scene::load(std::vector<uint8_t> bytes, bool strict, bool clonable, std::vector<std::string>& warnings) {
+Model Scene::load(const uint8_t* bytes, size_t size, bool strict, bool clonable, std::vector<std::string>& warnings) {
     data_->check();
-    return load_document(std::move(bytes), std::string(), strict, clonable, warnings);
+    return load_document(std::vector<uint8_t>(bytes, bytes + size), std::string(), strict, clonable, warnings);
 }
 
 Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, bool strict, bool clonable,
@@ -1800,9 +1943,11 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
         if (!std::filesystem::is_regular_file(resource, error)) throw AssetError("Missing glTF resource: " + std::string(uri));
         image_files.emplace_back(uri, resource);
     }
-    std::unique_ptr<g::TextureProvider> decoder(g::createStbProvider(state->engine));
-    std::unique_ptr<g::TextureProvider> ktx(g::createKtx2Provider(state->engine));
-    std::unique_ptr<g::TextureProvider> webp(detail::create_webp_provider(state->engine));
+    std::unique_ptr<g::TextureProvider> stb(g::createStbProvider(state->engine));
+    std::unique_ptr<g::TextureProvider> ktx2(g::createKtx2Provider(state->engine));
+    std::unique_ptr<g::TextureProvider> webp_decoder(detail::create_webp_provider(state->engine));
+    RecordingProvider decoder(stb.get(), shared->loaded_textures), ktx(ktx2.get(), shared->loaded_textures),
+        webp(webp_decoder.get(), shared->loaded_textures);
     {
         g::ResourceLoader resources({state->engine, path.empty() ? nullptr : path.c_str(), true});
         for (const auto& [uri, file] : image_files) {
@@ -1818,10 +1963,10 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
                     delete static_cast<std::vector<uint8_t>*>(user);
                 }, payload));
         }
-        resources.addTextureProvider("image/png", decoder.get());
-        resources.addTextureProvider("image/jpeg", decoder.get());
-        resources.addTextureProvider("image/ktx2", ktx.get());
-        resources.addTextureProvider("image/webp", webp.get());
+        resources.addTextureProvider("image/png", &decoder);
+        resources.addTextureProvider("image/jpeg", &decoder);
+        resources.addTextureProvider("image/ktx2", &ktx);
+        resources.addTextureProvider("image/webp", &webp);
         if (!resources.loadResources(asset)) throw AssetError("Could not load glTF resources");
         // Upload lifetimes do not need this wait. It keeps the upload out of the first trial frame.
         detail::flush_and_wait(*state->engine);
@@ -1839,7 +1984,13 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
     // buffers it points into, and the instance tables after this point, so they are kept only
     // for assets that clone() may copy.
     shared->clonable = clonable;
-    if (!clonable) {
+    shared->instances = 1;
+    if (clonable) {
+        // gltfio keeps its own copy of the document, and the parse points into it and into the
+        // buffers that preparation loaded.
+        shared->source_bytes = prepared.bytes.size() + parse_bytes(*source);
+        for (const auto& storage : shared->buffers->storage) shared->source_bytes += storage.size();
+    } else {
         asset->releaseSourceData();
         shared->buffers.reset();
         auto& kept = *shared->prepared;
@@ -1850,6 +2001,7 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
         kept.animations = {};
         kept.cameras = {};
         kept.materials = {};
+        kept.decoded = {};
     }
     data_->children.push_back(model);
     detail::update_visibility(*model);
@@ -1885,15 +2037,21 @@ Model Scene::create_mesh(const MeshArrays& arrays, const MeshMaterial& material)
     return model;
 }
 
-Model Model::clone() {
+Model Model::clone(const Scene* into) {
     data_->check();
     auto state = data_->state;
-    auto scene = data_->scene.lock();
+    // The asset belongs to the renderer, not to a scene, so a clone can go into any scene of it.
+    // Each model holds the asset, so a scene that closes takes only its own models with it.
+    auto scene = into ? into->data_ : data_->scene.lock();
     if (!scene || !scene->scene) throw FillyError("Scene is closed");
+    if (scene->state != state) throw std::invalid_argument("Clone into a scene of the same renderer");
     auto& shared = *data_->shared;
     if (!shared.clonable)
         throw FillyError("This asset released its source data after loading; "
                             "load it with scene.load(source, clonable=True) to clone it");
+    if (shared.masked && scene->direct)
+        throw AssetError("Asset has alphaMode MASK materials, which need the exact output path, but "
+                         "the scene's output_path is 'direct'; set output_path = 'exact' first");
     ProviderResults results;
     std::vector<std::pair<uint32_t, uint32_t>> node_indices;
     g::FilamentInstance* instance = nullptr;
@@ -1913,6 +2071,7 @@ Model Model::clone() {
     model->records = std::move(results.records);
     model->node_indices = std::move(node_indices);
     detail::initialize_model(*model, results.bindings);
+    ++shared.instances;
     if (shared.mesh) detail::attach_geometry(*model);
     if (shared.masked) ++scene->masked;
     scene->children.push_back(model);
@@ -2209,7 +2368,7 @@ Node Model::node(const std::string& name) const {
     const auto& sources = data_->shared->prepared->nodes;
     for (size_t i = 0; i < data_->nodes.size() && i < sources.size(); ++i)
         if (data_->nodes[i] && sources[i].name == name) matches.push_back(i);
-    if (matches.empty()) throw AssetError("Unknown node: " + name);
+    if (matches.empty()) throw unknown_name("node", name, node_names());
     if (matches.size() > 1) {
         std::string list;
         for (auto i : matches) list += (list.empty() ? "" : ", ") + std::to_string(i);
@@ -2240,10 +2399,15 @@ std::vector<std::string> Model::material_names() const {
     return names;
 }
 Material Model::material(const std::string& name) const {
-    auto names = material_names();
+    data_->check();
+    const auto* instances = data_->instance->getMaterialInstances();
     size_t index = 0, count = 0;
-    for (size_t i = 0; i < names.size(); ++i) if (names[i] == name) { index = i; ++count; }
-    if (count != 1) throw AssetError(count ? "Ambiguous material name: " + name : "Unknown material: " + name);
+    for (size_t i = 0; i < data_->instance->getMaterialInstanceCount(); ++i) {
+        const char* candidate = instances[i]->getName();
+        if (name == (candidate ? candidate : "")) { index = i; ++count; }
+    }
+    if (!count) throw unknown_name("material", name, material_names());
+    if (count != 1) throw AssetError("Ambiguous material name: " + name);
     return Material(data_, index);
 }
 Matrix Model::transform() const {
@@ -2496,7 +2660,7 @@ void OffscreenTarget::close() {
 namespace detail {
 struct ReadbackData {
     std::shared_ptr<State> state;
-    std::vector<uint8_t> pixels;
+    PixelBuffer pixels;
     bool complete = false, taken = false;
     std::chrono::steady_clock::time_point start;
 };
@@ -2508,10 +2672,11 @@ Readback OffscreenTarget::begin_read() const {
     auto result = std::make_shared<detail::ReadbackData>();
     result->state = state;
     result->start = std::chrono::steady_clock::now();
-    result->pixels.resize(size_t(data_->width) * data_->height * 4);
+    result->pixels.size = size_t(data_->width) * data_->height * 4;
+    result->pixels.data.reset(new uint8_t[result->pixels.size]);
     // The callback retains storage even if the driver cannot complete the read.
     auto* owner = new std::shared_ptr<detail::ReadbackData>(result);
-    f::backend::PixelBufferDescriptor buffer(result->pixels.data(), result->pixels.size(),
+    f::backend::PixelBufferDescriptor buffer(result->pixels.data.get(), result->pixels.size,
         f::backend::PixelDataFormat::RGBA, f::backend::PixelDataType::UBYTE,
         [](void*, size_t, void* user) {
             std::unique_ptr<std::shared_ptr<detail::ReadbackData>> hold(static_cast<std::shared_ptr<detail::ReadbackData>*>(user));
@@ -2535,14 +2700,20 @@ bool Readback::ready() {
     }
     return data_->complete;
 }
-std::vector<uint8_t> Readback::take() {
-    if (!data_->complete) throw FillyError("The readback has not completed");
-    if (data_->taken) throw FillyError("The readback's pixels were already taken");
-    data_->taken = true;
+namespace {
+PixelBuffer take_pixels(detail::ReadbackData& data) {
+    if (!data.complete) throw FillyError("The readback has not completed");
+    if (data.taken) throw FillyError("The readback's pixels were already taken");
+    data.taken = true;
     // Filament already normalizes readPixels output to an upper-left origin.
-    return std::move(data_->pixels);
+    return std::move(data.pixels);
 }
-std::vector<uint8_t> OffscreenTarget::read() const {
+}
+std::vector<uint8_t> Readback::take() {
+    auto pixels = take_pixels(*data_);
+    return std::vector<uint8_t>(pixels.data.get(), pixels.data.get() + pixels.size);
+}
+PixelBuffer OffscreenTarget::read() const {
     auto readback = begin_read();
 #if defined(__EMSCRIPTEN__)
     if (!readback.ready())
@@ -2551,7 +2722,7 @@ std::vector<uint8_t> OffscreenTarget::read() const {
 #else
     if (!readback.ready()) throw FillyError("GPU readback did not complete");
 #endif
-    return readback.take();
+    return take_pixels(*readback.data_);
 }
 
 ImportedTarget::ImportedTarget(std::shared_ptr<detail::TargetData> data) : data_(std::move(data)) {}
@@ -2598,4 +2769,5 @@ void ImportedTarget::close() {
 }
 #include "features.inc"
 #include "resources.inc"
+#include "memory.inc"
 }

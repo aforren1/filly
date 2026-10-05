@@ -95,11 +95,11 @@ Model load(Scene& scene, nb::handle source, bool strict, bool clonable) {
     };
     try {
         if (nb::isinstance<nb::bytes>(source)) {
+            // bytes objects are immutable, so the native copy can run without the GIL.
             const auto blob = nb::borrow<nb::bytes>(source);
             const auto* first = reinterpret_cast<const uint8_t*>(blob.c_str());
-            std::vector<uint8_t> bytes(first, first + blob.size());
             nb::gil_scoped_release release;
-            model = scene.load(std::move(bytes), strict, clonable, warnings);
+            model = scene.load(first, blob.size(), strict, clonable, warnings);
         } else {
             const auto path = fs_path(source);
             nb::gil_scoped_release release;
@@ -274,15 +274,15 @@ NB_MODULE(_native, module) {
         .def_prop_ro("height", &OffscreenTarget::height)
         .def("read", [](const OffscreenTarget& self) {
             const size_t width = self.width(), height = self.height();
-            std::unique_ptr<std::vector<uint8_t>> pixels;
+            PixelBuffer pixels;
             {
                 nb::gil_scoped_release release;
-                pixels = std::make_unique<std::vector<uint8_t>>(self.read());
+                pixels = self.read();
             }
-            auto* ptr = pixels.get();
-            nb::capsule owner(ptr, [](void* p) noexcept { delete static_cast<std::vector<uint8_t>*>(p); });
-            pixels.release();
-            return nb::ndarray<nb::numpy, uint8_t>(ptr->data(), {height, width, 4}, owner);
+            auto* ptr = pixels.data.get();
+            nb::capsule owner(ptr, [](void* p) noexcept { delete[] static_cast<uint8_t*>(p); });
+            pixels.data.release();
+            return nb::ndarray<nb::numpy, uint8_t>(ptr, {height, width, 4}, owner);
         });
 
     nb::class_<Acquisition>(module, "_Acquisition")
@@ -491,8 +491,8 @@ NB_MODULE(_native, module) {
         .def("set_environment", [](Scene& self, nb::ndarray<nb::numpy, const float, nb::shape<-1,-1,3>, nb::c_contig> pixels, float intensity, float rotation) {
             const auto height = pixels.shape(0), width = pixels.shape(1);
             if (height < 2 || height > 4096 || width != 2*height) throw std::invalid_argument("Environment must be a 2:1 RGB panorama with height 2..4096");
-            std::vector<float> copy(pixels.data(), pixels.data()+pixels.size());
-            nb::gil_scoped_release release; self.set_environment(copy, uint32_t(width), uint32_t(height), intensity, rotation);
+            nb::gil_scoped_release release;
+            self.set_environment(pixels.data(), pixels.size(), uint32_t(width), uint32_t(height), intensity, rotation);
         }, "pixels"_a, nb::kw_only(), "intensity"_a = 30000.0f, "rotation_deg"_a = 0.0f)
         .def("clear_environment", &Scene::clear_environment)
         .def_prop_rw("environment_intensity", &Scene::environment_intensity, &Scene::set_environment_intensity)
@@ -523,7 +523,27 @@ NB_MODULE(_native, module) {
 
     nb::class_<AnimationInfo>(module, "AnimationInfo")
         .def_ro("name", &AnimationInfo::name)
-        .def_ro("duration", &AnimationInfo::duration);
+        .def_ro("duration", &AnimationInfo::duration)
+        .def_prop_ro("material_properties", [](const AnimationInfo& self) {
+            nb::list result;
+            for (const auto& item : self.material_properties) result.append(nb::make_tuple(item.material, item.property));
+            return result;
+        });
+
+    nb::class_<ModelMemory>(module, "ModelMemory")
+        .def_ro("gpu_texture_bytes", &ModelMemory::gpu_texture_bytes)
+        .def_ro("gpu_geometry_bytes", &ModelMemory::gpu_geometry_bytes)
+        .def_prop_ro("gpu_bytes", [](const ModelMemory& self) { return self.gpu_texture_bytes + self.gpu_geometry_bytes; })
+        .def_ro("cpu_bytes", &ModelMemory::cpu_bytes)
+        .def_ro("clone_gpu_bytes", &ModelMemory::clone_gpu_bytes)
+        .def_ro("clone_cpu_bytes", &ModelMemory::clone_cpu_bytes)
+        .def_ro("models", &ModelMemory::models)
+        .def("__repr__", [](const ModelMemory& self) {
+            return "ModelMemory(gpu_texture_bytes=" + std::to_string(self.gpu_texture_bytes) + ", gpu_geometry_bytes="
+                + std::to_string(self.gpu_geometry_bytes) + ", cpu_bytes=" + std::to_string(self.cpu_bytes)
+                + ", clone_gpu_bytes=" + std::to_string(self.clone_gpu_bytes) + ", clone_cpu_bytes="
+                + std::to_string(self.clone_cpu_bytes) + ", models=" + std::to_string(self.models) + ")";
+        });
 
     nb::class_<Camera>(module, "Camera")
         .def_prop_rw("exposure", &Camera::exposure, &Camera::set_exposure)
@@ -585,7 +605,9 @@ NB_MODULE(_native, module) {
     nb::class_<Model>(module, "Model")
         .def("close", &Model::close)
         .def_prop_ro("closed", &Model::closed)
-        .def("clone", &Model::clone)
+        .def("clone", [](Model& self, const Scene* scene) { return self.clone(scene); },
+             nb::kw_only(), "scene"_a.none() = nb::none())
+        .def_prop_ro("memory", &Model::memory)
         .def("camera", [](const Model& self, nb::handle key) {
             return by_key(key, [&](const std::string& n) { return self.camera(n); }, [&](int64_t i) { return self.camera(i); });
         }, "key"_a)
@@ -595,6 +617,8 @@ NB_MODULE(_native, module) {
         }, "key"_a)
         .def_prop_ro("lights", &Model::lights)
         .def_prop_ro("animations", &Model::animations)
+        // Keeps the GIL: the call takes tens of microseconds, and taking the GIL back from a busy
+        // Python thread can wait for the whole switch interval (5 ms by default).
         .def("apply_animation", [](Model& self, nb::handle key, float time, bool loop) {
             by_key(key, [&](const std::string& n) { self.apply_animation(n, time, loop); return 0; },
                    [&](int64_t i) { self.apply_animation(i, time, loop); return 0; });
@@ -645,7 +669,9 @@ NB_MODULE(_native, module) {
         .def_prop_ro("children", &Node::children)
         .def_prop_ro("bounds", &Node::bounds)
         .def_prop_ro("morph_target_count", &Node::morph_target_count)
-        .def("set_morph_weights", &Node::set_morph_weights, "weights"_a)
+        .def("set_morph_weights", [](Node& self, const std::vector<float>& weights) {
+            self.set_morph_weights(weights.data(), weights.size());
+        }, "weights"_a)
         .def_prop_rw("transform", [](const Node& self) { return to_array(self.transform()); },
             [](Node& self, const MatrixInput& value) { self.set_transform(from_array(value)); }, nb::rv_policy::move)
         .def_prop_rw("position", &Node::position, &Node::set_position)

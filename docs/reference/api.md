@@ -128,7 +128,11 @@ compiled.
 
 Call `prepare()` after you set the lights, shadows, fog, antialiasing, and output options of the
 scene. It compiles the variants that those settings can use, for every material of the scene and
-for the output passes. It does not compile Filament's own post-processing materials, for example
+for the output passes. The materials of every material variant of a model count: gltfio creates
+their instances at load, so `apply_variant()` at the start of a trial compiles nothing. In a test
+with four variants of different material types (unlit, clearcoat, sheen, blend), the first frame
+after each switch took 1.4 to 2.1 ms after `prepare()`, as steady frames did, and 19 to 38 ms
+without it. It does not compile Filament's own post-processing materials, for example
 the blit of a transparent scene or the SSAO and bloom passes. Those compile at their first use, once
 for each renderer.
 
@@ -657,13 +661,21 @@ Imported perspective cameras support an omitted far plane. Imported orthographic
 - `lights`: all imported punctual lights, in glTF node order.
 - `camera(key)`: return the camera that a node carries.
 - `cameras`: all imported cameras, in glTF node order.
-- `animations`: list of `AnimationInfo` objects with `name` and `duration` in seconds.
+- `animations`: list of `AnimationInfo` objects with `name`, `duration` in seconds, and
+  `material_properties`: the `(material_name, parameter)` pairs that the clip animates through
+  `KHR_animation_pointer`, for example `("Body", "baseColorFactor")`. The material name is the
+  one that `material(name)` accepts. A texture transform is the parameter of its matrix, for
+  example `"baseColorUvMatrix"`. Applying or resetting any clip restores these parameters (see
+  [Property animation](#property-animation)), so an edit to one of them must be written again
+  after the clip.
 - `apply_animation(key, time, *, loop=True)`: evaluate a clip at an explicit nonnegative time.
 - `reset_animation()`: restore authored node transforms, morph weights, camera projections, and animated material/light/texture properties.
 - `variants`: list of material variant names.
 - `apply_variant(key)`: apply a material variant.
-- `clone()`: return another instance of an asset loaded with `clonable=True`, or of a
-  generated mesh. See [clones](#clones).
+- `clone(*, scene=None)`: return another instance of an asset loaded with `clonable=True`, or of
+  a generated mesh, in this model's scene or in `scene`. See [clones](#clones).
+- `memory`: a `ModelMemory` estimate of the memory that the model's asset holds. See
+  [Memory](#memory).
 - `update_mesh(*, positions=None, normals=None, uvs=None, colors=None)`: replace vertex data of a
   [generated mesh](#generated-meshes).
 - `close()`: remove the model from its scene and release its material copies. Repeated calls are valid.
@@ -684,9 +696,13 @@ is the name of the same object. Nodes place lights and cameras, so their keys ar
 | `apply_animation(key, ...)` | clip name | glTF animation index, also the position in `animations` |
 | `apply_variant(key)` | variant name | glTF variant index, also the position in `variants` |
 
-An unknown name or an index out of range raises `AssetError`. So does a node that carries no
-light or no camera. A name that several entries share raises `AssetError`, and the message lists
-the matching indices. Use an index for unnamed or duplicated entries. Other key types, including
+An unknown name or an index out of range raises `AssetError`. For an unknown name, the message
+lists the names of that kind in the model (up to 20), for example
+`Unknown animation 'Run'; the model has: 'Armature|HorseSpring'`. By name, `light()` and
+`camera()` consider only the nodes that carry a light or a camera, and the message lists those.
+A node index that carries no light or no camera also raises `AssetError`. A name that several
+entries share raises `AssetError`, and the message lists the matching indices. `material(name)`
+reports an unknown name in the same way. Use an index for unnamed or duplicated entries. Other key types, including
 `bool` and `float`, raise `TypeError`.
 
 Names are the names in the glTF document. A node without a name has the name `None`, even if its
@@ -703,7 +719,12 @@ models and clones have separate material instances. To change one mesh slot only
 
 ### Clones
 
-`model.clone()` returns a new `Model` in the same scene. The asset must be loaded with
+`model.clone()` returns a new `Model` in the same scene. `model.clone(scene=other)` puts the new
+`Model` in another scene of the same renderer, so one hidden prototype can serve every scene.
+The asset belongs to the renderer, not to a scene: each model holds it, so closing the scene of
+the prototype closes the prototype but not the clones in other scenes, and the clones keep the
+asset alive. A closed prototype cannot clone again. A clone keeps the material setup of the
+prototype's load, including the refraction setting that its scene had then. The asset must be loaded with
 `scene.load(source, clonable=True)`, or be a [generated mesh](#generated-meshes); otherwise
 `clone()` raises `FillyError`. A clone of a
 clone is valid. The clone shares the loaded asset's geometry, textures, and compiled materials.
@@ -716,10 +737,44 @@ The shared asset stays in memory until its last instance closes. Filament needs 
 source data to create instances. With `clonable=True`, the source data stays in CPU memory for
 the life of the asset. This costs about the size of the asset file: 3.7 MiB for the 3.6 MiB
 DamagedHelmet. With the default `clonable=False`, loading releases the source data. Each clone
-creates new material instances and decodes the textures of the custom diffuse-transmission,
-anisotropy, and iridescence materials again; on the archive path, it decodes all extension
-textures again. Clones with lights add their light components to
-`stats.live_lights`. Clone before the frame loop.
+creates new material instances; it shares the decoded textures, including those of the custom
+diffuse-transmission, anisotropy, and iridescence materials. Clones with lights add their light
+components to `stats.live_lights`. Clone before the frame loop.
+
+### Memory
+
+`model.memory` returns a `ModelMemory` estimate of the memory that the model's asset holds.
+The model shares it with its prototype and its clones, and the last of them to close frees it.
+Use it to keep a model cache within a memory budget.
+
+| Field | Meaning |
+| --- | --- |
+| `gpu_texture_bytes` | Every mip level of every texture of the asset, in the internal format that the texture has (for example, `SRGB8_A8` for a PNG, a compressed format for a KTX2 texture). |
+| `gpu_geometry_bytes` | Vertex, index, morph target, and bone buffers, as gltfio lays them out. |
+| `gpu_bytes` | The sum of the two. |
+| `cpu_bytes` | The source data that `clone()` needs, if the asset is clonable: the document, its buffers, and filly's tables for custom materials and property animation. Also the clip data that each instance's animator copies. A generated mesh adds its vertex arrays and staging buffers. |
+| `clone_gpu_bytes`, `clone_cpu_bytes` | What each further clone adds: its bone and morph target buffers, and its animator's copy of the clips. These stay with the asset until it closes, also after the clone closes. |
+| `models` | The live models that share the asset. |
+
+Clones share the textures, the vertex and index buffers, and the compiled materials. The
+estimate leaves out what the driver adds. On the test laptop (Intel Iris Xe, an integrated GPU),
+the GPU process memory counter measured 9 to 16% above `gpu_bytes` for the second load of an
+asset: 18.6 against 16.1 MiB (wooden horse, 2.1 MiB file), 45.0 against 40.6 MiB
+(DiffuseTransmissionPlant, 5.5 MiB), and 78.8 against 72.2 MiB (ChronographWatch, 7.1 MiB). The
+driver allocates in blocks, so single clones can add 0.5 to 3 MiB more than `clone_gpu_bytes`.
+An integrated GPU uses system memory: there the process private bytes include the GPU memory,
+about 22, 56, and 94 MiB for the same loads, against `cpu_bytes + gpu_bytes` of 18.2, 46.8, and
+79.4 MiB. For a budget on such a machine, count `cpu_bytes + gpu_bytes` against system memory. A
+discrete GPU holds `gpu_bytes` in its own memory instead. For an animated asset with many
+keyframes, `clone_cpu_bytes` is the larger part of a clone: 5.5 MiB estimated against about
+7.4 MiB measured per clone of BrainStem.
+
+Closing the last model frees the asset to the driver and to the process heap, which reuse the
+memory for later loads. The process counters do not always fall: after closing the horse, the
+private bytes fell by about 2 MiB of the 22 MiB that its load added. Budget a cache by the sum of
+its entries, not by the process counters.
+
+Reading `memory` issues no GPU or engine commands.
 
 Closing a model invalidates all its node, material, light, and imported camera handles. Scenes
 that use one of its cameras lose their active camera. Other assets, scene-created cameras,
@@ -792,9 +847,12 @@ must be integers.
 
 ### Animation
 
-Animation evaluation restores the authored node state before applying the selected clip. This
-makes arbitrary time jumps independent of prior frames. It replaces manual node edits; apply
-those edits after animation. Bone matrices follow the edits at the next render. The model's outer root transform
+Animation evaluation first restores the authored values of every node translation, rotation,
+scale, and morph weight that any clip of the model animates, and of every animated property.
+It then applies the selected clip. This makes clip changes and arbitrary time jumps independent
+of prior calls. It replaces manual edits of the nodes that a clip animates; apply those edits
+after animation. Edits of other nodes stay. `reset_animation()` restores all nodes. Bone
+matrices follow the edits at the next render. The model's outer root transform
 is preserved. Looping wraps at the clip duration. With `loop=False`, times beyond the duration
 hold the final pose. Node transforms, skinning, and morph animation use Filament's animator.
 Supported light, material, camera, and texture properties also animate through `KHR_animation_pointer`.
@@ -1076,8 +1134,9 @@ The order is explicit in both directions and has no CPU wait for the GPU. Enteri
 waits until Filament's driver thread has placed a fence after the last frame, as `acquire()`
 does, and queues a GPU wait on it in the host context, so the host does not overwrite pixels
 that a submitted frame still reads. It releases the GIL while it waits. Leaving `write()`
-places a host fence; the next `render()` of any scene queues a GPU wait on it before the frame.
-`render()` inside `write()` raises `InteropError`. Each render adds one fence per host texture.
+places a host fence; the next `render()` of a scene whose models sample the texture queues a GPU
+wait on it before the frame. `render()` inside `write()` raises `InteropError`. A render adds one
+fence, shared by its target and by the host textures that the scene samples.
 `close()` fences the host's work if the host context is current, as `ImportedTarget.close()`
 does.
 
@@ -1189,6 +1248,21 @@ arbitrary points, often while another window's context is current. It therefore 
 another context current, and it deletes host objects only if the target's own context is
 current. Otherwise the host objects stay until their window closes. The same rule applies to the
 mask and shader of a PsychoPy stimulus from `as_psychopy_texture()`.
+
+## Sample model
+
+`filly.samples.SUZANNE` is the path of `suzanne.glb`, a sample model installed with filly:
+Blender's monkey head as one mesh with one untextured blue metal material (2,012 vertices, 73 KB).
+It is in the public domain (CC0 1.0), so images rendered from it need no attribution. Its source
+and changes are in `samples/ATTRIBUTION.md`. `tools/make_suzanne.py` makes it again from the
+source.
+
+```python
+model = scene.load(filly.samples.SUZANNE)
+```
+
+Code that must not import filly's native module, such as a PsychoPy Builder component, finds the
+file next to `importlib.util.find_spec("filly").origin`, in `samples/`.
 
 ## Exceptions
 

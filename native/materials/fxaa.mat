@@ -30,8 +30,13 @@ highp vec4 fxaaTap(highp vec2 uv) {
 }
 
 float fxaaLuma(highp vec4 c) {
-    // Transparent views keep alpha, so luma is green there, as in Filament.
-    return materialParams.transparent != 0 ? c.g : c.a;
+    // Green, in both modes, as FXAA 3.11's FXAA_GREEN_AS_LUMA and Filament's transparent mode
+    // use. The same luma makes an opaque pixel of a transparent view match the opaque view; with
+    // luma from alpha in opaque views and from green in transparent ones, edges differed by up
+    // to 24 levels. Perceptual luma from the encoded RGB cost 0.14 ms more per 1080p frame on
+    // the Intel GPU; green cost nothing measurable. Green misses edges between colors of equal
+    // green, such as red and blue.
+    return c.g;
 }
 
 highp vec4 fxaa(highp vec2 pos, highp vec4 corners, highp vec4 rgbyM, highp vec2 rcpFrame) {

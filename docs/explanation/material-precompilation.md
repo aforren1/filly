@@ -255,7 +255,9 @@ compile, then a second process with the same source. *Measured*, median of 4:
 | Ubershader, all lobes | 1 to 2 ms | 900 to 1000 ms | 20 ms |
 
 Optimized runtime compilation (`Optimization::PERFORMANCE`) took 434 ms (one run), which is why
-filly compiles unoptimized.
+filly compiles unoptimized. The table predates the runtime variant filter: gltfio's provider and
+filly's generated materials now leave out the stereo, VSM, and screen-space-reflection variants,
+as the archive does, because filly never renders them.
 
 Consequences:
 

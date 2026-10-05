@@ -383,7 +383,8 @@ void GlInterop::wait_on_host(const SyncPoint& point) {
     impl_->sync.wait(point.signal->handle, 0, UINT64_MAX);
 }
 void GlInterop::destroy(filament::Engine& engine, SyncPoint& point) {
-    if (point.sync) engine.destroy(point.sync);
+    // The last copy of a point destroys its Filament sync, and with it the GL fence.
+    if (point.sync && point.signal.use_count() == 1) engine.destroy(point.sync);
     point = {};
 }
 void GlInterop::set_srgb_writes(filament::Engine& engine, bool value) {

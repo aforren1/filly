@@ -3,7 +3,7 @@
 // sharing. The build is single-threaded: Filament's GL calls run inside render() and land in the
 // page's command stream before the host's later draws, so no fences are needed.
 //
-// The host and Filament each cache GL state. The JavaScript glue (web/filly.mjs) saves and
+// The host and Filament each cache GL state. The JavaScript glue (web/filly.js) saves and
 // resets the host's state before every filly call and resets it after; this file only assumes
 // that the context is the current Emscripten context.
 
@@ -108,7 +108,8 @@ void GlInterop::enqueue_wait(filament::Engine&, void*) {}
 SyncPoint GlInterop::signal(filament::Engine&) { return {}; }
 void GlInterop::wait_on_host(const SyncPoint&) {}
 void GlInterop::destroy(filament::Engine& engine, SyncPoint& point) {
-    if (point.sync) engine.destroy(point.sync);
+    // signal() makes no syncs here; this matches the desktop rule for shared points anyway.
+    if (point.sync && point.signal.use_count() <= 1) engine.destroy(point.sync);
     point = {};
 }
 void GlInterop::set_srgb_writes(filament::Engine&, bool value) {

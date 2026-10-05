@@ -133,3 +133,5 @@ It links [Filament](https://github.com/google/filament) (Apache 2.0),
 [meshoptimizer](https://github.com/zeux/meshoptimizer) (MIT),
 [libwebp](https://chromium.googlesource.com/webm/libwebp) (BSD), and
 [cgltf](https://github.com/jkuhlmann/cgltf) (MIT). Their licenses are installed with the package.
+The sample model `filly.samples.SUZANNE` is modified from Suzanne by Norbert Nopper (UX3D), from
+the Khronos glTF Sample Assets, under CC0 1.0.

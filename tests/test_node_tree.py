@@ -49,7 +49,7 @@ def test_lookup_errors(scene, triangle_glb):
     model = scene.load(tree_asset(triangle_glb))
     with pytest.raises(filly.AssetError, match="Ambiguous node name 'dup'.*2, 3"):
         model.node("dup")
-    with pytest.raises(filly.AssetError, match="Unknown node"):
+    with pytest.raises(filly.AssetError, match="Unknown node 'missing'; the model has: '.*'dup', 'dup'"):
         model.node("missing")
     with pytest.raises(filly.AssetError, match="glTF index 6"):
         model.node(6)
@@ -76,13 +76,14 @@ def test_lights_and_cameras_by_node(scene, triangle_glb):
     assert lamp.node == model.node(5) and lamp.node.name == "lamp"
     with pytest.raises(filly.AssetError, match="glTF node 0 has no camera"):
         model.camera(0)
-    with pytest.raises(filly.AssetError, match="glTF node 4 has no light"):
+    # By name, only the nodes that carry a light or camera count; the error lists them.
+    with pytest.raises(filly.AssetError, match="Unknown light node 'eye'; the model has: 'lamp'$"):
         model.light("eye")
     with pytest.raises(filly.AssetError, match="glTF index 6"):
         model.light(6)
-    with pytest.raises(filly.AssetError, match="Unknown node"):
+    with pytest.raises(filly.AssetError, match="Unknown camera node 'missing'; the model has: 'eye'$"):
         model.camera("missing")
-    with pytest.raises(filly.AssetError, match="Ambiguous node name 'dup'"):
+    with pytest.raises(filly.AssetError, match="Unknown light node 'dup'"):
         model.light("dup")
     for key in (True, 4.0, None):
         with pytest.raises(TypeError):

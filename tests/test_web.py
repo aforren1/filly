@@ -62,9 +62,8 @@ def _web_build():
     return build
 
 
-@pytest.fixture(scope="module", params=BROWSERS)
-def page_results(request, tmp_path_factory):
-    browser = request.param
+def _run_page(browser, page, folder):
+    """Serve the web build, the pages, and tree.glb from folder; return the page's testResult."""
     executable = os.environ.get(f"FILLY_TEST_{browser.upper()}", EXECUTABLES.get(browser, ""))
     node = shutil.which("node")
     if not node:
@@ -73,19 +72,35 @@ def page_results(request, tmp_path_factory):
         pytest.skip("run `npm install` in tests/web first")
     if not Path(executable).is_file():
         pytest.skip(f"{browser} not found at {executable!r}")
-    folder = tmp_path_factory.mktemp(f"web-{browser}")
     build = _web_build()
-    shutil.copytree(build, folder / "filly")
-    # The page tests the current glue; the build folder may hold an older copy.
-    shutil.copy(ROOT / "web" / "filly.mjs", folder / "filly" / "filly.mjs")
-    shutil.copy(WEB / "api.html", folder)
-    (folder / "tree.glb").write_bytes(tree_glb())
-    result = subprocess.run([node, str(WEB / "run_page.mjs"), str(folder), "api.html", browser, executable],
+    if not (folder / "filly").is_dir():
+        shutil.copytree(build, folder / "filly")
+        # The page tests the current glue; the build folder may hold an older copy.
+        shutil.copy(ROOT / "web" / "filly.js", folder / "filly" / "filly.js")
+        for name in ("api.html", "handover.html"):
+            shutil.copy(WEB / name, folder)
+        (folder / "tree.glb").write_bytes(tree_glb())
+    result = subprocess.run([node, str(WEB / "run_page.mjs"), str(folder), page, browser, executable],
                             capture_output=True, text=True, timeout=300, cwd=WEB)
     assert result.returncode == 0, result.stderr[-3000:]
     report = json.loads(result.stdout.strip().splitlines()[-1])
     assert report["pageErrors"] == [], report["pageErrors"]
     return report["result"]
+
+
+@pytest.fixture(scope="module", params=BROWSERS)
+def browser_folder(request, tmp_path_factory):
+    return request.param, tmp_path_factory.mktemp(f"web-{request.param}")
+
+
+@pytest.fixture(scope="module")
+def page_results(browser_folder):
+    return _run_page(browser_folder[0], "api.html", browser_folder[1])
+
+
+@pytest.fixture(scope="module")
+def handover_results(browser_folder):
+    return _run_page(browser_folder[0], "handover.html?frames=30", browser_folder[1])
 
 
 def _value(results, name):
@@ -135,6 +150,7 @@ def test_prepare(page_results):
 def test_solid_and_float_texture(page_results):
     # Unlit linear 0.5 is sRGB level 188, as on the desktop.
     assert _value(page_results, "solid") == [188, 188, 188, 255]
+    assert _value(page_results, "render_options") == [188, 188, 188, 255]
     value = _value(page_results, "texture_float")
     assert value == {"center": [188, 188, 188, 255], "dtype": "float32"}
 
@@ -233,6 +249,10 @@ def test_model_tree_and_clone(page_results):
     assert value["afterCloseLiveModels"] == value["liveModels"]
 
 
+def test_load_files(page_results):
+    assert _value(page_results, "load_files") == {"names": ["root", "triangle", "front"], "unchanged": True}
+
+
 def test_scene_effects(page_results):
     value = _value(page_results, "scene_effects")
     for name in ("ssao", "bloom", "fog", "depthOfField", "vignette"):
@@ -248,3 +268,43 @@ def test_errors(page_results):
     assert value["caught"] == {"badBytes": "AssetError", "badFill": "RangeError", "badMesh": "RangeError",
                                "badSlot": "RangeError", "badUpdate": "RangeError", "missingUrl": "AssetError"}
     assert value["assetIsFilly"] is True
+    assert value["unknownMaterial"] == "Unknown material 'wood'; the model has: 'mesh'"
+
+
+def test_handover(handover_results):
+    calls = handover_results["calls"]
+    # Property reads after the hand-back leave the context with the page.
+    assert calls["reads"]["total"] == 0, calls["reads"]
+    assert handover_results["readValues"]["width"] == 512
+    # Enter queries no GL state, and hand-back undoes only what the core changed: about 6
+    # units of a lit scene instead of every unit (32 on ANGLE).
+    assert "getParameter" not in calls["enter"]["byName"], calls["enter"]
+    assert calls["enter"]["total"] <= 20, calls["enter"]
+    assert calls["handBack"]["total"] <= 60, calls["handBack"]
+    state = handover_results["state"]
+    assert state["leftovers"] == [] and state["error"] == 0, state
+    # The core works with the GL defaults, and the page gets its own pixel-store values back,
+    # both those set before filly attached and those set after.
+    entered = handover_results["entered"]
+    assert entered == {"flipY": False, "premultiply": False, "unpackAlignment": 4, "packAlignment": 4}, entered
+    assert (state["flipY"], state["premultiply"], state["unpackAlignment"], state["packAlignment"]) \
+        == (True, True, 1, 8), state
+
+
+def test_model_cache(page_results):
+    value = _value(page_results, "model_cache")
+    size = len(tree_glb())
+    assert value["decided"] == size and value["fetchedBytes"] == size
+    memory = value["memory"]
+    assert memory["models"] == 2 and memory["gpuTextureBytes"] == 0
+    assert memory["gpuBytes"] == memory["gpuTextureBytes"] + memory["gpuGeometryBytes"] > 0
+    # The clonable asset keeps its document.
+    assert memory["cpuBytes"] >= size
+    with filly.Renderer() as renderer:
+        desktop = renderer.create_scene().load(tree_glb(), clonable=True).memory
+    # The parse's size differs: WebAssembly has 4-byte pointers.
+    assert memory["gpuBytes"] == desktop.gpu_bytes
+    # Closing the prototype's scene keeps the clone in the other scene.
+    assert value["prototypeClosed"] is True and value["cloneClosed"] is False
+    assert value["modelsAfterClose"] == 1 and value["againModels"] == 2
+    assert value["liveAfter"] == value["liveModels"] - 2

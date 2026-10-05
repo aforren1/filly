@@ -127,9 +127,26 @@ void Texture::update(const void* pixels, size_t bytes) {
     if (bytes != data_->input_bytes)
         throw std::invalid_argument("Texture update needs " + std::to_string(data_->input_bytes)
                                     + " bytes, got " + std::to_string(bytes));
+    if (data_->pending) throw FillyError("Call commit_update() before update()");
     auto& slot = data_->upload.take(*data_->state->engine);
     stage(*data_, static_cast<const uint8_t*>(pixels), slot.bytes.get());
     upload(*data_, slot.bytes.get(), &detail::Staging::done, &slot);
+}
+uint8_t* Texture::begin_update(size_t bytes) {
+    data_->check();
+    if (bytes != data_->input_bytes)
+        throw std::invalid_argument("Texture update needs " + std::to_string(data_->input_bytes)
+                                    + " bytes, got " + std::to_string(bytes));
+    if (data_->expand)
+        throw std::invalid_argument("1-channel sRGB textures expand to RGBA on upload; use update()");
+    if (!data_->pending) data_->pending = &data_->upload.take(*data_->state->engine);
+    return data_->pending->bytes.get();
+}
+void Texture::commit_update() {
+    data_->check();
+    if (!data_->pending) throw FillyError("commit_update() requires a matching begin_update()");
+    auto* slot = std::exchange(data_->pending, nullptr);
+    upload(*data_, slot->bytes.get(), &detail::Staging::done, slot);
 }
 
 HostTexture Renderer::import_gl_input(uint32_t texture, int64_t width, int64_t height,

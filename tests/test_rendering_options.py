@@ -258,6 +258,29 @@ def test_ktx_environment_uses_spherical_harmonics(renderer, scene, triangle_glb,
     assert pixel[2] > pixel[1] > pixel[0], pixel
 
 
+def test_ktx_environment_irradiance_follows_diffuse_transmission(renderer, scene, triangle_glb, tmp_path):
+    # The irradiance cubemap is prefiltered only once a diffuse-transmission material needs it,
+    # so a model loaded after the environment must light the same as one loaded before.
+    doc, binary = unpack(triangle_glb)
+    lit(doc)
+    doc["extensionsUsed"] = ["KHR_materials_diffuse_transmission"]
+    doc["materials"][0]["extensions"] = {"KHR_materials_diffuse_transmission": {
+        "diffuseTransmissionFactor": 1, "diffuseTransmissionColorFactor": [1, 0, 0]}}
+    asset = pack(doc, binary)
+    ibl = ktx_cubemap(tmp_path / "ibl.ktx", size=16, levels=5, sh=(1.0, 1.0, 1.0))
+    model = scene.load(asset)
+    scene.load_environment_ktx(ibl, intensity=30000)
+    before = render(renderer, scene)
+    model.close()
+    scene.load_environment_ktx(ibl, intensity=30000)
+    scene.load(asset)
+    after = render(renderer, scene)
+    np.testing.assert_array_equal(before, after)
+    # Gray SH lighting: only the backlight, which reads the irradiance cubemap, is red.
+    pixel = after[32, 32].astype(int)
+    assert pixel[0] > pixel[1] + 20, pixel
+
+
 def test_ktx_environment_errors(scene, tmp_path):
     with pytest.raises(filly.AssetError, match="no 'sh' metadata"):
         scene.load_environment_ktx(ktx_cubemap(tmp_path / "plain.ktx", sh=None))

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Build filly for the web: web/filly.mjs and the module it loads, filly-core.mjs and
+# Build filly for the web: web/filly.js and the module it loads, filly-core.js and
 # filly-core.wasm, in OUT_DIR.
 #
 # Usage: tools/build_filly_web.sh [OUT_DIR] [WORK_DIR]
+#
+# Set FILLY_WEB_SIMD=ON for a build with WebAssembly SIMD, which browsers without SIMD cannot
+# load. The default is OFF.
 #
 # WORK_DIR is the work folder of tools/build_filament_web.sh (default ~/filly-web), which holds
 # the Filament WebAssembly SDK, emsdk, CMake, and the host tools. Run that script first. OUT_DIR
@@ -25,11 +28,11 @@ source "$WORK/emsdk/emsdk_env.sh" >/dev/null 2>&1
 # The build tree stays on the build machine's file system; WSL builds from /mnt/c are slow.
 BUILD=$WORK/filly-build
 emcmake cmake -S "$REPO/web" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-    -DFILAMENT_ROOT="$WORK/sdk" -DFILLY_MATERIAL_TOOLS="$WORK/host-tools"
+    -DFILAMENT_ROOT="$WORK/sdk" -DFILLY_MATERIAL_TOOLS="$WORK/host-tools" -DFILLY_WEB_SIMD="${FILLY_WEB_SIMD:-OFF}"
 cmake --build "$BUILD" -j "${JOBS:-$(nproc)}"
 
 mkdir -p "$OUT"
-cp "$BUILD/filly-core.mjs" "$BUILD/filly-core.wasm" "$REPO/web/filly.mjs" "$OUT/"
+cp "$BUILD/filly-core.js" "$BUILD/filly-core.wasm" "$REPO/web/filly.js" "$OUT/"
 # Licenses of everything the module links.
 mkdir -p "$OUT/licenses"
 cp "$WORK/sdk/LICENSE" "$OUT/licenses/Filament.txt"

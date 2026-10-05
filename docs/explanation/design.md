@@ -34,7 +34,21 @@ therefore opt-in: `scene.load(..., clonable=True)` keeps them, and the default c
 113 MiB per loaded DamagedHelmet on the tested Intel GPU, most of it texture memory that the
 integrated GPU allocates in system memory, so the saving is small for textured assets. Name
 lookups use each instance's own node table, because gltfio's name and entity lists cover all
-instances. Node and mesh names come from the preparation, which reads them from the glTF
+instances.
+
+The asset belongs to the renderer; each model holds it. A clone can therefore go into another
+scene of the same renderer, and closing a scene closes only its own models. Textures that the
+material provider decodes for filly's custom materials are kept by source in the asset's tables,
+so clones share them as they share gltfio's textures. Before, each clone decoded them again and
+kept the copies until the asset closed.
+
+`Model.memory` estimates what the asset holds. gltfio lists no textures or buffers, so the
+estimate collects them itself: a texture provider wrapper records the textures that gltfio's
+providers create, and each is sized from its internal format, dimensions, and mip levels. Vertex,
+index, morph target, and bone buffers are sized at preparation from the glTF accessors with the
+layout rules of gltfio 1.77.1 (`AssetLoader::createPrimitive()` and `createRenderable()`). Bone and
+morph target buffers, and the animator's copy of the clips, belong to each instance; gltfio keeps
+them until the asset goes, so the estimate counts every instance created so far. Node and mesh names come from the preparation, which reads them from the glTF
 document; gltfio's names fall back to the mesh, light, or camera name for an unnamed node.
 
 Node-local materials belong to the model. The first `node.material(slot)` duplicates the slot's
@@ -153,9 +167,12 @@ Missing normals are area-weighted vertex normals, because shared vertices of an 
 should be smooth; flat faces need their own vertices.
 
 A host texture input uses the same fences as a shared render target, in the other direction.
-Leaving `write()` places a host fence, and the next render queues a Filament-side wait on it
-before the frame. After each render, Filament places a fence for each host texture, and entering
-`write()` queues a host-side wait on it. Neither side waits on the CPU.
+Leaving `write()` places a host fence, and the next render of a scene whose models sample the
+texture queues a Filament-side wait on it before the frame. After such a render, Filament places
+one fence, which the texture shares with the target and with the other sampled host textures,
+and entering `write()` queues a host-side wait on it. Each Filament fence costs a `glFlush()` on
+Filament's thread, so a render places at most one. A scene that does not sample a host texture
+neither waits for its writes nor fences it. Neither side waits on the CPU.
 
 Two kinds of per-frame work run only when something changed. A camera whose projection follows
 the target compares the target aspect with the last applied one and sets a new projection only
@@ -224,8 +241,14 @@ change a stimulus; RGBA32F would change 9 of 319 levels when MSAA or transparenc
 RGBA32F buffer also cost 0.05 to 0.08 ms more GPU time per 1080p frame on the tested Intel GPU.
 
 FXAA runs on the encoded image, as Filament's FXAA runs after its color grading. The encode pass
-then writes an RGBA8 buffer with luma in alpha, and filly's FXAA pass (FXAA 3.11 console with the
-G3D patches, as in Filament 1.77.1) writes the target. It fetches the center pixel without
+then writes an RGBA8 buffer, and filly's FXAA pass (FXAA 3.11 console with the G3D patches, as
+in Filament 1.77.1) writes the target. FXAA takes green as luma in opaque and transparent views
+alike, so an opaque pixel of a transparent view gets the opaque view's result. Filament reads
+luma from alpha in opaque views, which the encode pass used to write, and from green in
+transparent ones; the two modes then differed by up to 24 levels on edges. Perceptual luma from
+the encoded color would also match, but cost 0.14 ms more per 1080p frame on the Intel GPU
+(median of 5 interleaved rounds); green cost nothing measurable. Green misses edges between
+colors with equal green, such as pure red and pure blue. It fetches the center pixel without
 filtering and rounds its result, so a pixel that FXAA leaves alone keeps its exact level: a flat
 field is identical with and without FXAA. Filament's own FXAA would have forced color grading
 before it, whose 1D LUT (512 fp16 entries) rounds differently: with color grading before the
@@ -274,8 +297,8 @@ truncation to fp16. In this route:
   sRGB route once encoded, and coarse near black.
 - The Intel framebuffer-fetch subpass stays disabled: `d.renderer.disable_subpasses` is set for
   the engine, so it applies to every view that runs color grading without MSAA.
-- The encode pass stays, for alpha, luma, and the viewport rule. Its graded variant is a
-  separate material, compiled on the first graded render, with no transfer function: the CPU
+- The encode pass stays, for alpha and the viewport rule. Its graded variant is a
+  separate material, compiled when a scene first lets Filament encode, with no transfer function: the CPU
   encodes the clear color once. The viewport test in the default material cost 0.05 ms per
   1080p frame on the Intel GPU, and the transfer function behind it in the graded material
   1.0 ms. The route allocates the RGBA8 buffer
@@ -303,15 +326,18 @@ the whole linear buffer as the first view of that buffer in the frame; outside t
 holds the background. With `clear=False` the passes write only the viewport, so the rest of the
 target keeps its contents, and the direct path's background fill view is not needed.
 
-The pass allocates nothing per frame. The linear buffer (and the FXAA input, once FXAA is used)
-is created on a target's first render and lives as long as the target, so it resizes only with
-the target, which cannot change size. It shares the target's depth texture. The pass sets its
+The pass allocates nothing per frame. The linear buffer, the graded buffer, and the FXAA input are
+created on the first render that uses them and live as long as the target, so they resize only
+with the target, which cannot change size. Creating the linear buffer with the target instead
+did not make the first frame measurably faster, and a target that only `output_path = "direct"`
+renders would keep it unused (8 bytes per pixel). It shares the target's depth texture. The pass sets its
 material parameters only when they change, before `beginFrame()`: Filament commits material
 instances when the frame's first view renders, so a change set between views reached the GPU
 inside a render pass and was lost. The encode and FXAA materials are compiled at build time from
 `native/materials/encode.mat.in` and `fxaa.mat` and embedded in the module, as the material
 archive is. The renderer creates the encode material when it is created, and the FXAA material
-when a scene first sets `antialiasing = "fxaa"`, so neither falls on a frame.
+when a scene first sets `antialiasing = "fxaa"`, and the graded encode material when a scene
+first lets Filament encode (see above), so none of them falls on a frame.
 
 A shared host texture cannot simply have sRGB storage: a host that samples it decodes the values
 back to linear. The `EXT_texture_sRGB_decode` skip setting avoids that for plain texture binds,
@@ -467,7 +493,8 @@ A load has these steps:
    loaded memory, clear the meshopt flag of decoded views, retarget pointer channels for node
    TRS and weights to their nodes, and let property-only samplers read a valid float accessor.
    gltfio's animator rejects every animation of an asset if one sampler has sparse or integer
-   data. cgltf then skips the loaded buffers.
+   data. cgltf then skips the loaded buffers. Last, append the rest animation that animation
+   evaluation uses (see [Materials and effects beyond gltfio](#materials-and-effects-beyond-gltfio)).
 7. `AssetLoader::createInstance()` with index markers (below), then `ResourceLoader`.
 
 The loaded buffer memory lives with the asset until gltfio releases its source data, which is
@@ -584,15 +611,26 @@ cubemap is used as is, and the spherical harmonics in its metadata supply diffus
 `gltf_viewer` 1.77.1 reads those harmonics only to estimate a sun direction, so its diffuse light
 comes from the roughest reflection level. Filament's KTX parser and upload abort on malformed
 input, so the wrapper checks the file structure first. The custom diffuse-transmission material
-needs an irradiance cubemap; it is filtered from a full-mip copy of the IBL's sharpest level. It performs GPU work and a completion wait during setup. Material
+needs an irradiance cubemap; it is filtered from a full-mip copy of the IBL's sharpest level.
+The filter runs only when a model with that material is in the scene, at the environment load or
+at the model load, whichever comes later: it cost about 60 ms per environment, plus about 35 ms
+to build the filter once per renderer (256-pixel IBL, desktop). It performs GPU work and a
+completion wait during setup. Each prefilter object builds its material on first use. Material
 compilation, image decoding, and environment filtering belong outside a trial's frame loop.
 The renderer creates Filament's IBL prefilter objects once and reuses them. When they were
 destroyed after each call, models loaded after `set_environment()` could render black on
 Intel and NVIDIA. The cause inside Filament is not isolated.
 
-glTF animation restores authored transforms and morph weights before evaluating a clip. This
-cost scales with node count but makes time jumps independent of frame history. Bone updates
-follow evaluation. Imported light nodes use the same transform hierarchy as mesh nodes.
+glTF animation restores authored transforms and morph weights before evaluating a clip, which
+makes time jumps and clip changes independent of history. gltfio's animator keeps each node's
+translation, rotation, and scale apart and writes all three back when a channel changes one of
+them. A transform set through the `TransformManager` does not reach these values, so a channel
+that only the previous clip animated would keep that clip's value. Preparation therefore
+appends a rest animation to gltfio's parse: one constant keyframe pair for each node channel
+that any clip animates. Evaluation applies it, then the clip, each in one transform
+transaction. A clip that animates every channel of the rest animation skips it. Only animated
+nodes are restored, and bones update once per evaluation. Imported light nodes use the same
+transform hierarchy as mesh nodes.
 
 Property animation uses a separate native track list for the supported `KHR_animation_pointer`
 targets. The preparation reads and validates accessors during loading. The material and node

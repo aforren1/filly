@@ -227,6 +227,7 @@ def test_target_draw_and_shared_acquire(triangle_glb):
             scene.load(triangle_glb)
             with SharedTarget(renderer, win, 64, 64) as target:
                 left = target.as_psychopy_texture(pos=(-32, 0))
+                shared = left._shared_program
                 renderer.render(scene, target)
                 with target.acquire():
                     target.draw(64, 64)
@@ -242,8 +243,11 @@ def test_target_draw_and_shared_acquire(triangle_glb):
                 np.testing.assert_array_equal(np.asarray(win._getFrame(buffer="back"))[64, 32], (255, 0, 0))
                 win.flip()
             with SharedTarget(renderer, win, 64, 64) as fresh:
+                stimulus = fresh.as_psychopy_texture()
+                # Stimuli of every target in a window share one program.
+                assert stimulus._shared_program == shared
                 with pytest.raises(InteropError, match="Render to the target"):
-                    fresh.as_psychopy_texture().draw()
+                    stimulus.draw()
     finally:
         win.close()
 

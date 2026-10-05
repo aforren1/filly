@@ -163,7 +163,7 @@ size_t named(const std::vector<std::string>& names, const std::string& name, con
     size_t index = 0, count = 0;
     for (size_t i = 0; i < names.size(); ++i) if (names[i] == name) { index = i; ++count; }
     if (count == 1) return index;
-    if (!count) throw AssetError(std::string("Unknown ") + what + ": " + name);
+    if (!count) throw unknown_name(what, name, names);
     std::string list;
     for (size_t i = 0; i < names.size(); ++i)
         if (names[i] == name) list += (list.empty() ? "" : ", ") + std::to_string(i);
@@ -181,6 +181,25 @@ size_t carried(const std::vector<utils::Entity>& entities, utils::Entity entity,
         throw AssetError("glTF node " + std::to_string(index) + " has no " + what);
     return size_t(found - entities.begin());
 }
+// The glTF index of the node named `name` among the nodes that carry one of `entities`. Only those
+// nodes count, so the error lists the names that the lookup accepts.
+int64_t carrier(const std::vector<utils::Entity>& nodes, const auto& sources,
+                const std::vector<utils::Entity>& entities, const std::string& name, const char* what) {
+    std::vector<std::string> names;
+    std::string matches;
+    int64_t found = -1;
+    for (size_t i = 0; i < nodes.size() && i < sources.size(); ++i) {
+        if (!nodes[i] || !sources[i].name || std::find(entities.begin(), entities.end(), nodes[i]) == entities.end())
+            continue;
+        names.push_back(*sources[i].name);
+        if (*sources[i].name != name) continue;
+        matches += (matches.empty() ? "" : ", ") + std::to_string(i);
+        found = found < 0 ? int64_t(i) : -2;
+    }
+    if (found == -1) throw unknown_name(what, name, names);
+    if (found == -2) throw AssetError(std::string("Ambiguous ") + what + " name '" + name + "'; use a glTF index: " + matches);
+    return found;
+}
 }
 std::vector<Light> Model::lights() const {
     data_->check();
@@ -188,7 +207,10 @@ std::vector<Light> Model::lights() const {
     for (const auto entity : data_->lights) result.emplace_back(data_, entity.getId());
     return result;
 }
-Light Model::light(const std::string& name) const { return light(node(name).index()); }
+Light Model::light(const std::string& name) const {
+    data_->check();
+    return light(carrier(data_->nodes, data_->shared->prepared->nodes, data_->lights, name, "light node"));
+}
 Light Model::light(int64_t index) const {
     node(index);
     const auto position = carried(data_->lights, data_->nodes[size_t(index)], index, "light");
@@ -196,7 +218,23 @@ Light Model::light(int64_t index) const {
 }
 std::vector<AnimationInfo> Model::animations() const {
     data_->check(); std::vector<AnimationInfo> result;
-    for (const auto& clip : data_->animations) result.push_back({clip.name, clip.duration});
+    for (const auto& clip : data_->animations) {
+        AnimationInfo info{clip.name, clip.duration, {}};
+        for (const auto& track : clip.tracks) {
+            if (track.source.kind != 0 && track.source.kind != 3) continue;
+            // Texture transform tracks name the matrix and the component after a slash.
+            const auto& parameter = track.source.parameter;
+            const auto property = parameter.substr(0, parameter.find('/'));
+            for (const auto& target : track.targets) {
+                const char* name = target.material ? target.material->getName() : nullptr;
+                AnimatedProperty item{name ? name : "", property};
+                const bool seen = std::any_of(info.material_properties.begin(), info.material_properties.end(),
+                    [&](const AnimatedProperty& other) { return other.material == item.material && other.property == item.property; });
+                if (!seen) info.material_properties.push_back(std::move(item));
+            }
+        }
+        result.push_back(std::move(info));
+    }
     return result;
 }
 std::vector<Camera> Model::cameras() const {
@@ -205,7 +243,10 @@ std::vector<Camera> Model::cameras() const {
     for (size_t i = 0; i < data_->camera_entities.size(); ++i) result.push_back(camera_at(i));
     return result;
 }
-Camera Model::camera(const std::string& name) const { return camera(node(name).index()); }
+Camera Model::camera(const std::string& name) const {
+    data_->check();
+    return camera(carrier(data_->nodes, data_->shared->prepared->nodes, data_->camera_entities, name, "camera node"));
+}
 Camera Model::camera(int64_t index) const {
     node(index);
     return camera_at(carried(data_->camera_entities, data_->nodes[size_t(index)], index, "camera"));
@@ -227,7 +268,13 @@ Camera Model::camera_at(size_t position) const {
 }
 void Model::reset_animation() {
     data_->check(); auto& tm = data_->state->engine->getTransformManager();
+    // One world-transform update for the whole reset instead of one per node and subtree.
+    tm.openLocalTransformTransaction();
     for (const auto& [entity, value] : data_->rest_transforms) tm.setTransform(tm.getInstance(entity), value);
+    // gltfio's per-node translation, rotation, and scale must return to rest too; see RestSource.
+    // The animator commits the transaction.
+    if (data_->rest_animation >= 0) data_->animator->applyAnimation(size_t(data_->rest_animation), 0);
+    tm.commitLocalTransformTransaction();
     auto& rm = data_->state->engine->getRenderableManager();
     for (const auto& [entity, weights] : data_->rest_morphs) rm.setMorphWeights(rm.getInstance(entity), weights.data(), weights.size());
     detail::reset_properties(*data_);
@@ -237,9 +284,16 @@ void Model::reset_animation() {
 }
 void Model::apply_animation(const std::string& name, float time, bool loop) {
     data_->check();
-    std::vector<std::string> names;
-    for (const auto& clip : data_->animations) names.push_back(clip.name);
-    apply_animation(int64_t(named(names, name, "animation")), time, loop);
+    const auto& clips = data_->animations;
+    size_t index = 0, count = 0;
+    for (size_t i = 0; i < clips.size(); ++i) if (clips[i].name == name) { index = i; ++count; }
+    // Only the error lists the names, so a valid name allocates nothing.
+    if (count != 1) {
+        std::vector<std::string> names;
+        for (const auto& clip : clips) names.push_back(clip.name);
+        index = named(names, name, "animation");
+    }
+    apply_animation(int64_t(index), time, loop);
 }
 void Model::apply_animation(int64_t index, float time, bool loop) {
     data_->check(); finite(time);
@@ -248,15 +302,20 @@ void Model::apply_animation(int64_t index, float time, bool loop) {
     const float duration = clip.duration;
     if (duration > 0) time = loop ? std::fmod(time, duration) : std::min(time, duration);
     else time = 0;
-    // Reset before evaluating to make clip changes and arbitrary time jumps independent of history.
-    reset_animation();
+    // Everything that any clip animates returns to rest first, so clip changes and time jumps do
+    // not depend on history. The rest animation covers node transforms and morph weights; a clip
+    // that writes all of those channels itself does not need it.
+    auto* animator = data_->animator;
+    if (data_->rest_animation >= 0 && (clip.needs_rest || clip.native_index < 0))
+        animator->applyAnimation(size_t(data_->rest_animation), 0);
+    detail::reset_properties(*data_, &clip);
     if (clip.native_index >= 0) {
-        const float native_duration = data_->animator->getAnimationDuration(clip.native_index);
-        data_->animator->applyAnimation(clip.native_index,
+        const float native_duration = animator->getAnimationDuration(clip.native_index);
+        animator->applyAnimation(clip.native_index,
             native_duration > 0 ? std::min(time, std::nextafter(native_duration, 0.0f)) : 0);
     }
     detail::apply_properties(*data_, clip, time);
-    data_->animator->updateBoneMatrices();
+    animator->updateBoneMatrices();
     data_->bones_dirty = false;
 }
 std::vector<std::string> Model::variants() const {
@@ -293,12 +352,12 @@ size_t Node::morph_target_count() const {
     auto i = rm.getInstance(utils::Entity::import(entity_));
     return i ? rm.getMorphTargetCount(i) : 0;
 }
-void Node::set_morph_weights(const std::vector<float>& values) {
-    const auto count = morph_target_count();
-    if (!count || values.size() != count) throw std::invalid_argument("Supply one weight per morph target on a mesh node");
-    for (float value : values) finite(value);
+void Node::set_morph_weights(const float* values, size_t count) {
+    const auto targets = morph_target_count();
+    if (!targets || count != targets) throw std::invalid_argument("Supply one weight per morph target on a mesh node");
+    for (size_t i = 0; i < count; ++i) finite(values[i]);
     auto& rm = data_->state->engine->getRenderableManager();
-    rm.setMorphWeights(rm.getInstance(utils::Entity::import(entity_)), values.data(), values.size());
+    rm.setMorphWeights(rm.getInstance(utils::Entity::import(entity_)), values, count);
 }
 float Camera::exposure() const {
     data_->check(); auto* c = data_->camera;
@@ -373,6 +432,8 @@ void apply_grading(detail::SceneData& data, const std::string& tone_mapping) {
     data.filament_encodes = filament_encodes;
     detail::update_postprocessing(data);
     detail::update_dithering(data);
+    // As with FXAA, building the graded encode pass here keeps that cost out of the first frame.
+    if (filament_encodes) detail::output_pass(*data.state, data.state->encode_graded, detail::PassKind::encode_graded);
 }
 }
 std::string Scene::encoding() const { data_->check(); return data_->encoding; }
@@ -478,6 +539,7 @@ void Scene::clear_environment() {
     data_->scene->setSkybox(nullptr);
     auto* previous_irradiance = data_->irradiance;
     data_->irradiance = nullptr;
+    data_->pending_irradiance.reset();
     detail::update_diffuse_environment(*data_);
     if (data_->environment) engine.destroy(data_->environment);
     if (data_->skybox) engine.destroy(data_->skybox);
@@ -507,14 +569,14 @@ void Scene::set_environment_intensity(float value) {
     data_->environment->setIntensity(value);
     detail::update_diffuse_environment(*data_);
 }
-void Scene::set_environment(const std::vector<float>& pixels, uint32_t width, uint32_t height, float intensity, float rotation) {
+void Scene::set_environment(const float* pixels, size_t count, uint32_t width, uint32_t height, float intensity, float rotation) {
     data_->check(); nonnegative(intensity); finite(rotation);
-    if (height < 2 || height > 4096 || width != height * 2 || pixels.size() != size_t(width) * height * 3)
+    if (height < 2 || height > 4096 || width != height * 2 || count != size_t(width) * height * 3)
         throw std::invalid_argument("Environment must be a 2:1 RGB panorama, height 2..4096");
-    for (float value : pixels) nonnegative(value);
+    for (size_t i = 0; i < count; ++i) nonnegative(pixels[i]);
     auto& engine = *data_->state->engine;
     bool uniform = true;
-    for (size_t i = 3; i < pixels.size() && uniform; ++i) uniform = pixels[i] == pixels[i % 3];
+    for (size_t i = 3; i < count && uniform; ++i) uniform = pixels[i] == pixels[i % 3];
     if (uniform) {
         set_uniform_environment({pixels[0], pixels[1], pixels[2]}, intensity, rotation);
         return;
@@ -523,16 +585,17 @@ void Scene::set_environment(const std::vector<float>& pixels, uint32_t width, ui
         .sampler(f::Texture::Sampler::SAMPLER_2D).format(f::Texture::InternalFormat::R11F_G11F_B10F)
         .usage(f::Texture::Usage::SAMPLEABLE | f::Texture::Usage::COLOR_ATTACHMENT |
                f::Texture::Usage::GEN_MIPMAPPABLE | f::Texture::Usage::UPLOADABLE).build(engine);
-    auto* upload = new std::vector<float>(pixels);
+    // Filament reads the pixels after this call returns, so it gets its own copy.
+    auto* upload = new std::vector<float>(pixels, pixels + count);
     source->setImage(engine, 0, f::Texture::PixelBufferDescriptor(upload->data(), upload->size()*sizeof(float),
         f::Texture::Format::RGB, f::Texture::Type::FLOAT,
         [](void*, size_t, void* p) { delete static_cast<std::vector<float>*>(p); }, upload));
     source->generateMipmaps(engine);
     auto& prefilter = data_->state->prefilter;
     if (!prefilter) prefilter = std::make_unique<detail::State::Prefilter>(engine);
-    auto* cube = prefilter->to_cube(source);
-    auto* reflections = prefilter->specular(cube);
-    auto* irradiance = prefilter->irradiance(cube);
+    auto* cube = prefilter->to_cube()(source);
+    auto* reflections = prefilter->specular()(cube);
+    auto* irradiance = prefilter->irradiance()(cube);
     auto* environment = f::IndirectLight::Builder().reflections(reflections).irradiance(irradiance)
         .intensity(intensity).rotation(m::mat3f::rotation(rotation * 0.01745329252f, m::float3{0,1,0})).build(engine);
     auto* skybox = f::Skybox::Builder().environment(cube).showSun(true).build(engine);
@@ -668,54 +731,34 @@ void Scene::load_environment_ktx(const std::string& ibl_path, const std::string&
     for (const auto& band : bands) finite(std::array<float, 3>{band.x, band.y, band.z});
     std::unique_ptr<image::Ktx1Bundle> sky;
     if (!skybox_path.empty()) sky = read_ktx_cubemap(skybox_path, "Skybox");
-    // Only the custom diffuse-transmission material reads an irradiance cubemap. The IBL file
-    // has fewer mip levels than the irradiance filter needs, so its level 0 is copied into a
-    // texture with a full mip chain. The copy uses the same face layout as the KTX upload.
-    f::Texture* irradiance_source = nullptr;
+    // Only the custom diffuse-transmission material reads an irradiance cubemap, so its level 0
+    // waits on the CPU until a material needs it (see update_diffuse_environment()).
+    std::unique_ptr<detail::SceneData::PendingIrradiance> pending;
     const auto& info = ibl->getInfo();
     const auto format = ktxreader::Ktx1Reader::toTextureFormat(info);
     if (f::Texture::isTextureFormatMipmappable(engine, format)) {
         uint8_t* faces = nullptr;
         uint32_t face_size = 0;
         ibl->getBlob({0, 0, 0}, &faces, &face_size);
-        auto* copy = new std::vector<uint8_t>(faces, faces + size_t(face_size) * 6);
-        irradiance_source = f::Texture::Builder().width(info.pixelWidth).height(info.pixelWidth).levels(0xff)
-            .sampler(f::Texture::Sampler::SAMPLER_CUBEMAP).format(format)
-            .usage(f::Texture::Usage::SAMPLEABLE | f::Texture::Usage::COLOR_ATTACHMENT |
-                   f::Texture::Usage::GEN_MIPMAPPABLE | f::Texture::Usage::UPLOADABLE).build(engine);
-        irradiance_source->setImage(engine, 0, 0, 0, 0, info.pixelWidth, info.pixelWidth, 6,
-            f::Texture::PixelBufferDescriptor(copy->data(), copy->size(),
-                ktxreader::Ktx1Reader::toPixelDataFormat(info), ktxreader::Ktx1Reader::toPixelDataType(info),
-                [](void*, size_t, void* user) { delete static_cast<std::vector<uint8_t>*>(user); }, copy));
-        irradiance_source->generateMipmaps(engine);
+        pending = std::make_unique<detail::SceneData::PendingIrradiance>();
+        pending->faces.assign(faces, faces + size_t(face_size) * 6);
+        pending->size = info.pixelWidth;
+        pending->format = format;
+        pending->pixels = ktxreader::Ktx1Reader::toPixelDataFormat(info);
+        pending->type = ktxreader::Ktx1Reader::toPixelDataType(info);
     }
-    f::Texture* reflections = nullptr;
-    try { reflections = ktx_texture(engine, std::move(ibl), ibl_path); }
-    catch (...) { if (irradiance_source) engine.destroy(irradiance_source); throw; }
+    f::Texture* reflections = ktx_texture(engine, std::move(ibl), ibl_path);
     f::Texture* sky_texture = nullptr;
     if (sky) {
         try { sky_texture = ktx_texture(engine, std::move(sky), skybox_path); }
-        catch (...) {
-            engine.destroy(reflections);
-            if (irradiance_source) engine.destroy(irradiance_source);
-            throw;
-        }
-    }
-    f::Texture* irradiance = nullptr;
-    if (irradiance_source) {
-        auto& prefilter = data_->state->prefilter;
-        if (!prefilter) prefilter = std::make_unique<detail::State::Prefilter>(engine);
-        IBLPrefilterContext::IrradianceFilter::Options options;
-        options.generateMipmap = false;
-        irradiance = prefilter->irradiance(options, irradiance_source);
-        engine.destroy(irradiance_source);
+        catch (...) { engine.destroy(reflections); throw; }
     }
     auto* environment = f::IndirectLight::Builder().reflections(reflections).irradiance(3, bands)
         .intensity(intensity).rotation(m::mat3f::rotation(rotation * 0.01745329252f, m::float3{0,1,0})).build(engine);
     // Without a skybox file, level 0 of the IBL is the unfiltered environment at IBL resolution.
     auto* skybox = f::Skybox::Builder().environment(sky_texture ? sky_texture : reflections).showSun(true).build(engine);
     clear_environment();
-    data_->environment = environment; data_->reflections = reflections; data_->irradiance = irradiance;
+    data_->environment = environment; data_->reflections = reflections; data_->pending_irradiance = std::move(pending);
     data_->skybox = skybox; data_->skybox_texture = sky_texture;
     data_->scene->setIndirectLight(environment);
     data_->scene->setSkybox(data_->environment_visible ? skybox : nullptr);
@@ -736,7 +779,7 @@ void Scene::load_environment(const std::string& path, float intensity, float rot
     if (!decoded) throw AssetError("Could not decode environment (use Radiance HDR, PNG, or JPEG)");
     std::unique_ptr<float, decltype(&stbi_image_free)> owner(decoded, stbi_image_free);
     if (height < 2 || height > 4096 || width != 2*height) throw AssetError("Environment must be a 2:1 panorama with height 2..4096");
-    set_environment(std::vector<float>(decoded, decoded + size_t(width)*height*3), width, height, intensity, rotation);
+    set_environment(decoded, size_t(width) * height * 3, width, height, intensity, rotation);
 }
 float Camera::focus_distance() const { data_->check(); return data_->camera->getFocusDistance(); }
 void Camera::set_focus_distance(float value) {

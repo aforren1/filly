@@ -14,6 +14,22 @@ from ._host import HostTarget, shared_renderer
 
 __all__ = ["SharedTarget", "create_renderer"]
 
+# One ImageStim program for premultiplied color per window, which lives as long as the window's
+# context. Compiling and linking it took most of the time of each as_psychopy_texture().
+_programs = weakref.WeakKeyDictionary()
+
+
+def _shared_program(win):
+    program = _programs.get(win)
+    if program is None or not gl.glIsProgram(program):
+        # Filament stores premultiplied RGB. ImageStim expects straight RGB before
+        # applying its color, opacity, mask, and the window's blend function.
+        fragment = shaders.fragImageStim.replace(
+            "vec4 maskFrag =", "textureFrag.rgb = textureFrag.a > 0.0 ? textureFrag.rgb / textureFrag.a : vec3(0.0);\nvec4 maskFrag =")
+        program = shaders.compileProgram(shaders.vertSimple, fragment)
+        _programs[win] = program
+    return program
+
 
 def _is_open(win):
     # PsychoPy keeps winHandle after close(); pyglet clears the handle's context.
@@ -123,11 +139,7 @@ class _SharedImageStim(visual.ImageStim):
         self._texID = target.colorTexture
         self._external_texture = True
         self.flipVert = False
-        # Filament stores premultiplied RGB. ImageStim expects straight RGB before
-        # applying its color, opacity, mask, and the window's blend function.
-        fragment = shaders.fragImageStim.replace(
-            "vec4 maskFrag =", "textureFrag.rgb = textureFrag.a > 0.0 ? textureFrag.rgb / textureFrag.a : vec3(0.0);\nvec4 maskFrag =")
-        self._shared_program = shaders.compileProgram(shaders.vertSimple, fragment)
+        self._shared_program = _shared_program(target._win)
 
     def draw(self, win=None):
         target = self._shared_target
@@ -161,11 +173,10 @@ class _SharedImageStim(visual.ImageStim):
         # can be current. Names deleted there could belong to that window's objects.
         if not (_is_open(target._win) and current_gl_context() == target._context):
             return self._detach(False)
-        # The target owns the color texture; ImageStim owns only its mask.
+        # The target owns the color texture and the window owns the program; ImageStim owns
+        # only its mask.
         if getattr(self, "_maskID", None) and self._maskID.value:
             gl.glDeleteTextures(1, ctypes.byref(self._maskID))
             self._maskID = gl.GLuint()
-        if getattr(self, "_shared_program", None):
-            gl.glDeleteProgram(self._shared_program)
-            self._shared_program = None
+        self._shared_program = None
         self._texID = gl.GLuint()

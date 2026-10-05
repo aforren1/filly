@@ -105,8 +105,11 @@ void write_property(ModelData& model, const PropertyTrackSource& track,
 void initialize_animations(ModelData& model, const std::vector<AnimationSource>& sources,
                            const std::vector<MaterialBinding>& materials) {
     auto& lights = model.state->engine->getLightManager();
+    model.rest_animation = model.shared->prepared->rest_animation;
+    if (model.rest_animation >= 0 && size_t(model.rest_animation) >= model.animator->getAnimationCount())
+        throw AssetError("glTF animation index was not retained by the native loader");
     for (const auto& source : sources) {
-        AnimationClip clip{source.name, source.native_index};
+        AnimationClip clip{source.name, source.native_index, source.needs_rest};
         if (clip.native_index >= 0) {
             if (size_t(clip.native_index) >= model.animator->getAnimationCount())
                 throw AssetError("glTF animation index was not retained by the native loader");
@@ -231,15 +234,19 @@ Vec4 sample_property(const PropertyTrackSource& curve, float time) {
     return result;
 }
 
-void reset_properties(ModelData& model) {
+// Restores animated properties without committing them. The tracks of `skip` are left out:
+// applying that clip writes every one of their targets.
+void reset_properties(ModelData& model, const AnimationClip* skip = nullptr) {
     for (auto& node : model.visibility) node.value = node.rest;
     for (auto& cone : model.light_cones) cone.value = cone.rest;
     for (auto& camera : model.cameras) camera.value = camera.rest;
     for (auto& uv : model.texture_transforms) uv.value = uv.rest;
-    for (const auto& clip : model.animations)
+    for (const auto& clip : model.animations) {
+        if (&clip == skip) continue;
         for (const auto& track : clip.tracks)
             if (track.source.kind < 2)
                 for (const auto& target : track.targets) write_property(model, track.source, target, target.rest);
+    }
 }
 
 void apply_properties(ModelData& model, const AnimationClip& clip, float time) {

@@ -2,10 +2,17 @@
 #include "renderer.h"
 #include "gltf_prepare.h"
 #include <gltfio/MaterialProvider.h>
+#include <filament/MaterialEnums.h>
 #include <filament/Texture.h>
 #include <filament/TextureSampler.h>
 
 namespace filly::detail {
+// Variants that filly never renders: it enables no stereoscopic rendering, no VSM shadows, and
+// no screen-space reflections. Runtime materials skip compiling them.
+constexpr filament::UserVariantFilterMask unused_variants =
+    filament::UserVariantFilterMask(filament::UserVariantFilterBit::STE)
+    | filament::UserVariantFilterMask(filament::UserVariantFilterBit::VSM)
+    | filament::UserVariantFilterMask(filament::UserVariantFilterBit::SSR);
 filament::gltfio::MaterialProvider* create_material_provider(filament::Engine*, bool compiled);
 // The asset that createAsset() or createInstance() is building, or null. The provider reads its
 // material table for instances whose extras carry a glTF material index; see load_asset().

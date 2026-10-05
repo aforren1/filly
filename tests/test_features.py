@@ -69,6 +69,53 @@ def test_animation_time_jumps_and_reset(renderer, scene, triangle_glb):
     with pytest.raises(ValueError): model.apply_animation(0,-1)
 
 
+def test_animation_clip_switches_restore_other_channels(renderer, scene, triangle_glb):
+    # gltfio keeps each node's translation, rotation, and scale apart, so a channel that only
+    # the previous clip animated must still return to rest.
+    doc, binary = unpack(triangle_glb)
+    offset = len(binary)
+    s = 2 ** -0.5
+    binary += struct.pack("<2f6f8f", 0, 1, 0, 0, 0, 0.7, 0, 0, 0, 0, 0, 1, 0, 0, s, s)
+    doc["bufferViews"] += [{"buffer": 0, "byteOffset": offset, "byteLength": 8},
+                           {"buffer": 0, "byteOffset": offset + 8, "byteLength": 24},
+                           {"buffer": 0, "byteOffset": offset + 32, "byteLength": 32}]
+    doc["accessors"] += [{"bufferView": 1, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1]},
+                         {"bufferView": 2, "componentType": 5126, "count": 2, "type": "VEC3"},
+                         {"bufferView": 3, "componentType": 5126, "count": 2, "type": "VEC4"}]
+    doc["nodes"].append({"name": "marker", "translation": [0, 0.25, 0]})
+    doc["scenes"][0]["nodes"].append(1)
+    doc["animations"] = [
+        {"name": "slide", "samplers": [{"input": 1, "output": 2}], "channels": [{"sampler": 0, "target": {"node": 0, "path": "translation"}}]},
+        {"name": "spin", "samplers": [{"input": 1, "output": 3}], "channels": [{"sampler": 0, "target": {"node": 0, "path": "rotation"}}]},
+        {"name": "both", "samplers": [{"input": 1, "output": 2}, {"input": 1, "output": 3}],
+         "channels": [{"sampler": 0, "target": {"node": 0, "path": "translation"}},
+                      {"sampler": 1, "target": {"node": 0, "path": "rotation"}}]},
+    ]
+    document = pack(doc, binary)
+    calls = [("slide", 1.0, False), ("spin", 0.5, True), ("both", 0.25, True), ("slide", 0.5, True),
+             ("spin", 1.0, False), ("both", 0.75, True), ("spin", 0.25, True)]
+    model = scene.load(document)
+    triangle, marker = model.node("triangle"), model.node("marker")
+    marker.position = (0, 0.5, 0)
+    for clip, time, loop in calls:
+        model.apply_animation(clip, time, loop=loop)
+        # A fresh model with no history gives the reference pose.
+        fresh = scene.load(document)
+        fresh.apply_animation(clip, time, loop=loop)
+        np.testing.assert_allclose(triangle.transform, fresh.node("triangle").transform, atol=1e-6, err_msg=clip)
+        fresh.close()
+    np.testing.assert_allclose(triangle.position, [0, 0, 0], atol=1e-6)
+    np.testing.assert_allclose(triangle.quaternion, [0, 0, np.sin(np.pi / 16), np.cos(np.pi / 16)], atol=1e-6)
+    # Nodes that no clip animates keep their edits.
+    np.testing.assert_allclose(marker.position, [0, 0.5, 0])
+    model.apply_animation("slide", 1, loop=False)
+    model.reset_animation()
+    np.testing.assert_allclose(triangle.transform, np.eye(4), atol=1e-6)
+    np.testing.assert_allclose(marker.position, [0, 0.25, 0])
+    model.apply_animation("spin", 1, loop=False)
+    np.testing.assert_allclose(triangle.position, [0, 0, 0], atol=1e-6)
+
+
 def test_variant_pixels(renderer, scene, triangle_glb):
     doc,binary=unpack(triangle_glb)
     doc["extensionsUsed"].append("KHR_materials_variants")

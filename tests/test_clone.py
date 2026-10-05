@@ -152,3 +152,118 @@ def test_clone_requires_clonable_load(renderer, scene, triangle_glb):
     clonable = scene.load(small(triangle_glb), clonable=True)
     # A clone shares the asset, so it can be cloned again.
     clonable.clone().clone().close()
+
+
+def _camera(scene):
+    camera = scene.create_camera()
+    camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
+    camera.position = (0, 0, 3)
+    camera.look_at((0, 0, 0))
+    scene.camera = camera
+
+
+@pytest.mark.parametrize("first", ["prototype scene", "clone scene"])
+def test_clone_into_another_scene(renderer, scene, triangle_glb, first):
+    other = renderer.create_scene()
+    _camera(other)
+    prototype = scene.load(small(triangle_glb), clonable=True)
+    prototype.visible = False
+    clone = prototype.clone(scene=other)
+    assert prototype.memory.models == 2
+    # The clone renders in its scene only.
+    np.testing.assert_array_equal(render(renderer, other)[32, 32], [255, 0, 0, 255])
+    assert render(renderer, scene)[32, 32, 0] == 0
+    if first == "prototype scene":
+        scene.close()
+        assert prototype.closed and not clone.closed
+        # The clone holds the asset, so it renders and clones on.
+        np.testing.assert_array_equal(render(renderer, other)[32, 32], [255, 0, 0, 255])
+        again = clone.clone()
+        assert again.memory.models == 2
+        other.close()
+        assert clone.closed and again.closed
+    else:
+        other.close()
+        assert clone.closed and not prototype.closed
+        assert prototype.memory.models == 1
+        third = renderer.create_scene()
+        _camera(third)
+        prototype.clone(scene=third)
+        np.testing.assert_array_equal(render(renderer, third)[32, 32], [255, 0, 0, 255])
+    assert renderer.stats.live_models == (0 if first == "prototype scene" else 2)
+
+
+def test_clone_into_a_scene_of_another_renderer_fails(renderer, scene, triangle_glb):
+    with filly.Renderer() as second:
+        foreign = second.create_scene()
+        prototype = scene.load(small(triangle_glb), clonable=True)
+        with pytest.raises(ValueError, match="same renderer"):
+            prototype.clone(scene=foreign)
+
+
+def test_memory_estimate(renderer, scene, triangle_glb):
+    from test_textures import textured_glb
+    document = textured_glb(triangle_glb)
+    plain = scene.load(document)
+    memory = plain.memory
+    # One 1x1 sRGB PNG, a single level: 4 bytes. Positions, UVs, normals, dummy data, indices.
+    assert memory.gpu_texture_bytes == 4
+    assert memory.gpu_geometry_bytes == 36 + 24 + 3 * 8 + 3 * 4 + 3 * 4
+    assert memory.gpu_bytes == memory.gpu_texture_bytes + memory.gpu_geometry_bytes
+    assert memory.cpu_bytes == 0 and memory.models == 1
+    prototype = scene.load(document, clonable=True)
+    kept = prototype.memory
+    # The source data: the document that gltfio keeps, and its parse.
+    assert len(document) <= kept.cpu_bytes < len(document) + 64 * 1024
+    clone = prototype.clone()
+    shared = clone.memory
+    assert (shared.gpu_bytes, shared.cpu_bytes, shared.models) == (kept.gpu_bytes, kept.cpu_bytes, 2)
+    prototype.close()
+    assert clone.memory.models == 1
+    mesh = scene.create_mesh(**filly.shapes.box())
+    box = mesh.memory
+    assert box.gpu_geometry_bytes >= 24 * (12 + 8 + 8 + 4) + 12 * 12
+    assert box.cpu_bytes >= 24 * 12
+
+
+def test_memory_counts_morph_and_bone_buffers_per_instance(renderer, scene, triangle_glb):
+    doc, binary = unpack(triangle_glb)
+    offset = len(binary)
+    binary += struct.pack("<9f", 0, 0.3, 0, 0, 0.3, 0, 0, 0.3, 0)
+    doc["bufferViews"].append({"buffer": 0, "byteOffset": offset, "byteLength": 36})
+    doc["accessors"].append({"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3",
+                             "min": [0, 0.3, 0], "max": [0, 0.3, 0]})
+    doc["meshes"][0]["primitives"][0]["targets"] = [{"POSITION": 1}]
+    model = scene.load(pack(doc, binary), clonable=True)
+    first = model.memory
+    # A 3 x 1 x 1 layer of RGBA32F positions and RGBA16I tangents, and a 256-bone buffer.
+    assert first.clone_gpu_bytes == 3 * 24 + 256 * 64
+    model.clone().close()
+    # The closed clone's buffers stay until the asset goes.
+    assert model.memory.gpu_geometry_bytes == first.gpu_geometry_bytes + first.clone_gpu_bytes
+
+
+def test_custom_material_textures_are_shared_by_clones(renderer, scene, triangle_glb):
+    from test_textures import _png
+    doc, binary = unpack(triangle_glb)
+    lit(doc)
+    image = _png((0, 255, 0))
+    offset = len(binary)
+    binary += image + b"\0" * (-len(image) % 4)
+    uv = len(binary)
+    binary += struct.pack("<6f", 0, 0, 0, 0, 0, 0)
+    doc["bufferViews"] += [{"buffer": 0, "byteOffset": offset, "byteLength": len(image)},
+                           {"buffer": 0, "byteOffset": uv, "byteLength": 24}]
+    doc["accessors"].append({"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2"})
+    doc["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"] = 1
+    doc["images"] = [{"bufferView": 1, "mimeType": "image/png"}]
+    doc["textures"] = [{"source": 0}]
+    doc["extensionsUsed"] = ["KHR_materials_diffuse_transmission"]
+    doc["materials"][0]["extensions"] = {"KHR_materials_diffuse_transmission": {
+        "diffuseTransmissionFactor": 1, "diffuseTransmissionTexture": {"index": 0}}}
+    model = scene.load(pack(doc, binary), clonable=True)
+    textures = model.memory.gpu_texture_bytes
+    assert textures > 0
+    model.clone()
+    model.clone()
+    assert model.memory.gpu_texture_bytes == textures

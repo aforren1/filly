@@ -1,13 +1,14 @@
 // Embind bindings of filly's core for the web build. They stay close to native/renderer.h;
-// web/filly.mjs adds the JavaScript API: option objects, name-or-index keys, error types, and
+// web/filly.js adds the JavaScript API: option objects, name-or-index keys, error types, and
 // the hand-over of the page's WebGL2 context. C++ exceptions reach JavaScript as WebAssembly
-// exceptions, which filly.mjs converts with getExceptionMessage().
+// exceptions, which filly.js converts with getExceptionMessage().
 
 #include "renderer.h"
 
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
 
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -28,9 +29,25 @@ template <class T> val typed_copy(const char* type, const std::vector<T>& values
     return val::global(type).new_(typed_memory_view(values.size(), values.data()));
 }
 
-template <class T> std::vector<T> numbers(const val& array, const char* name) {
+// A native copy of a JavaScript array of numbers. convertJSArrayToNumberVector zero-fills its
+// vector before the copy, which for a full-screen texture each frame costs as much as the copy.
+template <class T> struct Numbers {
+    std::unique_ptr<T[]> data;
+    size_t size = 0;
+};
+
+template <class T> Numbers<T> copy_numbers(const val& array) {
+    Numbers<T> out;
+    out.size = array["length"].as<size_t>();
+    out.data.reset(new T[out.size]);
+    // For a typed array of the same type, set() is a memcpy.
+    val(typed_memory_view(out.size, out.data.get())).call<void>("set", array);
+    return out;
+}
+
+template <class T> Numbers<T> numbers(const val& array, const char* name) {
     if (array.isUndefined() || array.isNull()) throw std::invalid_argument(std::string(name) + " is required");
-    return convertJSArrayToNumberVector<T>(array);
+    return copy_numbers<T>(array);
 }
 
 val animations(const Model& model) {
@@ -39,8 +56,30 @@ val animations(const Model& model) {
         val item = val::object();
         item.set("name", clip.name);
         item.set("duration", clip.duration);
+        val properties = val::array();
+        for (const auto& property : clip.material_properties) {
+            val entry = val::object();
+            entry.set("material", property.material);
+            entry.set("property", property.property);
+            properties.call<void>("push", entry);
+        }
+        item.set("materialProperties", properties);
         out.call<void>("push", item);
     }
+    return out;
+}
+
+// Byte counts as doubles: JavaScript numbers hold integers exactly up to 2^53.
+val model_memory(const Model& model) {
+    const auto memory = model.memory();
+    val out = val::object();
+    out.set("gpuTextureBytes", double(memory.gpu_texture_bytes));
+    out.set("gpuGeometryBytes", double(memory.gpu_geometry_bytes));
+    out.set("gpuBytes", double(memory.gpu_texture_bytes + memory.gpu_geometry_bytes));
+    out.set("cpuBytes", double(memory.cpu_bytes));
+    out.set("cloneGpuBytes", double(memory.clone_gpu_bytes));
+    out.set("cloneCpuBytes", double(memory.clone_cpu_bytes));
+    out.set("models", double(memory.models));
     return out;
 }
 
@@ -53,7 +92,8 @@ val loaded(Model model, const std::vector<std::string>& warnings) {
 
 val load_bytes(Scene& scene, const val& bytes, bool strict, bool clonable) {
     std::vector<std::string> warnings;
-    Model model = scene.load(convertJSArrayToNumberVector<uint8_t>(bytes), strict, clonable, warnings);
+    const auto copy = copy_numbers<uint8_t>(bytes);
+    Model model = scene.load(copy.data.get(), copy.size, strict, clonable, warnings);
     return loaded(model, warnings);
 }
 
@@ -76,38 +116,37 @@ FrameOptions frame_options(const val& options) {
     return out;
 }
 
-RenderOptions render_options(const val& options, std::optional<Camera>& camera) {
+// Positional arguments: each option of an options object costs a property lookup through the
+// JavaScript bridge, in every frame.
+RenderOptions render_options(const Camera* camera, const val& viewport, bool clear) {
     RenderOptions out;
-    if (options.isUndefined() || options.isNull()) return out;
-    if (!options["camera"].isUndefined() && !options["camera"].isNull()) {
-        camera = options["camera"].as<Camera>();
-        out.camera = &*camera;
-    }
-    if (!options["viewport"].isUndefined() && !options["viewport"].isNull()) {
+    out.camera = camera;
+    if (!viewport.isUndefined() && !viewport.isNull()) {
         out.has_viewport = true;
-        for (int i = 0; i < 4; ++i) out.viewport[size_t(i)] = options["viewport"][i].as<int64_t>();
+        for (int i = 0; i < 4; ++i) out.viewport[size_t(i)] = viewport[i].as<int64_t>();
     }
-    if (!options["clear"].isUndefined()) out.clear = options["clear"].as<bool>();
+    out.clear = clear;
     return out;
 }
 
 // Vertex arrays from JavaScript, flat, kept alive while the core reads them.
 struct MeshInput {
-    std::vector<float> positions, normals, uvs, colors;
-    std::vector<uint32_t> indices;
+    Numbers<float> positions, normals, uvs, colors;
+    Numbers<uint32_t> indices;
     MeshArrays arrays;
 };
 
 void attribute(const val& source, const char* name, size_t columns, size_t vertices,
-               std::vector<float>& storage, const float*& pointer) {
+               Numbers<float>& storage, const float*& pointer) {
     const val value = source[name];
     if (value.isUndefined() || value.isNull()) return;
-    storage = convertJSArrayToNumberVector<float>(value);
-    if (storage.size() != vertices * columns)
+    const size_t size = value["length"].as<size_t>();
+    if (size != vertices * columns)
         throw std::invalid_argument(std::string(name) + " must have " + std::to_string(vertices * columns)
                                     + " numbers (" + std::to_string(vertices) + " x " + std::to_string(columns)
-                                    + "), got " + std::to_string(storage.size()));
-    pointer = storage.data();
+                                    + "), got " + std::to_string(size));
+    storage = copy_numbers<float>(value);
+    pointer = storage.data.get();
 }
 
 void mesh_input(const val& source, size_t vertices, MeshInput& input) {
@@ -120,13 +159,15 @@ void mesh_input(const val& source, size_t vertices, MeshInput& input) {
 
 Model create_mesh(Scene& scene, const val& options) {
     MeshInput input;
-    const auto positions = numbers<float>(options["positions"], "positions");
-    if (positions.size() % 3) throw std::invalid_argument("positions must have 3 numbers per vertex");
-    mesh_input(options, positions.size() / 3, input);
+    const val positions = options["positions"];
+    if (positions.isUndefined() || positions.isNull()) throw std::invalid_argument("positions is required");
+    const size_t position_count = positions["length"].as<size_t>();
+    if (position_count % 3) throw std::invalid_argument("positions must have 3 numbers per vertex");
+    mesh_input(options, position_count / 3, input);
     input.indices = numbers<uint32_t>(options["indices"], "indices");
-    if (input.indices.size() % 3) throw std::invalid_argument("indices must have 3 numbers per triangle");
-    input.arrays.indices = input.indices.data();
-    input.arrays.triangles = input.indices.size() / 3;
+    if (input.indices.size % 3) throw std::invalid_argument("indices must have 3 numbers per triangle");
+    input.arrays.indices = input.indices.data.get();
+    input.arrays.triangles = input.indices.size / 3;
     MeshMaterial material;
     if (!options["baseColor"].isUndefined()) material.base_color = options["baseColor"].as<Vec4>();
     if (!options["metallic"].isUndefined()) material.metallic = options["metallic"].as<float>();
@@ -158,13 +199,13 @@ Texture create_texture(Renderer& renderer, const val& pixels, double width, doub
                        const std::string& color_space, bool mipmaps, const std::string& filter,
                        const std::string& wrap) {
     if (pixels["constructor"]["name"].as<std::string>() == "Float32Array") {
-        const auto values = convertJSArrayToNumberVector<float>(pixels);
+        const auto values = copy_numbers<float>(pixels);
         return renderer.create_texture(int64_t(width), int64_t(height), channels, true, color_space, mipmaps,
-                                       filter, wrap, values.data(), values.size() * sizeof(float));
+                                       filter, wrap, values.data.get(), values.size * sizeof(float));
     }
-    const auto values = convertJSArrayToNumberVector<uint8_t>(pixels);
+    const auto values = copy_numbers<uint8_t>(pixels);
     return renderer.create_texture(int64_t(width), int64_t(height), channels, false, color_space, mipmaps,
-                                   filter, wrap, values.data(), values.size());
+                                   filter, wrap, values.data.get(), values.size);
 }
 
 void update_texture(Texture& texture, const val& pixels) {
@@ -174,13 +215,20 @@ void update_texture(Texture& texture, const val& pixels) {
     const size_t expected = size_t(texture.width()) * texture.height() * texture.channels();
     if (pixels["length"].as<size_t>() != expected)
         throw std::invalid_argument("update() needs " + std::to_string(expected) + " values");
-    if (is_float) {
-        const auto values = convertJSArrayToNumberVector<float>(pixels);
-        texture.update(values.data(), values.size() * sizeof(float));
-    } else {
-        const auto values = convertJSArrayToNumberVector<uint8_t>(pixels);
-        texture.update(values.data(), values.size());
+    // The pixels go straight from the JavaScript array into the upload storage. The detour
+    // through a native copy cost a second full-image copy per update. 1-channel sRGB textures
+    // expand to RGBA on upload, so they take the copy.
+    const size_t bytes = expected * (is_float ? sizeof(float) : 1);
+    if (texture.channels() == 1 && !is_float && texture.color_space() == "srgb") {
+        const auto values = copy_numbers<uint8_t>(pixels);
+        texture.update(values.data.get(), values.size);
+        return;
     }
+    uint8_t* storage = texture.begin_update(bytes);
+    // For a typed array of the same type, set() is a memcpy into the wasm heap.
+    if (is_float) val(typed_memory_view(expected, reinterpret_cast<float*>(storage))).call<void>("set", pixels);
+    else val(typed_memory_view(expected, storage)).call<void>("set", pixels);
+    texture.commit_update();
 }
 
 val material_texture(const Material& material, int slot) {
@@ -325,7 +373,8 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("bounds", &Node::bounds)
         .function("morphTargetCount", optional_override([](const Node& node) { return double(node.morph_target_count()); }))
         .function("setMorphWeights", optional_override([](Node& node, const val& weights) {
-            node.set_morph_weights(convertJSArrayToNumberVector<float>(weights));
+            const auto values = copy_numbers<float>(weights);
+            node.set_morph_weights(values.data.get(), values.size);
         }))
         .function("same", &Node::same);
 
@@ -363,7 +412,9 @@ EMSCRIPTEN_BINDINGS(filly) {
     class_<Model>("Model")
         .function("close", &Model::close)
         .function("closed", &Model::closed)
-        .function("clone", &Model::clone)
+        .function("clone", optional_override([](Model& model) { return model.clone(); }))
+        .function("cloneInto", optional_override([](Model& model, const Scene& scene) { return model.clone(&scene); }))
+        .function("memory", &model_memory)
         .function("bounds", &Model::bounds)
         .function("transform", &Model::transform)
         .function("setTransform", &Model::set_transform)
@@ -372,6 +423,25 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("visible", &Model::visible)
         .function("setVisible", &Model::set_visible)
         .function("root", &Model::root)
+        // The root node's rotation and scale, without a Node handle for each access.
+        .function("scale", optional_override([](const Model& model) { return model.root().scale(); }))
+        .function("setScale", optional_override([](Model& model, Vec3 value) { model.root().set_scale(value); }))
+        .function("quaternion", optional_override([](const Model& model) { return model.root().quaternion(); }))
+        .function("setQuaternion", optional_override([](Model& model, Vec4 value) {
+            model.root().set_quaternion(value);
+        }))
+        .function("rotationEulerRad", optional_override([](const Model& model) {
+            return model.root().rotation_euler_rad();
+        }))
+        .function("setRotationEulerRad", optional_override([](Model& model, Vec3 value) {
+            model.root().set_rotation_euler_rad(value);
+        }))
+        .function("rotationEulerDeg", optional_override([](const Model& model) {
+            return model.root().rotation_euler_deg();
+        }))
+        .function("setRotationEulerDeg", optional_override([](Model& model, Vec3 value) {
+            model.root().set_rotation_euler_deg(value);
+        }))
         .function("nodeByName", select_overload<Node(const std::string&) const>(&Model::node))
         .function("nodeByIndex", optional_override([](const Model& model, double index) { return model.node(int64_t(index)); }))
         .function("nodes", optional_override([](const Model& model) { return array_of(model.nodes()); }))
@@ -442,7 +512,8 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("setVignetteOptions", &Scene::set_vignette_options)
         .function("setEnvironment", optional_override([](Scene& scene, const val& pixels, uint32_t width,
                                                          uint32_t height, float intensity, float rotation) {
-            scene.set_environment(convertJSArrayToNumberVector<float>(pixels), width, height, intensity, rotation);
+            const auto values = copy_numbers<float>(pixels);
+            scene.set_environment(values.data.get(), values.size, width, height, intensity, rotation);
         }))
         .function("loadEnvironmentPath", &Scene::load_environment)
         .function("loadEnvironmentKtxPath", &Scene::load_environment_ktx)
@@ -493,16 +564,15 @@ EMSCRIPTEN_BINDINGS(filly) {
                                                           double height, bool depth) {
             return renderer.import_gl_texture(texture, int64_t(width), int64_t(height), "rgba8", depth);
         }))
-        .function("render", optional_override([](Renderer& renderer, const Scene& scene,
-                                                 const ImportedTarget& target, const val& options) {
-            std::optional<Camera> camera;
-            renderer.render(scene, target, render_options(options, camera));
-        }))
+        .function("render", optional_override([](Renderer& renderer, const Scene& scene, const ImportedTarget& target,
+                                                 const Camera* camera, const val& viewport, bool clear) {
+            renderer.render(scene, target, render_options(camera, viewport, clear));
+        }), allow_raw_pointers())
         .function("renderOffscreen", optional_override([](Renderer& renderer, const Scene& scene,
-                                                          const OffscreenTarget& target, const val& options) {
-            std::optional<Camera> camera;
-            renderer.render(scene, target, render_options(options, camera));
-        }))
+                                                          const OffscreenTarget& target, const Camera* camera,
+                                                          const val& viewport, bool clear) {
+            renderer.render(scene, target, render_options(camera, viewport, clear));
+        }), allow_raw_pointers())
         .function("createTexture", &create_texture)
         .function("importGlInput", optional_override([](Renderer& renderer, uint32_t texture, double width,
                                                         double height, const std::string& color_space,

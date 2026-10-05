@@ -13,6 +13,13 @@ inline filament::Engine::Config engine_config() {
     // The SDK's handle arena fills on the same asset and logs a warning. 24 MiB fits;
     // the heap fallback did not measurably slow loading or frames.
     config.driverHandleArenaSizeMB = 32;
+    // Every render() is a Filament frame, and each frame ages the cache of transient frame-graph
+    // textures (shadow maps, MSAA and postprocessing buffers). At the default age of 1, a scene
+    // with such buffers rendered next to one other scene per refresh freed and recreated one
+    // texture per refresh; with four renders per refresh, two. Eight frames keep them for up to
+    // eight renders per refresh. A texture that frames stop using is freed at least eight frames
+    // later instead of one.
+    config.resourceAllocatorCacheMaxAge = 8;
     return config;
 }
 

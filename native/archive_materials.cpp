@@ -16,7 +16,6 @@
 #include <array>
 #include <charconv>
 #include <cstring>
-#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -130,7 +129,6 @@ public:
     // Decoded extension and diffuse-transmission textures of the current asset. The asset owns
     // them from take_material_textures() on.
     std::vector<f::Texture*> textures;
-    std::map<std::pair<size_t, bool>, f::Texture*> decoded;
     f::Texture* dummy = nullptr;
     f::Texture* dummy_cube = nullptr;
 
@@ -178,10 +176,7 @@ public:
         built_.push_back(slot);
         return slot;
     }
-    void set_asset(const PreparedAsset* value) {
-        asset = value;
-        decoded.clear();
-    }
+    void set_asset(const PreparedAsset* value) { asset = value; }
 
     f::Material* getMaterial(g::MaterialKey* config, g::UvMap* uvmap, const char* label) override {
         // gltfio asks while it builds vertex buffers, before filly knows the glTF material; the
@@ -339,23 +334,25 @@ public:
     }
     f::Texture* decode(const AssetTexture& data, bool srgb) {
         if (data.bytes.empty()) return dummy;
+        // Materials of one asset that use the same texture share its decoded copy, and so do
+        // clones: decoding again cost each clone the decode time and the texture's GPU memory,
+        // which stayed until the asset closed.
+        if (asset)
+            for (const auto& entry : asset->decoded)
+                if (entry.source == &data && entry.srgb == srgb) return entry.texture;
         auto* provider = decoder(data.mime);
         auto* texture = provider->pushTexture(data.bytes.data(), data.bytes.size(), data.mime.c_str(),
             srgb ? g::TextureProvider::TextureFlags::sRGB : g::TextureProvider::TextureFlags::NONE);
         if (!texture) throw AssetError("Could not decode material texture");
         textures.push_back(texture);
+        if (asset) asset->decoded.push_back({&data, srgb, texture});
         provider->waitForCompletion();
         provider->updateQueue();
         provider->popTexture();
         if (const char* error = provider->getPopMessage()) throw AssetError(error);
         return texture;
     }
-    // Materials of one asset that use the same glTF texture share its decoded copy.
-    f::Texture* decode_shared(size_t texture, bool srgb) {
-        auto& slot = decoded[{texture, srgb}];
-        if (!slot) slot = decode(asset->textures[texture], srgb);
-        return slot;
-    }
+    f::Texture* decode_shared(size_t texture, bool srgb) { return decode(asset->textures[texture], srgb); }
 
     const f::Material* const* getMaterials() const noexcept override { return built_.data(); }
     size_t getMaterialsCount() const noexcept override { return built_.size(); }
@@ -382,9 +379,7 @@ ArchiveProvider* provider_of(g::MaterialProvider* provider) { return static_cast
 g::MaterialProvider* create_material_provider(f::Engine* engine, bool) { return new ArchiveProvider(engine); }
 void set_prepared_asset(g::MaterialProvider* provider, const PreparedAsset* asset) { provider_of(provider)->set_asset(asset); }
 std::vector<f::Texture*> take_material_textures(g::MaterialProvider* provider) {
-    auto* p = provider_of(provider);
-    p->decoded.clear();
-    return std::exchange(p->textures, {});
+    return std::exchange(provider_of(provider)->textures, {});
 }
 std::vector<MaterialBinding> take_material_bindings(g::MaterialProvider* provider) { return std::exchange(provider_of(provider)->bindings, {}); }
 std::vector<MaterialRecord> take_material_records(g::MaterialProvider* provider) { return std::exchange(provider_of(provider)->records, {}); }

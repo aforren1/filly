@@ -606,6 +606,6 @@ Material* createMaterial(Engine* engine, const MaterialKey& config, const UvMap&
 namespace filly::detail {
 filament::Material* create_surface_material(filament::Engine* engine, const filament::gltfio::MaterialKey& key,
         const filament::gltfio::UvMap& uvmap, const char* name, unsigned lobes) {
-    return createMaterial(engine, key, uvmap, name, false, 0, lobes);
+    return createMaterial(engine, key, uvmap, name, false, unused_variants, lobes);
 }
 }

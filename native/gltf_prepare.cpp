@@ -1288,6 +1288,83 @@ Box skinned_box(const cgltf_data* data, const cgltf_node& node, const cgltf_prim
 // a mesh counts, also nodes outside the scenes. gltfio's getBoundingBox() instead moves a skinned
 // mesh's accessor box by the mesh node's transform, which the glTF specification says to ignore:
 // Sketchfab rigs scale the armature by 100 and put the 0.01 in the inverse bind matrices.
+// The buffers that gltfio 1.77.1 builds, as AssetLoader::createPrimitive() and
+// createRenderable() lay them out: each attribute uploads its accessor's range of the buffer
+// view (ResourceLoader, computeBindingSize()), normals become 8-byte tangent frames, one 4-byte
+// dummy attribute fills missing UVs and colors, 8-bit indices widen to 16 bits, and each node
+// with morph targets gets a morph target buffer of RGBA32F positions and RGBA16I tangents.
+// Primitives belong to their mesh, so meshes count once. Per instance, each skinned or morphed
+// node also gets a 16 KiB bone buffer (Filament sizes it for 256 bones), and the animator copies
+// every sampler: a map node per keyframe time (about 64 bytes with its heap header) and the
+// values as floats.
+void estimate_geometry(const cgltf_data* data, PreparedAsset& tables) {
+    auto binding = [](const cgltf_accessor* accessor) -> uint64_t {
+        if (!accessor || !accessor->count) return 0;
+        const uint64_t element = cgltf_calc_size(accessor->type, accessor->component_type);
+        const uint64_t stride = accessor->stride ? accessor->stride : element;
+        return stride * (accessor->count - 1) + element;
+    };
+    for (size_t m = 0; m < data->meshes_count; ++m) {
+        const auto& mesh = data->meshes[m];
+        for (size_t p = 0; p < mesh.primitives_count; ++p) {
+            const auto& primitive = mesh.primitives[p];
+            if (!primitive.attributes_count) continue;
+            const uint64_t vertices = primitive.attributes[0].data ? primitive.attributes[0].data->count : 0;
+            if (primitive.indices)
+                tables.geometry_bytes += primitive.indices->count * (primitive.indices->component_type == cgltf_component_type_r_32u ? 4 : 2);
+            else
+                tables.geometry_bytes += vertices * 4;
+            bool normals = false, uv0 = false, uv1 = false, color = false;
+            for (size_t a = 0; a < primitive.attributes_count; ++a) {
+                const auto& attribute = primitive.attributes[a];
+                switch (attribute.type) {
+                    case cgltf_attribute_type_tangent: continue;
+                    case cgltf_attribute_type_normal: normals = true; tables.geometry_bytes += vertices * 8; continue;
+                    case cgltf_attribute_type_texcoord: (attribute.index ? uv1 : uv0) = true; break;
+                    case cgltf_attribute_type_color: color = true; break;
+                    default: break;
+                }
+                tables.geometry_bytes += binding(attribute.data);
+            }
+            // Lit materials without normals get generated ones; filly's materials are all lit
+            // or need the slot anyway, so this counts every primitive without normals.
+            if (!normals) tables.geometry_bytes += vertices * 8;
+            if (!uv0 || !uv1 || !color) tables.geometry_bytes += vertices * 4;
+        }
+    }
+    constexpr uint64_t morph_width = 2048;
+    std::vector<bool> reached(data->nodes_count, false);
+    std::vector<const cgltf_node*> pending;
+    for (size_t s = 0; s < data->scenes_count; ++s)
+        for (size_t n = 0; n < data->scenes[s].nodes_count; ++n) pending.push_back(data->scenes[s].nodes[n]);
+    if (!data->scenes_count) for (size_t n = 0; n < data->nodes_count; ++n) if (!data->nodes[n].parent) pending.push_back(&data->nodes[n]);
+    while (!pending.empty()) {
+        const auto* node = pending.back();
+        pending.pop_back();
+        const size_t index = cgltf_node_index(data, node);
+        if (reached[index]) continue;
+        reached[index] = true;
+        for (size_t c = 0; c < node->children_count; ++c) pending.push_back(node->children[c]);
+        if (!node->mesh || !node->mesh->primitives_count) continue;
+        const uint64_t targets = std::min<uint64_t>(node->mesh->primitives[0].targets_count, 256);
+        if (targets || node->skin) tables.instance_geometry_bytes += 256 * 64;
+        if (!targets) continue;
+        uint64_t vertices = 0;
+        for (size_t p = 0; p < node->mesh->primitives_count; ++p) {
+            const auto& primitive = node->mesh->primitives[p];
+            if (primitive.attributes_count && primitive.attributes[0].data) vertices += primitive.attributes[0].data->count;
+        }
+        const uint64_t width = std::min(vertices, morph_width), height = (vertices + morph_width) / morph_width;
+        tables.instance_geometry_bytes += width * height * targets * (16 + 8);
+    }
+    for (size_t a = 0; a < data->animations_count; ++a)
+        for (size_t s = 0; s < data->animations[a].samplers_count; ++s) {
+            const auto& sampler = data->animations[a].samplers[s];
+            if (sampler.input) tables.instance_cpu_bytes += sampler.input->count * 64;
+            if (sampler.output) tables.instance_cpu_bytes += sampler.output->count * cgltf_num_components(sampler.output->type) * 4;
+        }
+}
+
 void compute_bounds(const cgltf_data* data, PreparedAsset& tables) {
     const auto worlds = node_worlds(data);
     Box bounds;
@@ -1625,6 +1702,7 @@ Prepared prepare_asset(std::vector<uint8_t> bytes, const std::string& path, cons
 
     prepare_nodes(data, tables);
     compute_bounds(data, tables);
+    estimate_geometry(data, tables);
     prepare_cameras(data, tables);
     prepare_animations(data, tables, prepared.patches, issue);
     prepare_materials(data, tables, path);
@@ -1642,7 +1720,133 @@ Prepared prepare_asset(std::vector<uint8_t> bytes, const std::string& path, cons
     return prepared;
 }
 
-void patch_source(cgltf_data* data, const Prepared& prepared) {
+namespace {
+// Appends the rest animation: for each node channel that gltfio applies in some clip, a linear
+// sampler from 0 to 1 s that holds the authored value at both keyframes. Applying it at time 0
+// restores those channels, and only those, in gltfio's own transform state. It also records
+// which clips write every such channel themselves.
+void append_rest_animation(cgltf_data* data, Prepared& prepared) {
+    auto& tables = *prepared.tables;
+    using Path = cgltf_animation_path_type;
+    using Key = std::pair<size_t, Path>;
+    auto targets = [&](const cgltf_node& node) -> size_t {
+        return node.mesh && node.mesh->primitives_count ? node.mesh->primitives[0].targets_count : 0;
+    };
+    // gltfio skips channels whose sampler has fewer than two keyframes.
+    auto applied = [&](const cgltf_animation_channel& channel) {
+        if (!channel.target_node || !channel.sampler || !channel.sampler->input || channel.sampler->input->count < 2)
+            return false;
+        const auto& node = *channel.target_node;
+        switch (channel.target_path) {
+            case cgltf_animation_path_type_translation:
+            case cgltf_animation_path_type_rotation:
+            case cgltf_animation_path_type_scale: return !node.has_matrix;
+            case cgltf_animation_path_type_weights: return targets(node) > 0;
+            default: return false;
+        }
+    };
+    std::vector<std::set<Key>> clips(data->animations_count);
+    std::set<Key> all;
+    for (size_t a = 0; a < data->animations_count; ++a) {
+        const auto& animation = data->animations[a];
+        for (size_t c = 0; c < animation.channels_count; ++c) {
+            const auto& channel = animation.channels[c];
+            if (!applied(channel)) continue;
+            const Key key{cgltf_node_index(data, channel.target_node), channel.target_path};
+            clips[a].insert(key);
+            all.insert(key);
+        }
+    }
+    for (size_t a = 0; a < data->animations_count && a < tables.animations.size(); ++a)
+        tables.animations[a].needs_rest = clips[a] != all;
+    if (all.empty()) return;
+
+    auto rest = std::make_unique<RestSource>();
+    auto& floats = rest->floats;
+    floats = {0, 1};
+    struct Range { size_t offset, count; cgltf_type type; };
+    std::vector<Range> ranges;
+    for (const auto& [index, path] : all) {
+        const auto& node = data->nodes[index];
+        std::vector<float> value;
+        cgltf_type type = cgltf_type_scalar;
+        if (path == cgltf_animation_path_type_translation) { value.assign(node.translation, node.translation + 3); type = cgltf_type_vec3; }
+        else if (path == cgltf_animation_path_type_rotation) { value.assign(node.rotation, node.rotation + 4); type = cgltf_type_vec4; }
+        else if (path == cgltf_animation_path_type_scale) { value.assign(node.scale, node.scale + 3); type = cgltf_type_vec3; }
+        else {
+            // The weights that initialize_model() restores.
+            value.assign(targets(node), 0.0f);
+            if (index < tables.nodes.size() && tables.nodes[index].weights.size() == value.size())
+                value = tables.nodes[index].weights;
+        }
+        const size_t components = type == cgltf_type_scalar ? 1 : value.size();
+        ranges.push_back({floats.size() * sizeof(float), 2 * value.size() / components, type});
+        floats.insert(floats.end(), value.begin(), value.end());
+        floats.insert(floats.end(), value.begin(), value.end());
+    }
+    rest->buffer.size = floats.size() * sizeof(float);
+    rest->buffer.data = floats.data();
+    rest->buffer.data_free_method = cgltf_data_free_method_none;
+    rest->view.buffer = &rest->buffer;
+    rest->view.size = rest->buffer.size;
+    auto accessor = [&](size_t offset, size_t count, cgltf_type type) {
+        cgltf_accessor result{};
+        result.component_type = cgltf_component_type_r_32f;
+        result.type = type;
+        result.offset = offset;
+        result.count = count;
+        result.stride = cgltf_calc_size(type, cgltf_component_type_r_32f);
+        result.buffer_view = &rest->view;
+        return result;
+    };
+    rest->accessors.reserve(ranges.size() + 1);
+    rest->accessors.push_back(accessor(0, 2, cgltf_type_scalar));
+    for (const auto& range : ranges) rest->accessors.push_back(accessor(range.offset, range.count, range.type));
+
+    // cgltf_free releases these arrays with the parse's allocator.
+    auto allocate = [&](size_t size) {
+        void* result = data->memory.alloc_func(data->memory.user_data, size);
+        if (!result) throw std::bad_alloc();
+        std::memset(result, 0, size);
+        return result;
+    };
+    const size_t count = all.size();
+    auto* samplers = static_cast<cgltf_animation_sampler*>(allocate(count * sizeof(cgltf_animation_sampler)));
+    cgltf_animation_channel* channels = nullptr;
+    cgltf_animation* animations = nullptr;
+    try {
+        channels = static_cast<cgltf_animation_channel*>(allocate(count * sizeof(cgltf_animation_channel)));
+        animations = static_cast<cgltf_animation*>(allocate((data->animations_count + 1) * sizeof(cgltf_animation)));
+    } catch (...) {
+        data->memory.free_func(data->memory.user_data, samplers);
+        data->memory.free_func(data->memory.user_data, channels);
+        throw;
+    }
+    size_t k = 0;
+    for (const auto& [index, path] : all) {
+        samplers[k].input = &rest->accessors[0];
+        samplers[k].output = &rest->accessors[k + 1];
+        samplers[k].interpolation = cgltf_interpolation_type_linear;
+        channels[k].sampler = &samplers[k];
+        channels[k].target_node = &data->nodes[index];
+        channels[k].target_path = path;
+        ++k;
+    }
+    if (data->animations_count) std::memcpy(animations, data->animations, data->animations_count * sizeof(cgltf_animation));
+    auto& added = animations[data->animations_count];
+    added.samplers = samplers;
+    added.samplers_count = count;
+    added.channels = channels;
+    added.channels_count = count;
+    data->memory.free_func(data->memory.user_data, data->animations);
+    data->animations = animations;
+    tables.rest_animation = int(data->animations_count);
+    ++data->animations_count;
+    prepared.buffers->rest = std::move(rest);
+}
+}
+
+void patch_source(cgltf_data* data, Prepared& prepared) {
     attach(data, *prepared.buffers);
     const auto& patches = prepared.patches;
     for (const auto view : patches.decoded_views) data->buffer_views[view].has_meshopt_compression = false;
@@ -1663,6 +1867,7 @@ void patch_source(cgltf_data* data, const Prepared& prepared) {
         std::free(data->images[index].mime_type);
         data->images[index].mime_type = copy;
     }
+    append_rest_animation(data, prepared);
 }
 
 std::vector<uint8_t> mesh_placeholder(const std::array<float, 3>& low, const std::array<float, 3>& high,
