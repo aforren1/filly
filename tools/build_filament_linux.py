@@ -13,9 +13,9 @@ import urllib.request
 VERSION = "1.77.1"
 SOURCE_SHA256 = "c55e2f99fd5e8840f132d03f1b019bc820c37d9df6d2c2ce2f3930367b081a45"
 SDK_SHA256 = "ec0f5287a3a2fb801a93fd7b0ffd80c894aac980716d6f91ec48e5370d2d0674"
-LIBRARIES = "gltfio gltfio_core filamat shaders uberarchive filament-iblprefilter filament backend filabridge filaflat geometry ibl utils bluegl smol-v stb dracodec meshoptimizer mikktspace uberzlib zstd basis_transcoder ktxreader image abseil".split()
-# Host tools for filly's material archive (CMake FILLY_MATERIALS=archive). The release archive's
-# tools need a newer glibc than manylinux_2_28, so they are built here with the libraries.
+LIBRARIES = "gltfio_core filament-iblprefilter filament backend filabridge filaflat geometry ibl utils bluegl smol-v stb dracodec meshoptimizer mikktspace uberzlib zstd basis_transcoder ktxreader image abseil".split()
+# Host tools for filly's material archive. The release archive's tools need a newer glibc than
+# manylinux_2_28, so they are built here with the libraries.
 TOOLS = ["matc", "uberz", "matinfo"]
 
 
@@ -98,6 +98,7 @@ def main():
                     # libstdc++ mutexes do not carry libc++'s Clang capability annotations.
                     "-DCMAKE_CXX_FLAGS=-Wno-error=thread-safety-attributes -Wno-error=thread-safety-analysis",
                     "-DUSE_STATIC_LIBCXX=OFF", "-DFILAMENT_ENABLE_RTTI=ON", "-DFILAMENT_ENABLE_EXCEPTIONS=ON",
+                    # matc needs filamat; the module does not link it.
                     "-DFILAMENT_SKIP_SAMPLES=ON", "-DFILAMENT_SKIP_SDL2=ON", "-DFILAMENT_BUILD_FILAMAT=ON",
                     "-DFILAMENT_SUPPORTS_VULKAN=OFF", "-DFILAMENT_SUPPORTS_WEBGPU=OFF",
                     "-DFILAMENT_SUPPORTS_XCB=OFF", "-DFILAMENT_SUPPORTS_XLIB=ON",
@@ -120,7 +121,6 @@ def main():
         if len(matches) != 1:
             raise RuntimeError(f"Expected one archive for {name}, found: {matches}")
         shutil.copy2(matches[0], library_dir / f"lib{name}.a")
-    shutil.copy2(build / "libs/gltfio/materials/uberarchive.h", output / "include/gltfio/materials/uberarchive.h")
     tool_dir = output / "bin"
     tool_dir.mkdir(parents=True, exist_ok=True)
     for name in TOOLS:

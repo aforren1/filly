@@ -63,25 +63,15 @@ For an offline build, extract the same release and pass its folder:
 
 The hash check does not apply to a local folder. Use only the verified release.
 
-## Material path
+## Material archive
 
-The CMake option `FILLY_MATERIALS` selects how glTF materials get their shaders:
+glTF materials use filly's precompiled material archive. The build compiles it from
+`native/materials` with the SDK's `matc` and `uberz` and embeds it in the module. The module
+has no material compiler, so nothing is compiled at run time. The design and the entry list are
+in [material precompilation](../explanation/material-precompilation.md).
 
-| Value | Behavior |
-| --- | --- |
-| `runtime` (default) | The module compiles each material configuration with Filament's material compiler (`filamat`) while it loads an asset. |
-| `archive` | The module uses filly's precompiled material archive. The build compiles it from `native/materials` with the SDK's `matc` and `uberz`. Nothing is compiled at run time. |
-
-The design and the entry list are in
-[material precompilation](../explanation/material-precompilation.md). To build the archive
-path on Windows, add the option to the install command:
-
-```powershell
-uv pip install --python .venv\Scripts\python.exe --no-build-isolation -e . -Ccmake.define.FILLY_MATERIALS=archive
-```
-
-Every build compiles the materials of filly's output passes (encode and FXAA) with `matc`. The
-archive step also needs `uberz`, and optionally `matinfo`. All come from the same Filament
+The build also compiles the materials of filly's output passes (encode and FXAA) with `matc`.
+The archive step also needs `uberz`, and optionally `matinfo`. All come from the same Filament
 version as the SDK. The build looks for them in `FILAMENT_ROOT/bin`. The Windows SDK archive contains them.
 The Linux SDK tool builds them (see [Build on Linux](#build-on-linux)). To use other copies, set
 `-Ccmake.define.FILLY_MATERIAL_TOOLS=<directory>`. `matinfo` lets the build check that the
@@ -92,12 +82,6 @@ the check does not run.
 `-a;opengl;-p;desktop;-V;stereo,ssr,vsm`: desktop OpenGL only, without the stereo,
 screen-space reflection, and VSM shadow variants that filly does not use. Add `-g` for
 unoptimized shaders when you compare shader precision.
-
-To check which path an installed module uses:
-
-```powershell
-.venv\Scripts\python.exe -c "import filly; print(filly._native._materials)"
-```
 
 The archive is platform independent. A Linux build and a Windows build of the same sources give
 the same entries. The Linux `matc` is built from source, so its output bytes can differ from the
@@ -128,7 +112,7 @@ CXX=clang++ uv pip install --no-build-isolation -e . -Ccmake.define.FILAMENT_ROO
 
 The tool verifies the source and public-header archive hashes. All linked Filament libraries
 are built locally. The tool also builds the host tools `matc`, `uberz`, and `matinfo` for the
-[archive material path](#material-path); the tools in the release archive need a newer glibc
+[material archive](#material-archive); the tools in the release archive need a newer glibc
 than manylinux_2_28. The staged SDK contains `include`, `lib/x86_64`, `bin`, and
 `build-info.json`. `build-info.json` lists the source patches and the tools. If it does not list
 every patch or tool in the tool's lists, or a library in the tool's list is missing, delete the

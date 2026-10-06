@@ -13,9 +13,10 @@ Every number in this document has a label: *measured* (with the method in
 [Experiments](#experiments)) or *estimate*. Measurements are from Filament 1.77.1 on the Intel
 Iris Xe test machine, unless a section states otherwise.
 
-Status (September 29, 2026): phases 1 to 3 are implemented. The archive path is the CMake option
-`FILLY_MATERIALS=archive`; the default build stays on the runtime path until the owner has
-reviewed the results. See [Phase 1 to 3 results](#phase-1-to-3-results-september-29-2026).
+Status (October 6, 2026): all five phases are implemented. filly's material archive is the only
+material path, and the module has no material compiler. See
+[Phase 1 to 3 results](#phase-1-to-3-results-september-29-2026) and
+[Phase 4 results](#phase-4-results-october-6-2026).
 
 ## Why this matters
 
@@ -26,10 +27,11 @@ reviewed the results. See [Phase 1 to 3 results](#phase-1-to-3-results-september
 | Load latency | A new material configuration costs 0.1 to 0.35 s per asset, most of it in `filamat`. |
 | Other frontends | The planned MATLAB frontend links the same core. `filamat` (glslang, SPIRV-Tools, SPIRV-Cross) is the largest part of any port, for example a MinGW build for Octave. |
 
-## What filly compiles at run time today
+## What filly compiled at run time before phase 4
 
-The core calls `filamat::MaterialBuilder` in two places and uses gltfio's `JitShaderProvider` in a
-third. The list below is complete for the current source.
+The core called `filamat::MaterialBuilder` in two places and used gltfio's `JitShaderProvider` in
+a third. The list below was complete for the source of September 29, 2026. Phase 4 removed all of
+it.
 
 | Source | What it compiles | When |
 | --- | --- | --- |
@@ -452,7 +454,8 @@ first use of a large entry. Two points stay open for phase 3:
    (`ArchiveSpecs`, `reduce_for_archive()`), the key-based variant logic in `slots.inc`, and the
    8- and 5-texture rules. The plan to warm the common entries with `Material::compile()` was
    dropped on September 30: warmup made first frames slower (see
-   [gap closure](#gap-closure-september-30-2026)).
+   [gap closure](#gap-closure-september-30-2026)). *Done October 6, 2026; see
+   [Phase 4 results](#phase-4-results-october-6-2026).*
 5. **Web.** Build the same `.mat` sources with `-p mobile`, and link the provider into the
    Emscripten build. *Done October 3, 2026: `web/`, [the web build](web.md). The output-pass
    materials moved from `filamat` to precompiled packages for it, in every build.*
@@ -482,18 +485,18 @@ first use of a large entry. Two points stay open for phase 3:
 - The `.mat` sources use Filament's `MaterialInputs` fields, property names, and blending
   defines. Review them with the release notes.
 - The refraction hook depends on the name `sampler0_ssr` and on the order of the generated shader.
-  This is the same review as today (see `native/refraction.h`). Add a build check that the
+  Review `native/refraction.h`. Add a build check that the
   optimized GLSL still contains the hook. *Done: `native/materials/check_refraction.cmake`.*
 - The provider depends on gltfio's texture parameter names for the core roles and on the order of
   `createMaterialInstance()` and texture binding in `AssetLoader`.
-- It no longer depends on `UbershaderProvider`, `ArchiveCache`, or `prepareConfig()`, which filly
-  copies today.
+- It does not depend on `UbershaderProvider`, `ArchiveCache`, `prepareConfig()`, or
+  `JitShaderProvider`. Before phase 4, filly copied or called them.
 
 ## Phase 1 to 3 results (September 29, 2026)
 
-Phases 1 to 3 are implemented. The default build keeps the runtime path; build the archive path
-with `-Ccmake.define.FILLY_MATERIALS=archive` (see [build](../how-to/build.md#material-path)).
-Phases 4 and 5 are not started. Measurements are on the Intel Iris Xe test machine unless a
+Phases 1 to 3 are implemented. At this date the default build kept the runtime path, and the
+CMake option `FILLY_MATERIALS=archive` selected the archive path; phase 4 removed the option and
+the runtime path. Phases 4 and 5 were not started then. Measurements are on the Intel Iris Xe test machine unless a
 row names the NVIDIA RTX A500 Laptop GPU of the same machine.
 
 ### Phase 1: fixes that any ubershader path needs
@@ -856,6 +859,7 @@ the design estimated (7.3 to 7.4 MB). The Linux archive wheel is 2,488,650 bytes
 - Materials over the slot limit in real assets; only generated test assets exercise the drop.
 - `TEXCOORD_2` and higher in real assets; none in the sample set.
 - Removal of `filamat` (phase 4). The web build (phase 5) runs; see [the web build](web.md).
+  *Phase 4 done October 6, 2026.*
 
 ## Gap closure (September 30, 2026)
 
@@ -1115,9 +1119,69 @@ runs each.
   extension and differs from `gltf_viewer` for strengths other than 1.
 - NVIDIA timings are noisy (CPU clock drop). A real driver update was not tested.
 
+## Phase 4 results (October 6, 2026)
+
+The owner accepted the archive path. Phase 4 removed the runtime path, so the archive path is the
+only material path in every build.
+
+### What was removed
+
+- The CMake option `FILLY_MATERIALS` and its runtime branch. `materials.cmake`, `embed.cmake`,
+  and `check_refraction.cmake` run in every build.
+- `filamat`, `shaders`, `uberarchive`, and `gltfio` from the link line. `gltfio_core` has
+  everything that filly's provider uses; the web build already linked only `gltfio_core`. The
+  Linux SDK tool no longer stages these libraries or `uberarchive.h`. It still builds `filamat`,
+  because `matc` needs it.
+- `native/materials.cpp` (613 lines): `ArchiveSpecs`, `reduce_for_archive()`, the provider that
+  wrapped `JitShaderProvider` and `UbershaderProvider`, the runtime diffuse-transmission builder,
+  the material cache, and `create_material_instance()`.
+- `native/surface_material.cpp` (611 lines): the generator adapted from `JitShaderProvider`.
+- The key-based variant logic of `assign_texture()` in `native/slots.inc`, the key in each
+  runtime texture assignment, and the "compiled without texture transforms" error.
+- The texture-count preflight in `native/gltf_prepare.cpp` (the 8- and 5-texture rules). The
+  archive path never ran it. Every entry has fixed samplers for the five core textures, and
+  extension textures share the entry's generic samplers; `plan_archive_materials()` drops the
+  least important extension textures with a warning when they do not fit. No other sampler
+  limit applies, so the per-entry plan covers every case that the preflight guarded.
+- `Renderer(precompiled_shaders=...)`, `Renderer.precompiled_shaders`,
+  `Scene::precompiled_shaders()`, `filly._native._materials`, the `precompiled_shaders` argument
+  of the pyglet and PsychoPy `create_renderer()`, and `precompiledShaders` in `web/filly.js`.
+- Tables that only the runtime path read: the texture fields of `SurfaceSource`,
+  `MaterialSource::root_label`, `PreparedAsset::custom_materials()`, and the `custom` flag of
+  `MaterialRecord`.
+
+`native/archive_materials.cpp` needed nothing from the deleted files. It already had its own
+copies of the small helpers (the material marker, the sampler and matrix conversions, texture
+decoding, and the WebP texture provider). `native/materials.h` keeps the provider interface.
+`native/refraction.h` stays as the source of the refraction code that `materials.cmake` reads;
+no C++ file includes it now.
+
+### Results
+
+*Measured* on the Intel Iris Xe test machine, Windows, Python 3.12:
+
+| Item | Before | After |
+| --- | ---: | ---: |
+| Module (`_native.pyd`, editable build) | 15,207,424 bytes (runtime path) | 7,421,952 bytes |
+| C++ and CMake lines in `native/` and `CMakeLists.txt` | 9,059 | 7,632 |
+| Windows suite without the browser tests | 545 passed, 14 skipped | 529 passed, 6 skipped |
+| PsychoPy suite (Python 3.11) | 23 passed | 23 passed |
+
+The material archive (`filly.uberz`, 152,571 bytes) is byte-identical to the archive of the
+October 3 archive-path build, so the shaders did not change. The 8 skips that went away were the
+archive-only tests. Tests whose only subject was the runtime path or Filament's archive matching
+were removed (the 9-texture `AssetError`, the generated-material limits, and the "other slots"
+error). Tests that compared the two paths now check the archive path alone.
+
+The browser tests (`tests/test_web.py`) need a new web build: the build in `build/web` predates
+phase 4, and its `Renderer` constructor still takes two arguments. With the old glue they pass
+(16 passed).
+
+Not verified in phase 4: the Linux build and wheel without `gltfio`, and the web build.
+
 ## Findings
 
-These came up during the investigation and apply to the current code:
+These came up during the investigation. Each entry states its outcome.
 
 - With `precompiled_shaders=True`, `Scene.create_mesh()` without `colors` renders an unlit fade
   plane with color (0, 0, 0) instead of its base color. The archive material requires `COLOR`, and
@@ -1127,7 +1191,8 @@ These came up during the investigation and apply to the current code:
   test scene this differs from the isotropic lobe by up to 8 of 255. *Fixed in phase 1.*
 - With `precompiled_shaders=True`, specular-only materials use the SDK transmission entry and are
   drawn as refractive objects. *Fixed in phase 1.*
-- The SDK archive keeps 8 MB decompressed in memory, twice in filly.
+- The SDK archive keeps 8 MB decompressed in memory, twice in filly. *Removed in phase 4: filly
+  no longer links the SDK archive.*
 
 ## Experiments
 

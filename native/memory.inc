@@ -55,7 +55,6 @@ uint64_t table_bytes(const detail::PreparedAsset& tables) {
     uint64_t total = 0;
     auto texture = [&](const detail::AssetTexture& item) { total += item.bytes.size(); };
     for (const auto& item : tables.diffuse) { texture(item.factor_texture); texture(item.color_texture); texture(item.thickness_texture); }
-    for (const auto& item : tables.surfaces) { texture(item.anisotropy_texture); texture(item.iridescence_texture); texture(item.thickness_texture); }
     for (const auto& item : tables.textures) texture(item);
     for (const auto& clip : tables.animations)
         for (const auto& track : clip.tracks) total += (track.times.size() + track.values.size()) * sizeof(float);

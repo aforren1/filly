@@ -56,7 +56,7 @@ material instance. A variant that maps the slot gets a fresh copy of the variant
 the node shows the variant and handles stay valid. Each copy records the instance that it was
 copied from; property animation writes to that instance and to its copies, so a recolored node
 keeps animating. Copies are released when the model closes, after the slot gets its source
-instance back. Compiled shader definitions stay in the renderer's material cache.
+instance back. The archive entry materials stay with the renderer's material provider.
 
 Native destruction must happen on the creating thread. Cross-thread destruction and interpreter
 shutdown order need further hardening. Call `close()` explicitly or use a context manager.
@@ -136,22 +136,15 @@ reuses a buffer only after its callback; a fourth update in a row without a rend
 Float data is stored as 16-bit floats: 32-bit storage measured no faster to upload on the tested
 driver and doubles GPU memory.
 
-glTF materials are compiled for their texture slots, so a flat-colored glTF material has no base
-color sampler. The material provider records the `MaterialKey` of each instance it creates. An
-assignment asks the provider for the material of the same key with the slot and texture
-transforms added, and copies the factors and render state from the old instance. The texture
-indices are not copied, because the provider sets them from the key. The replacement shows in
-every primitive that showed the glTF instance; gltfio keeps the glTF instance, and variants,
-property animation, and removal go through it. Filament has no API to read a texture binding
-back from a material instance, so a rebuilt material cannot keep other glTF textures; that case
-raises an error. When the glTF material already has the slot and other textures, the handle shows
-a duplicate of it instead, which keeps them.
-
-On the archive material path (CMake `FILLY_MATERIALS=archive`), every archive entry has the
-base-color and emissive samplers, with UV set and transform uniforms. An assignment therefore
-always shows a duplicate of the glTF instance with changed parameters, for every material. A
-removal duplicates the glTF instance again, because it still has the glTF texture of the slot,
-and copies the factors and render state from the old handle. Nothing is compiled.
+Every archive entry has the base-color and emissive samplers, with UV set and transform
+uniforms, so a glTF material without textures can also take a runtime texture. An assignment
+shows a duplicate of the glTF instance with changed parameters. The duplicate keeps the other
+glTF textures, because `MaterialInstance::duplicate()` copies the texture bindings.
+The replacement shows in every primitive that showed the glTF instance; gltfio keeps the glTF
+instance, and variants, property animation, and removal go through it. A removal duplicates the
+glTF instance again, because it still has the glTF texture of the slot, and copies the factors
+and render state from the old handle. The texture indices are not copied, because they select
+the UV sets of the glTF textures. Nothing is compiled.
 
 A generated mesh is loaded as a one-triangle glTF with the requested material and attributes,
 then its renderable gets the mesh's own vertex and index buffers (`setGeometryAt()`). The loader
@@ -159,7 +152,7 @@ therefore gives it the same material as a glTF file with those factors, and the 
 nodes, material handles, clones, and closing without a second code path. The placeholder's
 accessor bounds are the mesh bounds. Positions, tangent frames, UVs, and colors are separate
 vertex buffers, so an update uploads only what changed. A mesh without colors gets a white
-`UBYTE4` color buffer, and `UV1` reads the `UV0` buffer: precompiled materials serve every key,
+`UBYTE4` color buffer, and `UV1` reads the `UV0` buffer: archive entries serve every material,
 so they always read both attributes and multiply by the vertex color. Creation uses Filament's
 `SurfaceOrientation` for tangent frames. It allocates on every build, so updates use a copy of
 its method that writes into the staging buffer; a test checks that both give the same image.
@@ -309,10 +302,9 @@ that Filament writes for `MASK` materials in an opaque view, which the material 
 correct. On the direct path, Filament writes the fragment shader's alpha. Lit materials write one
 unless they blend, and blending over a cleared alpha of one keeps one, so the wrapper clears
 opaque views to alpha one. Filament's unlit shader passes base-color alpha through for `OPAQUE`
-materials; the wrapper compiles unlit `OPAQUE` materials with its own generator, which sets the
-alpha to one, in both shader modes, and the archive path's opaque unlit entry does the same. The
-direct path rejects `MASK` materials. Rewriting them (for example `OPAQUE` as `MASK` with cutoff
-zero) was rejected: with MSAA, alpha to coverage would then drop samples.
+materials; filly's opaque unlit archive entry sets the alpha to one instead. The direct path
+rejects `MASK` materials. Rewriting them (for example `OPAQUE` as `MASK` with cutoff zero) was
+rejected: with MSAA, alpha to coverage would then drop samples.
 
 Transparent views keep premultiplied linear color in the RGBA16F buffer. The encode pass divides
 by alpha, encodes, and multiplies again: srgb(c) * a, which is what hosts that blend in encoded
@@ -434,30 +426,19 @@ internals. Other versions and backends need separate tests.
 ## Dependencies
 
 The initial build uses the [official Filament 1.77.1 SDK](https://github.com/google/filament/releases/tag/v1.77.1).
-The default material provider compiles glTF configurations at load time. `precompiled_shaders=True`
-selects Filament's precompiled archive, but only for materials that an archive entry matches
-exactly. The wrapper reads the archive's feature table and copies the SDK's `prepareConfig()`
-reductions. Without an exact match, the SDK drops features or substitutes a default material and
-then sets parameters that the default lacks, which aborts the process (for example sheen,
-specular, and IOR together). Those materials are compiled instead. The wheel includes the material
-compiler in both modes. Review the copied reductions when upgrading the SDK.
-
-A lit material at feature level 1 has 8 texture samplers. Filament's compiled provider aborts on
-a 9th; this was measured with generated assets. Loading counts texture slots and raises
-`AssetError` first. With precompiled shaders such a material is reduced as the archive would reduce it, and
-a warning names it. Materials that the wrapper compiles itself raise `AssetError` from the shader
-compiler instead of aborting.
-The extension links only the selected static libraries. The SDK tools are not installed in the wheel.
-
-The archive material path replaces both providers with filly's own
-(`native/archive_materials.cpp`). The build compiles `native/materials` with `matc` and packs
+glTF materials come from filly's own material provider (`native/archive_materials.cpp`), not
+from gltfio's providers. The build compiles `native/materials` with the SDK's `matc` and packs
 the packages with `uberz` into one zstd archive, which the module embeds. The provider maps each
 glTF material to an entry by its preparation plan (below), sets defaults, binds the extension
 textures to the entry's generic samplers, and clears the extension texture bits and unsupported
 features in the key that it returns, so that gltfio binds only the core textures and sets only
-parameters that the entry has. It links no material compiler: `filamat` stays on the link line
-in this phase, but the linker drops it (the module is 7.3 MB instead of 15.1 MB). See
-[material precompilation](material-precompilation.md).
+parameters that the entry has. A material with more extension textures than its entry has
+samplers loads without the least important ones, and a warning names them.
+
+The module links no material compiler (`filamat`) and no gltfio material provider. It is
+7.4 MB; with `filamat` it was 15.2 MB. See [material precompilation](material-precompilation.md).
+The extension links only the selected static libraries. The SDK tools are not installed in the
+wheel.
 
 ## glTF preparation
 
@@ -475,7 +456,7 @@ the functions, so both parses have the same structure layout. Accessors are read
 
 A load has these steps:
 
-1. Parse the document, check extensions and material combinations, and count texture samplers.
+1. Parse the document, and check extensions and material combinations.
 2. Load every buffer: the GLB binary chunk in place, data URIs decoded, and files read through
    wide paths. gltfio's own buffer reads use narrow `fopen()`, which fails in folders with
    non-ASCII names. A buffer that only meshopt-compressed views use is allocated, not read.
@@ -483,10 +464,10 @@ A load has these steps:
    meshoptimizer 1.0 into the buffers that the views name. Filament's meshoptimizer 0.18 has no
    version 1 vertex codec or COLOR filter, and cgltf does not know the KHR extension.
 4. Build the tables: node names, visibility, morph weights, cameras, property animation tracks,
-   and the anisotropy, iridescence, and diffuse-transmission materials with their texture bytes.
-   On the archive material path, also a plan for each material: its archive entry, the generic
-   sampler of each extension texture, and the image bytes of those textures. Textures over the
-   entry's sampler count are dropped here, so the warning follows the strict setting.
+   the anisotropy and iridescence factors, the diffuse-transmission materials with their texture
+   bytes, and a plan for each material: its archive entry, the generic sampler of each extension
+   texture, and the image bytes of those textures. Textures over the entry's sampler count are
+   dropped here, so the warning follows the strict setting.
 5. `AssetLoader::createInstancedAsset()` with zero instances. gltfio parses the document and
    builds vertex buffers, but creates no entities or material instances yet.
 6. Patch gltfio's parse (`FilamentAsset::getSourceAsset()`) by index: point its buffers at the
@@ -505,26 +486,18 @@ label (the material name), and the extras text, and its entity lists are not in 
 `createInstance()` runs, gltfio reads node and material extras as `json + offset`
 (`AssetLoader.cpp`, `recurseEntities()` and `createMaterialInstance()`). filly points these
 ranges at markers, `#n<index>` and `#m<index>`, for that call only, and then restores the parse.
-The material markers reach the provider, which picks the provider-built material and its tables
-by index and records the instance for property animation. The node markers become each
+The material markers reach the provider, which picks the material's plan and tables by index
+and records the instance for property animation. The node markers become each
 entity's extras, which filly reads back into a node-index table and does not expose. A missing
 marker raises `AssetError`, so an SDK change that breaks this fails loudly. The previous design
 rewrote the document with `filly*` keys in extras and searched them with `strstr`, which could
 match user extras.
 
 gltfio also calls `MaterialProvider::getMaterial()` in `createAsset()`, before any instance, to
-choose each primitive's vertex layout; that call has only the key and the name. In an asset with
-provider-built materials, the provider therefore gives every material the same UV layout rule:
-the standard material's layout, then `TEXCOORD_0` and `TEXCOORD_1` in that order on the free UV
-sets. The layout then does not depend on which material the primitive has. Of the returned
-material, gltfio uses only the required attributes. The provider returns the material that the
-name identifies, and builds it then, as gltfio's own providers do. For a name that a
-provider-built material shares with another material, it returns a lit or unlit placeholder
-with the same attributes. When the marker identifies the material, the provider checks that the
-instance's layout is the one that the vertex buffers have. Other assets keep gltfio's layout.
-The archive material path uses one fixed layout for every material instead: `TEXCOORD_0` in UV0
-and `TEXCOORD_1` in UV1. It then needs no name lookup, and variant materials and runtime
-textures always find their UV sets.
+choose each primitive's vertex layout; that call has only the key and the name. Of the returned
+material, gltfio uses only the required attributes. The provider therefore uses one fixed layout
+for every material: `TEXCOORD_0` in UV0 and `TEXCOORD_1` in UV1. It needs no name lookup, and
+variant materials and runtime textures always find their UV sets.
 
 One document rewrite remains. `EXT_mesh_gpu_instancing` becomes one child node per instance.
 gltfio renders one mesh per node and has no instancing, and new nodes cannot be added to a parse
@@ -534,8 +507,8 @@ indices.
 
 WebP images decode through a `TextureProvider` for `image/webp` built on libwebp 1.5.0
 (`native/webp_provider.cpp`), because the SDK is built without WebP. It follows gltfio's own
-WebP provider: RGBA8 texels, sRGB when requested, and a full mip chain. Provider-built materials
-use the same provider for their WebP textures. Runtime textures take pixel arrays, so they need
+WebP provider: RGBA8 texels, sRGB when requested, and a full mip chain. filly's material
+provider uses it for the WebP textures that it decodes itself. Runtime textures take pixel arrays, so they need
 no image provider.
 
 ## Materials and effects beyond gltfio
@@ -552,11 +525,10 @@ The diffuse material also sets `flipUV(false)`, as the SDK's glTF materials do;
 otherwise thickness and occlusion maps sample the wrong parts of an atlas.
 
 The SDK has anisotropy and iridescence shading inputs, but its glTF loader does not expose them.
-The extended provider adds their parameters and textures to a shader generator adapted from
-Filament 1.77.1's `JitShaderProvider.cpp`. Filament still supplies direct lighting, environment
-lighting, and the surface model. Both material modes compile these extended configurations.
-Review the adapted generator when upgrading the SDK. Custom diffuse transmission remains a
-separate material with its documented combination restrictions. The unratified
+filly's archive entries have their parameters, and their textures use the entries' generic
+samplers. Filament still supplies direct lighting, environment lighting, and the surface model.
+Review `native/materials/surface.mat.in` when upgrading the SDK. Custom diffuse transmission
+remains a separate entry with its documented combination restrictions. The unratified
 `KHR_materials_retroreflection` extension is not implemented.
 
 Point lights use Filament's six-face shadow maps. The earlier wrapper rejection was incorrect;
@@ -576,8 +548,8 @@ with the SDK's older decoder. Instance children share mesh resources, but this p
 reduce draw calls with explicit GPU batching. Node visibility is evaluated in parent-first order
 without per-frame allocation and controls scene membership for meshes and lights.
 
-Volume materials also use the adapted generator in both material modes. Filament 1.77.1 passes
-only a mesh node's local scale to its volume shader; its source marks this as a TODO.
+Volume materials use filly's solid refraction entries. Filament 1.77.1 passes only a mesh
+node's local scale to its volume shader; its source marks this as a TODO.
 `KHR_materials_volume` requires the complete node transform. The wrapper computes the scale from
 the model-to-world transform in the vertex shader. This includes parent nodes, animation, and
 application edits without modifying authored thickness or shared material instances. The scalar
@@ -585,9 +557,8 @@ is the mean of the three transformed axis lengths; nonuniform scale remains an a
 This is the one intended difference from `gltf_viewer` in Filament's own materials:
 MosquitoInAmber, whose amber sits under a 0.1 parent scale, differs by up to 175 levels. Volume
 assets without scaled parents match.
-The material cache also compares the dispersion flag, which the pinned SDK's equality operator omits.
 
-Transmission materials use this generator in both modes. For perspective cameras their shading
+Transmission materials use filly's refraction entries. For perspective cameras their shading
 is the SDK's, so they match `gltf_viewer` (maximum difference 1 of 255 on the tested assets).
 That includes the SDK's rough-glass blur: an angle converted to texels with `tan(full vertical
 FOV)`, which fades toward 90 degrees and is undefined above it. For an orthographic camera the
@@ -615,8 +586,9 @@ needs an irradiance cubemap; it is filtered from a full-mip copy of the IBL's sh
 The filter runs only when a model with that material is in the scene, at the environment load or
 at the model load, whichever comes later: it cost about 60 ms per environment, plus about 35 ms
 to build the filter once per renderer (256-pixel IBL, desktop). It performs GPU work and a
-completion wait during setup. Each prefilter object builds its material on first use. Material
-compilation, image decoding, and environment filtering belong outside a trial's frame loop.
+completion wait during setup. Each prefilter object builds its material on first use. Shader
+compilation in the driver on first use, image decoding, and environment filtering belong outside
+a trial's frame loop.
 The renderer creates Filament's IBL prefilter objects once and reuses them. When they were
 destroyed after each call, models loaded after `set_environment()` could render black on
 Intel and NVIDIA. The cause inside Filament is not isolated.

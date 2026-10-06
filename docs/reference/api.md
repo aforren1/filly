@@ -17,34 +17,16 @@ logging, Python exceptions, or direct output that bypasses Filament's log stream
 
 ## Renderer
 
-`Renderer(*, shared_context=None, precompiled_shaders=False)` creates an OpenGL renderer.
+`Renderer(*, shared_context=None)` creates an OpenGL renderer.
 `shared_context` accepts the current host WGL context on Windows or GLX context on Linux as an
 integer. `current_gl_context()` returns that handle, or zero if no context is current. Passing
 zero explicitly as `shared_context` is an error. On Linux, an offscreen renderer uses EGL or GLX;
 see [Run on Linux](../how-to/build.md#run-on-linux). It needs no X display if EGL is available.
 
-How glTF materials get their shaders depends on the material path of the build
-(CMake `FILLY_MATERIALS`, see [Material path](../how-to/build.md#material-path)).
-`filly._native._materials` reports it as `"runtime"` or `"archive"`.
-
-On the **runtime** path (the default build), `precompiled_shaders` selects:
-
-- `False` (default): compile each glTF material configuration during loading. This adds 0.1 to
-  0.35 s for each asset with new configurations.
-- `True`: use Filament's precompiled material archive where an archive entry matches exactly,
-  and compile the other configurations. Loading is faster when the archive covers the asset.
-
-Both settings render the same complete material, and both compile the custom
-diffuse-transmission, anisotropy, iridescence, transmission, and volume materials. Both also
-compile unlit `OPAQUE` materials, so that they store alpha one on the direct
-[output path](#output-path): with `True`, the first unlit plane took 129 ms to load instead of
-14 ms for a lit one. A renderer compiles each configuration once.
-See [texture limits](#texture-limits) for the one case in which they differ. The material
-compiler is in the wheel for both settings.
-
-On the **archive** path, every glTF material is an instance of an entry of filly's precompiled
-material archive. Nothing is compiled while loading, and `precompiled_shaders` has no effect. The
-archive has 39 entries: core lit; lit with clearcoat, sheen, and iridescence, with and without
+Every glTF material is an instance of an entry of filly's precompiled material archive, which
+the build embeds in the module (see [Material archive](../how-to/build.md#material-archive)).
+Nothing is compiled while loading, and the module has no material compiler. The archive has 39
+entries: core lit; lit with clearcoat, sheen, and iridescence, with and without
 `KHR_materials_specular`; lit with anisotropy; thin and solid refraction with and without
 `KHR_materials_specular` and with anisotropy; specular-glossiness; unlit; and diffuse
 transmission, each opaque, masked, and blended. Only materials with `KHR_materials_specular` get
@@ -52,15 +34,13 @@ an entry with specular inputs: with them, Filament uses the specular extension's
 its F90 from F0, which is lower for dark metals and low IOR. See
 [material precompilation](../explanation/material-precompilation.md).
 
-On both paths, the GPU driver compiles each GL program at its first draw, so render one warmup
-frame after loading and before a timing-critical trial, or [prepare the scene](#prepare-a-scene)
-first. The driver keeps compiled programs in its
-own disk cache, so the first frames are much slower on a machine or driver that has not seen the
-programs. With six sample assets on the test machine, the first frame of each took 1.3 s in
-total on the archive path and 2.8 s on the runtime path with cold driver caches (Intel Iris Xe),
-and 0.07 s and 0.25 s with warm caches. filly does not compile programs at renderer creation and
-does not keep its own program binary cache: neither made the first frames faster in these
-measurements. See
+The GPU driver compiles each GL program at its first draw, so render one warmup frame after
+loading and before a timing-critical trial, or [prepare the scene](#prepare-a-scene) first. The
+driver keeps compiled programs in its own disk cache, so the first frames are much slower on a
+machine or driver that has not seen the programs. With six sample assets on the test machine,
+the first frame of each took 1.3 s in total with cold driver caches (Intel Iris Xe), and 0.07 s
+with warm caches. filly does not compile programs at renderer creation and does not keep its
+own program binary cache: neither made the first frames faster in these measurements. See
 [material precompilation](../explanation/material-precompilation.md#gap-closure-september-30-2026).
 
 Transmission and volume shading is Filament's. For perspective cameras it is identical to
@@ -92,7 +72,6 @@ Assets with roughly 18,000 or more meshes can still exceed the ring and abort th
 | `finish()` | Block until prior GPU work finishes. |
 | `close()` | Release native resources. Repeated calls are valid. |
 | `closed` | Report whether the engine is closed. |
-| `precompiled_shaders` | The setting given at creation. Read-only. |
 | `shared_context` | The host context handle given at creation, or `0` for an offscreen renderer. Read-only. |
 | `gl_platform` | The OpenGL binding of the engine: `"wgl"`, `"glx"`, or `"egl"`. Read-only. |
 | `stats` | Return a `Stats` snapshot of frame counters and CPU timings. |
@@ -439,20 +418,7 @@ warning into an exception, the model is closed and the exception propagates.
 
 ### Texture limits
 
-Filament 1.77.1 compiles glTF materials at feature level 1. A lit material then has 8 samplers
-for textures. Each texture slot counts once, even when slots share an image: base color,
-metallic-roughness, normal, occlusion, emissive, three clearcoat slots, two sheen slots,
-transmission, volume thickness, and two specular slots. Anisotropy and iridescence materials
-always use 3 more samplers, so their limit is 5. The limit was measured: a 9th texture aborts
-the process in Filament's compiled material provider.
-
-Loading checks the count first. With `precompiled_shaders=False`, a lit material with more than
-8 textures raises `AssetError` with the material name. With `precompiled_shaders=True`, the same
-material loads, and `AssetCompatibilityWarning` reports it: Filament's precompiled materials omit
-some clearcoat, sheen, IOR, or specular inputs so that the rest fits. Transmission, volume,
-anisotropy, and iridescence materials are always compiled and raise `AssetError` above their limit.
-
-The archive path has other rules. Every entry has the five core textures (base color,
+Every archive entry has the five core textures (base color,
 metallic-roughness or specular-glossiness, normal, occlusion, emissive). Extension textures
 (clearcoat, sheen, transmission, thickness, specular, anisotropy, iridescence) share the generic
 samplers of the entry: 4 in non-refractive lit entries and 3 in refractive entries. Roles that
@@ -464,7 +430,7 @@ and `AssetCompatibilityWarning` names the material and each dropped texture (`st
 `specularTexture`, `specularColorTexture`, `sheenColorTexture`, `clearcoatTexture`,
 `iridescenceTexture`, `anisotropyTexture`, `thicknessTexture`, and `transmissionTexture` last.
 Detail maps go first, and the maps that define where an effect exists or how strong it is go
-last. No Khronos sample material needs a drop. The limits are the same for the planned web build.
+last. No Khronos sample material needs a drop. The limits are the same in the web build.
 Textures read `TEXCOORD_0` or `TEXCOORD_1`; a core texture on another set is not drawn, with a
 warning, and an extension texture on another set raises `AssetError`. A specular-glossiness
 material renders without clearcoat, sheen, specular, transmission, and volume, with a warning.
@@ -727,7 +693,7 @@ asset alive. A closed prototype cannot clone again. A clone keeps the material s
 prototype's load, including the refraction setting that its scene had then. The asset must be loaded with
 `scene.load(source, clonable=True)`, or be a [generated mesh](#generated-meshes); otherwise
 `clone()` raises `FillyError`. A clone of a
-clone is valid. The clone shares the loaded asset's geometry, textures, and compiled materials.
+clone is valid. The clone shares the loaded asset's geometry, textures, and materials.
 It has its own entities, transforms, material instances, node-local materials, visibility, light
 components, skinning, and animation state. It starts from the asset's load-time state; edits to
 the source model, including runtime textures, are not copied.
@@ -756,7 +722,7 @@ Use it to keep a model cache within a memory budget.
 | `clone_gpu_bytes`, `clone_cpu_bytes` | What each further clone adds: its bone and morph target buffers, and its animator's copy of the clips. These stay with the asset until it closes, also after the clone closes. |
 | `models` | The live models that share the asset. |
 
-Clones share the textures, the vertex and index buffers, and the compiled materials. The
+Clones share the textures, the vertex and index buffers, and the materials. The
 estimate leaves out what the driver adds. On the test laptop (Intel Iris Xe, an integrated GPU),
 the GPU process memory counter measured 9 to 16% above `gpu_bytes` for the second load of an
 asset: 18.6 against 16.1 MiB (wooden horse, 2.1 MiB file), 45.0 against 40.6 MiB
@@ -780,7 +746,7 @@ Closing a model invalidates all its node, material, light, and imported camera h
 that use one of its cameras lose their active camera. Other assets, scene-created cameras,
 and environment lighting remain available. Model and light close queue destruction without a
 GPU completion wait. Call `renderer.finish()` when completion is required before the next trial.
-Compiled material definitions remain cached until the renderer closes.
+Archive entry materials remain loaded until the renderer closes.
 
 ### Generated meshes
 
@@ -808,7 +774,7 @@ arrays and factors render the same: measured difference at most one 8-bit level 
 the pixels, from the different tangent code. `base_color`, `metallic`, and `roughness` are in
 `[0, 1]`; `emissive` is nonnegative linear RGB. The `metallic` default is 0, not the glTF
 default 1. `unlit`, `double_sided`, and `alpha_mode` (`"opaque"`, `"mask"`, or `"blend"`) are
-compiled into the material and cannot change later. The other factors are
+fixed at creation and cannot change later. The other factors are
 `model.material("mesh")` properties. A `"mask"` material cannot be created while
 `output_path` is `"direct"`; see [output path](#output-path).
 
@@ -1007,32 +973,13 @@ Both `model.material(name)` and `node.material(slot)` handles support textures. 
 material, every mesh slot that shows it gets the texture; slots with a node-local material keep
 their own. A node-local material made from a textured shared material starts with its texture.
 
-A material from the glTF file is compiled for its texture slots. The first assignment picks
-how the handle continues:
-
-- If the compiled material lacks the slot, or lacks texture transforms, the material provider
-  supplies the material for the same glTF key with the slot and transforms added. The factors
-  and render state carry over, and back again when the last runtime texture is removed. This
-  is the flat-colored stimulus case. It requires that the material has no glTF textures in
-  other slots, because Filament has no API to read them back: otherwise `AssetError`.
-- If the compiled material already has the slot, and has other glTF textures, the handle shows
-  a copy with the runtime texture in that slot. Its other textures stay.
-  `set_texture_transform()` then raises `AssetError` unless the glTF material has transforms.
-- Removing the texture restores the glTF texture of the slot, if it had one.
-
-A new combination of slots compiles a material the first time, 0.1 to 0.35 s. Assign textures
-before a timing-critical trial; later assignments of the same combination reuse the compiled
-material. Texture transforms and texture updates cost no compilation. Property animation of the
-glTF material also reaches the textured material, and `apply_variant()` keeps runtime textures
-on shared materials; on node-local materials that the variant maps, they are lost, as other
-edits are. The custom diffuse-transmission, anisotropy, and iridescence materials have no
-runtime texture slots: `AssetError`.
-
-On the archive path, every material has both slots, including diffuse transmission,
-anisotropy, and iridescence. An assignment changes parameters of a copy of the glTF instance:
-nothing is compiled, other glTF textures stay, and `set_texture_transform()` always works.
-Removing a texture starts again from a copy of the glTF instance, which has the glTF texture of
-that slot, and the factors carry over. The rules for variants and animation are the same.
+Every material has both slots, including diffuse-transmission, anisotropy, and iridescence
+materials and materials without glTF textures. An assignment changes parameters of a copy of the
+glTF instance: nothing is compiled, other glTF textures stay, and `set_texture_transform()`
+always works. Removing a texture starts again from a copy of the glTF instance, which has the
+glTF texture of that slot, and the factors carry over. Property animation of the glTF material
+also reaches the textured material, and `apply_variant()` keeps runtime textures on shared
+materials; on node-local materials that the variant maps, they are lost, as other edits are.
 
 A texture can serve many materials. Closing it removes it from every material that uses it.
 
@@ -1224,9 +1171,6 @@ image.
 | `moderngl` | `SharedTarget(renderer, ctx, width, height)` | `pyglet.create_renderer(window)` |
 | `zengl` | `SharedTarget(renderer, ctx, width, height, framebuffer=None)` | `pyglet.create_renderer(window)` |
 | `psychopy` | `SharedTarget(renderer, win, width, height)` | `create_renderer(win)` |
-
-Both `create_renderer()` functions accept `precompiled_shaders`, with the meaning of the
-[`Renderer`](#renderer) argument.
 
 | Member | Behavior |
 | --- | --- |

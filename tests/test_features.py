@@ -535,18 +535,17 @@ def test_diffuse_material_texture_transforms(renderer, scene, triangle_glb, tran
     renderer.finish()
 
 
-def test_material_mode_compatibility(triangle_glb):
+def test_clearcoat_with_transmission_loads_strictly(triangle_glb):
     doc,binary = unpack(triangle_glb); lit(doc)
     doc["extensionsUsed"] = ["KHR_materials_clearcoat","KHR_materials_transmission"]
     doc["materials"][0]["extensions"] = {"KHR_materials_clearcoat":{"clearcoatFactor":1},
                                            "KHR_materials_transmission":{"transmissionFactor":1}}
-    # Filament's archive drops transmission for clearcoat; both modes compile this material instead.
-    for mode in ("precompiled","compiled"):
-        with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
-            scene = renderer.create_scene()
-            scene.refraction = True
-            scene.tone_mapping = "aces_legacy"
-            assert scene.load(pack(doc,binary),strict=True).material_names == ["red"]
+    # Filament's own archive dropped transmission for clearcoat; filly's refraction entries keep both.
+    with filly.Renderer() as renderer:
+        scene = renderer.create_scene()
+        scene.refraction = True
+        scene.tone_mapping = "aces_legacy"
+        assert scene.load(pack(doc,binary),strict=True).material_names == ["red"]
 
 
 @pytest.mark.parametrize("radiance", [(1, 1, 1), (0.37, 0.52, 0.9)])

@@ -553,8 +553,8 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("closed", &ImportedTarget::closed);
 
     class_<Renderer>("Renderer")
-        .constructor(optional_override([](double context, bool precompiled) {
-            return Renderer(uintptr_t(context), precompiled);
+        .constructor(optional_override([](double context) {
+            return Renderer(uintptr_t(context));
         }))
         .function("createScene", &Renderer::create_scene)
         .function("createRenderTarget", optional_override([](Renderer& renderer, double width, double height, bool depth) {

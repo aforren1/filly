@@ -158,10 +158,10 @@ renderer = filly.Renderer(shared_context=handle)     # shares a host OpenGL cont
 Constructor:
 
 ```python
-Renderer(*, shared_context=None, precompiled_shaders=False)
+Renderer(*, shared_context=None)
 ```
 
-**Decision.** There is no `backend`, `threaded`, or `debug` argument. The build contains only the OpenGL backend (section 25). Filament always runs its own driver thread. `precompiled_shaders=True` uses Filament's precompiled material archive where an entry matches exactly, which shortens loading.
+**Decision.** There is no `backend`, `threaded`, or `debug` argument. The build contains only the OpenGL backend (section 25). Filament always runs its own driver thread. Every glTF material uses filly's precompiled material archive, so there is no shader option (see docs/explanation/material-precompilation.md).
 
 `shared_context` is the current host WGL or GLX context handle, from `filly.current_gl_context()`.
 

@@ -28,7 +28,7 @@ else()
   find_package(X11 REQUIRED)
   find_package(Threads REQUIRED)
 endif()
-set(FILAMENT_LIBRARIES gltfio gltfio_core filamat shaders uberarchive filament-iblprefilter filament backend filabridge filaflat
+set(FILAMENT_LIBRARIES gltfio_core filament-iblprefilter filament backend filabridge filaflat
   geometry ibl utils bluegl smol-v stb dracodec meshoptimizer
   mikktspace uberzlib zstd basis_transcoder ktxreader image abseil)
 if(WIN32)
@@ -48,31 +48,17 @@ enable_language(C)
 set(FILLY_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 include(native/materials/output.cmake)
 
-# glTF materials: "runtime" compiles each material configuration with filamat while loading;
-# "archive" uses filly's precompiled material archive (native/materials), built here with the
-# SDK's matc and uberz. See docs/explanation/material-precompilation.md.
-set(FILLY_MATERIALS runtime CACHE STRING "glTF material path: runtime or archive")
-set_property(CACHE FILLY_MATERIALS PROPERTY STRINGS runtime archive)
-if(FILLY_MATERIALS STREQUAL "archive")
-  include(native/materials/materials.cmake)
-  set(FILLY_MATERIAL_SOURCES native/archive_materials.cpp)
-elseif(FILLY_MATERIALS STREQUAL "runtime")
-  set(FILLY_MATERIAL_SOURCES native/materials.cpp native/surface_material.cpp)
-else()
-  message(FATAL_ERROR "FILLY_MATERIALS must be runtime or archive, not '${FILLY_MATERIALS}'")
-endif()
-message(STATUS "filly glTF materials: ${FILLY_MATERIALS}")
+# glTF materials come from filly's precompiled material archive (native/materials), built here
+# with the SDK's matc and uberz. The module has no material compiler. See
+# docs/explanation/material-precompilation.md.
+include(native/materials/materials.cmake)
 
-add_library(filly_core STATIC native/renderer.cpp native/output_pass.cpp native/gl_interop.cpp ${FILLY_MATERIAL_SOURCES}
+add_library(filly_core STATIC native/renderer.cpp native/output_pass.cpp native/gl_interop.cpp native/archive_materials.cpp
   native/gltf_prepare.cpp native/json.cpp native/shapes.cpp native/webp_provider.cpp native/egl_platform.cpp
   native/vendor/meshoptimizer/vertexcodec.cpp native/vendor/meshoptimizer/indexcodec.cpp
   native/vendor/meshoptimizer/vertexfilter.cpp)
 target_compile_features(filly_core PUBLIC cxx_std_20)
-target_link_libraries(filly_core PRIVATE filly_output_materials)
-if(FILLY_MATERIALS STREQUAL "archive")
-  target_compile_definitions(filly_core PUBLIC FILLY_MATERIALS_ARCHIVE=1)
-  target_link_libraries(filly_core PRIVATE filly_material_archive)
-endif()
+target_link_libraries(filly_core PRIVATE filly_output_materials filly_material_archive)
 set_target_properties(filly_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(filly_core PUBLIC native PRIVATE "${FILAMENT_ROOT}/include" "${libwebp_SOURCE_DIR}/src")
 target_link_libraries(filly_core PRIVATE webpdecoder)

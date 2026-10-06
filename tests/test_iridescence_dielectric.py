@@ -7,8 +7,7 @@ from test_features import lit, pack, unpack
 pytestmark = pytest.mark.gpu
 
 
-@pytest.mark.parametrize("mode", ["compiled", "precompiled"])
-def test_dielectric_thin_film_palette(triangle_glb, mode):
+def test_dielectric_thin_film_palette(triangle_glb):
     doc, binary = unpack(triangle_glb)
     lit(doc)
     pbr = doc["materials"][0]["pbrMetallicRoughness"]
@@ -18,7 +17,7 @@ def test_dielectric_thin_film_palette(triangle_glb, mode):
     doc["materials"][0]["extensions"] = {
         "KHR_materials_ior": {"ior": 1.33}, "KHR_materials_iridescence": film}
     doc["extensionsUsed"] = ["KHR_materials_ior", "KHR_materials_iridescence"]
-    with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         scene.tone_mapping = "aces_legacy"
         camera = scene.create_camera()

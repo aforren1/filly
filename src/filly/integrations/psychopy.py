@@ -50,10 +50,10 @@ def _current(win):
         win.winHandle.switch_to()
 
 
-def create_renderer(win, *, precompiled_shaders=False):
+def create_renderer(win):
     """Create a Filament engine sharing the window's native OpenGL context."""
     _current(win)
-    return shared_renderer("PsychoPy", precompiled_shaders=precompiled_shaders)
+    return shared_renderer("PsychoPy")
 
 
 class SharedTarget(HostTarget):

@@ -22,10 +22,10 @@ def _current(window):
     window.switch_to()
 
 
-def create_renderer(window, *, precompiled_shaders=False):
+def create_renderer(window):
     """Create a Filament engine sharing the window's OpenGL context."""
     _current(window)
-    return shared_renderer("pyglet", precompiled_shaders=precompiled_shaders)
+    return shared_renderer("pyglet")
 
 
 class SharedTarget(HostTarget):

@@ -31,12 +31,12 @@ def pixel_sizes(width, height):
     return width, height
 
 
-def shared_renderer(host, *, precompiled_shaders=False):
+def shared_renderer(host):
     """Create a renderer that shares the current OpenGL context."""
     context = current_gl_context()
     if not context:
         raise InteropError(f"{host} did not make its OpenGL context current")
-    return Renderer(shared_context=context, precompiled_shaders=precompiled_shaders)
+    return Renderer(shared_context=context)
 
 
 class HostTarget(ImportedTarget):

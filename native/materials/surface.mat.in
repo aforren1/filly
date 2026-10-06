@@ -1,7 +1,7 @@
 // filly's lit and refractive glTF materials. materials.cmake writes one file per archive entry
 // and blending mode from this template. Its #define lines select the lobes and inputs.
-// The shader code follows native/surface_material.cpp, which the runtime material path uses, so
-// that both paths compute the same values for the same glTF material.
+// The shader code reproduces the removed runtime material path, which matched gltf_viewer; see
+// docs/explanation/material-precompilation.md.
 //
 // Texture roles:
 // - The five core roles use gltfio's sampler names, so gltfio binds their glTF textures.
@@ -10,7 +10,7 @@
 //   for no texture; xxxIndex is the UV set. A uniform branch selects the sampler, which is valid
 //   in GLSL ES 3.00 and keeps the entry within the sampler budget of feature level 1.
 // - UV matrices are transposed (uv * M) as gltfio sets them, except for anisotropy and
-//   iridescence, which keep filly's column order (M * uv) as in the runtime path.
+//   iridescence, which use filly's column order (M * uv), as in AssetTexture::transform.
 material {
     name : @NAME@,
     requires : [ uv0, uv1, color, tangents ],

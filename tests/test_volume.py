@@ -9,9 +9,8 @@ from test_features import pack, unpack
 pytestmark = pytest.mark.gpu
 
 
-@pytest.mark.parametrize("mode", ["compiled", "precompiled"])
 @pytest.mark.parametrize("extended", [False, True])
-def test_volume_thickness_uses_parent_and_model_scale(triangle_glb, mode, extended):
+def test_volume_thickness_uses_parent_and_model_scale(triangle_glb, extended):
     """KHR_materials_volume scales thickness by the complete node transform.
 
     Filament 1.77.1 uses only the mesh node's own scale; gltf_viewer differs here by design.
@@ -37,7 +36,7 @@ def test_volume_thickness_uses_parent_and_model_scale(triangle_glb, mode, extend
     backing["materials"] = backing["materials"][:1]
     backing["meshes"] = backing["meshes"][:1]
     backing["extensionsUsed"] = ["KHR_materials_unlit"]
-    with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         scene.refraction = True
         scene.tone_mapping = "aces_legacy"
@@ -70,9 +69,8 @@ def test_volume_thickness_uses_parent_and_model_scale(triangle_glb, mode, extend
         assert int(render()[32, 32, 0]) > int(opaque) + 30
 
 
-@pytest.mark.parametrize("mode", ["compiled", "precompiled"])
 @pytest.mark.parametrize("reverse", [False, True])
-def test_volume_cache_separates_dispersion(triangle_glb, mode, reverse):
+def test_volume_cache_separates_dispersion(triangle_glb, reverse):
     doc, binary = unpack(triangle_glb)
     plain = {"name": "plain", "pbrMetallicRoughness": {"metallicFactor": 0, "roughnessFactor": 0},
              "extensions": {"KHR_materials_transmission": {"transmissionFactor": 1},
@@ -87,7 +85,7 @@ def test_volume_cache_separates_dispersion(triangle_glb, mode, reverse):
     doc["meshes"][1]["primitives"][0]["material"] = 1
     doc["nodes"].append({"mesh": 1, "translation": [0, 0, -0.5]})
     doc["scenes"][0]["nodes"].append(1)
-    with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         scene.refraction = True
         scene.tone_mapping = "aces_legacy"

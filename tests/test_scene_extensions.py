@@ -66,6 +66,26 @@ def test_meshopt_required_without_fallback(renderer, scene, triangle_glb, extens
 
 
 @pytest.mark.gpu
+@pytest.mark.parametrize("filter,error", [("NONE", None), ("COLOR", "COLOR filtering requires KHR"),
+                                          ("BOGUS", "Invalid meshopt mode or filter")])
+def test_ext_meshopt_filter_names(scene, triangle_glb, filter, error):
+    """cgltf reads an unknown EXT filter as NONE; filly must still reject it."""
+    doc, binary = unpack(triangle_glb)
+    doc["extensionsUsed"].append("EXT_meshopt_compression")
+    doc["extensionsRequired"].append("EXT_meshopt_compression")
+    doc["buffers"].append({"byteLength": 36, "extensions": {"EXT_meshopt_compression": {"fallback": True}}})
+    doc["bufferViews"][0].update(buffer=1, extensions={"EXT_meshopt_compression": {
+        "buffer": 0, "byteLength": len(VERTEX0), "byteStride": 12, "count": 3, "mode": "ATTRIBUTES",
+        "filter": filter}})
+    asset = pack(doc, bytearray(VERTEX0))
+    if error is None:
+        scene.load(asset, strict=True)
+    else:
+        with pytest.raises(filly.AssetError, match=error):
+            scene.load(asset, strict=True)
+
+
+@pytest.mark.gpu
 def test_visibility_parent_animation_model_toggle_and_reset(renderer, scene, triangle_glb):
     doc, binary = unpack(triangle_glb)
     doc["nodes"] += [{"name": "parent", "children": [0], "extensions": {"KHR_node_visibility": {"visible": False}}}]

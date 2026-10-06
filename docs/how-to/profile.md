@@ -249,7 +249,7 @@ Other `build` options:
 - `--work DIR`: a separate scratch directory per variant, for example `C:\tmp\prof\w-ar`.
 - `--no-tracy`: only the `Renderer._frame_info_history()` binding, for `cpu --frame-info`
   without Tracy overhead.
-- `--define FILLY_MATERIALS=archive`: the archive material path.
+- `--define NAME=VALUE`: an extra CMake definition.
 - `--source DIR`: build another source tree instead of the project, for example a snapshot of
   an earlier revision or a copy with probe switches. The tree needs `CMakeLists.txt`,
   `pyproject.toml`, `README.md`, `native`, and `src`.

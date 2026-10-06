@@ -170,7 +170,6 @@ struct State {
     std::thread::id thread = std::this_thread::get_id();
     Stats stats;
     std::unique_ptr<GlInterop> interop;
-    bool precompiled = false;
     // GL_FRAMEBUFFER_SRGB in Filament's context, as last queued.
     bool srgb_writes = false;
     // sRGB views of host textures whose targets closed while the host context was not current.
@@ -560,9 +559,6 @@ struct AssetData : Resource {
 struct Assignment {
     std::array<std::shared_ptr<TextureData>, 2> textures;
     std::array<m::mat3f, 2> transforms;
-    // Key of the instance in use; unset while it is the glTF instance or a copy of it.
-    bool keyed = false;
-    g::MaterialKey key{};
     bool any() const { return textures[0] || textures[1]; }
 };
 
@@ -1285,9 +1281,8 @@ void render_output(State& state, const SceneData& scene, TargetData& target, con
 }
 }
 
-Renderer::Renderer(uintptr_t shared_context, bool precompiled_shaders) {
+Renderer::Renderer(uintptr_t shared_context) {
     state_ = std::make_shared<detail::State>();
-    state_->precompiled = precompiled_shaders;
     state_->interop = std::make_unique<detail::GlInterop>(shared_context);
     state_->engine = state_->interop->create_engine();
     if (!state_->engine) throw BackendError("Could not create the OpenGL engine");
@@ -1306,7 +1301,7 @@ Renderer::Renderer(uintptr_t shared_context, bool precompiled_shaders) {
     // The 1D LUT applies the tone mapper per channel in fp16.
     if (!state_->engine->setFeatureFlag("engine.color_grading.use_1d_lut", true))
         throw BackendError("Filament SDK lacks the one-dimensional color-grading LUT");
-    state_->materials = detail::create_material_provider(state_->engine, !precompiled_shaders);
+    state_->materials = detail::create_material_provider(state_->engine);
     state_->names = std::make_unique<utils::NameComponentManager>(utils::EntityManager::get());
     state_->loader = g::AssetLoader::create({state_->engine, state_->materials, state_->names.get()});
     if (!state_->renderer || !state_->materials || !state_->loader)
@@ -1318,7 +1313,6 @@ Renderer::Renderer(uintptr_t shared_context, bool precompiled_shaders) {
     // first frames slower on both test GPUs unless the application stayed idle for seconds.
     // See docs/explanation/material-precompilation.md.
 }
-bool Renderer::precompiled_shaders() const { state_->check(); return state_->precompiled; }
 
 Scene Renderer::create_scene() {
     state_->check();
@@ -1797,7 +1791,6 @@ void Scene::set_camera(const Camera& camera) {
     data_->view->setCamera(camera.data_->camera);
 }
 
-bool Scene::precompiled_shaders() const { data_->check(); return data_->state->precompiled; }
 namespace {
 // Provider-built material textures, bindings, and records from one createInstance() call. On
 // failure the textures still belong to the asset, whose material instances may use them.
@@ -1882,7 +1875,7 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
                            std::vector<std::string>& warnings) {
     auto state = data_->state;
     auto prepared = detail::prepare_asset(std::move(bytes), path,
-        {strict, data_->refraction, state->precompiled}, warnings);
+        {strict, data_->refraction}, warnings);
     const auto& tables = *prepared.tables;
     if (tables.masked && data_->direct)
         throw AssetError("Asset has alphaMode MASK materials, which need the exact output path, but "
@@ -1921,24 +1914,7 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
         const char* uri = source->images[i].uri;
         if (!uri || std::string_view(uri).starts_with("data:")) continue;
         if (path.empty()) throw AssetError("Byte assets must contain all resources");
-        const std::string_view text(uri);
-        std::string decoded;
-        for (size_t j = 0; j < text.size(); ++j) {
-            if (text[j] != '%') { decoded += text[j]; continue; }
-            auto hex = [](char c) -> int {
-                if (c >= '0' && c <= '9') return c - '0';
-                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-                return -1;
-            };
-            if (j + 2 >= text.size() || hex(text[j+1]) < 0 || hex(text[j+2]) < 0)
-                throw AssetError("Invalid resource URI escape: " + std::string(uri));
-            const char value = char(hex(text[j+1]) * 16 + hex(text[j+2]));
-            if (!value) throw AssetError("Resource URI contains a null byte");
-            decoded += value;
-            j += 2;
-        }
-        const auto resource = utf8_path(path).parent_path() / utf8_path(decoded);
+        const auto resource = detail::resource_path(path, uri);
         std::error_code error;
         if (!std::filesystem::is_regular_file(resource, error)) throw AssetError("Missing glTF resource: " + std::string(uri));
         image_files.emplace_back(uri, resource);

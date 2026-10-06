@@ -10,7 +10,6 @@ import filly
 from test_features import lit, pack, unpack
 
 pytestmark = pytest.mark.gpu
-ARCHIVE = filly._native._materials == "archive"
 
 SIZE = 16
 
@@ -295,19 +294,6 @@ def test_glTF_texture_is_restored_after_removal(renderer, scene, triangle_glb):
     np.testing.assert_array_equal(center(), [0, 255, 0, 255])
 
 
-@pytest.mark.skipif(ARCHIVE, reason="the runtime material path compiles a material for a new slot")
-def test_other_glTF_textures_block_a_new_slot(renderer, scene, triangle_glb):
-    model = scene.load(textured_glb(triangle_glb, with_normal_map=True))
-    texture = renderer.create_texture(np.full((1, 1, 4), 255, np.uint8), color_space="srgb")
-    with pytest.raises(filly.AssetError, match="other slots"):
-        model.material("red").emissive_texture = texture
-    # The slot that exists keeps its compiled material; only transforms are unavailable.
-    model.material("red").base_color_texture = texture
-    with pytest.raises(filly.AssetError, match="without texture transforms"):
-        model.material("red").set_texture_transform("base_color", offset=(0.5, 0))
-
-
-@pytest.mark.skipif(not ARCHIVE, reason="the archive material path has every slot in every material")
 def test_new_slot_keeps_other_glTF_textures(renderer, scene, triangle_glb):
     model = scene.load(textured_glb(triangle_glb, with_normal_map=True))
     scene.add_directional_light(direction=(0, 0, -1), intensity=50000)
@@ -327,7 +313,6 @@ def test_new_slot_keeps_other_glTF_textures(renderer, scene, triangle_glb):
     np.testing.assert_array_equal(render(renderer, scene), original)
 
 
-@pytest.mark.skipif(not ARCHIVE, reason="the runtime material path has no slots in custom materials")
 @pytest.mark.parametrize("extension", [
     {"KHR_materials_anisotropy": {"anisotropyStrength": 0.5}},
     {"KHR_materials_iridescence": {"iridescenceFactor": 1}},
@@ -405,9 +390,9 @@ def test_repeated_frames_are_identical(renderer, scene):
     np.testing.assert_array_equal(render(renderer, scene), first)
 
 
-def test_precompiled_shaders_support_texture_slots(triangle_glb):
-    """Fast mode takes the textured variant from Filament's archive or compiles it."""
-    with filly.Renderer(precompiled_shaders=True) as renderer:
+def test_texture_slots_on_lit_glTF_material(triangle_glb):
+    """A lit glTF material without textures takes both runtime textures, and loses them again."""
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         camera = scene.create_camera()
         camera.set_orthographic(height=2, near=0.1, far=10)

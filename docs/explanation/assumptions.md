@@ -210,6 +210,11 @@ aborts without any texture limit: sheen, specular, and IOR together, and clearco
 specular textures together. The archive has no match, and the SDK's default material lacks the
 parameters that it then sets. The preflight and a fast-mode compile path now cover these cases.
 
+Superseded on October 6, 2026: the module no longer compiles materials. Every glTF material uses
+filly's material archive, whose extension textures share generic samplers, so the 8- and
+5-texture preflight was removed. See
+[material precompilation](material-precompilation.md#phase-4-results-october-6-2026).
+
 ## 7. External buffers and Unicode paths
 
 **Claim.** External `.bin` buffers must be inlined because the desktop SDK bypasses the URI cache
@@ -299,6 +304,11 @@ tested cases. The latency cost of `compiled` mode is 0.1 to 0.35 s per new asset
 
 **Change.** Keep `compiled` as the default. Render one warm-up frame after each load, because
 both modes compile GL programs at the first draw.
+
+Superseded on October 6, 2026: both modes and the `precompiled_shaders` option were removed.
+Every glTF material uses filly's material archive. The warm-up frame stays, because the driver
+still compiles GL programs at the first draw. See
+[material precompilation](material-precompilation.md#phase-4-results-october-6-2026).
 
 ## 10. Black first front buffer in PsychoPy
 

@@ -6,8 +6,8 @@
 #   FILAMENT_ROOT         Filament 1.77.1 WebAssembly SDK (tools/build_filament_web.sh)
 #   FILLY_MATERIAL_TOOLS  matc and uberz of Filament 1.77.1 for the build machine
 #
-# The web build always uses the precompiled material archive: Filament's WebAssembly build has
-# no material compiler. The materials are compiled for GLSL ES 3.00 (matc -p mobile).
+# The web build uses the same precompiled material archive as the desktop build, compiled for
+# GLSL ES 3.00 (matc -p mobile).
 cmake_minimum_required(VERSION 3.28...3.31)
 project(filly_web VERSION 0.1.0 LANGUAGES C CXX)
 
@@ -63,7 +63,6 @@ add_executable(filly_web
   "${FILLY_SOURCE_DIR}/native/vendor/meshoptimizer/vertexfilter.cpp")
 set_target_properties(filly_web PROPERTIES OUTPUT_NAME filly-core SUFFIX ".js")
 target_compile_features(filly_web PRIVATE cxx_std_20)
-target_compile_definitions(filly_web PRIVATE FILLY_MATERIALS_ARCHIVE=1)
 target_compile_options(filly_web PRIVATE ${FILLY_WEB_FLAGS})
 target_include_directories(filly_web PRIVATE "${FILLY_SOURCE_DIR}/native" "${FILAMENT_ROOT}/include"
   "${libwebp_SOURCE_DIR}/src")

@@ -64,11 +64,10 @@ def configure_camera(scene, projection):
     return camera
 
 
-@pytest.mark.parametrize("mode", ["compiled", "precompiled"])
 @pytest.mark.parametrize("projection", ["ortho", 45])
 @pytest.mark.parametrize("volume", [False, True])
-def test_ior_one_preserves_background(mode, projection, volume):
-    with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
+def test_ior_one_preserves_background(projection, volume):
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         scene.refraction = True
         scene.tone_mapping = "aces_legacy"
@@ -114,9 +113,8 @@ def stripe_std(image):
     return np.std(pixels[:, :, 0] - pixels[:, :, 2])
 
 
-@pytest.mark.parametrize("mode", ["compiled", "precompiled"])
-def test_orthographic_filter_is_invariant_to_scene_units(mode):
-    with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
+def test_orthographic_filter_is_invariant_to_scene_units():
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         scene.refraction = True
         scene.tone_mapping = "aces_legacy"

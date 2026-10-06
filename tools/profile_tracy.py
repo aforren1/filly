@@ -308,7 +308,7 @@ def main():
                        "snapshot of an earlier revision or a probe copy (needs CMakeLists.txt, "
                        "pyproject.toml, README.md, native, src)")
     build.add_argument("--define", action="append", default=[],
-                       help="extra CMake definition, for example FILLY_MATERIALS=archive")
+                       help="extra CMake definition, NAME=VALUE")
     run = sub.add_parser("run", help="profile a scenario; other options go to profile_frame.py cpu")
     run.add_argument("scenario")
     run.add_argument("--frames", type=int, default=300)

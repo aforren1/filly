@@ -14,8 +14,7 @@ from test_animation_pointer import add_clip, accessor
 pytestmark = pytest.mark.gpu
 
 
-@pytest.mark.parametrize("mode", ["compiled", "precompiled"])
-def test_clearcoat_normal_scale_pointer(triangle_glb, mode):
+def test_clearcoat_normal_scale_pointer(triangle_glb):
     doc, binary = unpack(triangle_glb)
     lit(doc)
     textured(doc, binary)
@@ -28,7 +27,7 @@ def test_clearcoat_normal_scale_pointer(triangle_glb, mode):
     doc["materials"][0]["extensions"] = {"KHR_materials_clearcoat": coat}
     doc["extensionsUsed"] = ["KHR_materials_clearcoat", "KHR_texture_transform"]
     add_clip(doc, binary, "/materials/0/extensions/KHR_materials_clearcoat/clearcoatNormalTexture/scale", [0.5, 0])
-    with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         scene.camera = scene.create_camera()
         scene.camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
@@ -124,8 +123,7 @@ def textured(doc, binary):
     doc.setdefault("extensionsUsed", []).append("KHR_texture_transform")
 
 
-@pytest.mark.parametrize("mode", ["compiled", "precompiled"])
-def test_uv_animation_matches_static_transform(triangle_glb, mode):
+def test_uv_animation_matches_static_transform(triangle_glb):
     doc, binary = unpack(triangle_glb)
     textured(doc, binary)
     path = "/materials/0/pbrMetallicRoughness/baseColorTexture/extensions/KHR_texture_transform/"
@@ -134,7 +132,7 @@ def test_uv_animation_matches_static_transform(triangle_glb, mode):
         output = accessor(doc, binary, values, kind)
         clip["samplers"].append({"input": clip["samplers"][0]["input"], "output": output})
         clip["channels"].append({"sampler": len(clip["samplers"])-1, "target": {"path": "pointer", "extensions": {"KHR_animation_pointer": {"pointer": path+suffix}}}})
-    with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         camera = scene.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
@@ -164,8 +162,7 @@ def test_uv_animation_matches_static_transform(triangle_glb, mode):
         np.testing.assert_array_equal(target.read(), original)
 
 
-@pytest.mark.parametrize("mode", ["compiled", "precompiled"])
-def test_uv_rotation_direction_matches_static_transform(triangle_glb, mode):
+def test_uv_rotation_direction_matches_static_transform(triangle_glb):
     """A quarter turn maps (u, v) to (v, -u) (gltfio, three.js): u = 0.9 samples green, where
     the opposite direction would give u = -0.9 and clamp to red."""
     doc, binary = unpack(triangle_glb)
@@ -176,7 +173,7 @@ def test_uv_rotation_direction_matches_static_transform(triangle_glb, mode):
     binary[offset:offset + 24] = struct.pack("<6f", *[0.1, 0.9] * 3)
     path = "/materials/0/pbrMetallicRoughness/baseColorTexture/extensions/KHR_texture_transform/"
     add_clip(doc, binary, path + "rotation", [0, np.pi / 2])
-    with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         camera = scene.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
@@ -305,7 +302,7 @@ def test_camera_infinite_far_and_parent_transform(renderer, scene, triangle_glb)
     np.testing.assert_allclose(camera.view_matrix @ camera.transform, np.eye(4), atol=1e-6)
 
 
-def test_surface_fast_mode_compiles_extension_combinations(triangle_glb):
+def test_anisotropy_iridescence_clearcoat_and_sheen_load_strictly(triangle_glb):
     doc, binary = unpack(triangle_glb)
     lit(doc)
     ext = {"KHR_materials_anisotropy": {"anisotropyStrength": 0.5},
@@ -314,7 +311,7 @@ def test_surface_fast_mode_compiles_extension_combinations(triangle_glb):
            "KHR_materials_sheen": {"sheenColorFactor": [0.1, 0.2, 0.3]}}
     doc["materials"][0]["extensions"] = ext
     doc["extensionsUsed"] = list(ext)
-    with filly.Renderer(precompiled_shaders=True) as renderer:
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         model = scene.load(pack(doc, binary), strict=True)
         assert model.material_names == ["red"]

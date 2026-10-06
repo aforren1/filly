@@ -225,8 +225,6 @@ NB_MODULE(_native, module) {
         "An optional asset feature cannot be reproduced by this renderer.", PyExc_UserWarning, nullptr);
     if (!compatibility_warning) throw nb::python_error();
     module.attr("AssetCompatibilityWarning") = nb::handle(compatibility_warning);
-    // The build's glTF material path (CMake FILLY_MATERIALS), for tests and diagnostics.
-    module.attr("_materials") = FILLY_MATERIALS_ARCHIVE ? "archive" : "runtime";
 
     auto shapes = module.def_submodule("shapes",
         "Vertex arrays for simple shapes, for ``Scene.create_mesh(**shape)``.\n\n"
@@ -373,11 +371,11 @@ NB_MODULE(_native, module) {
         .def_prop_ro("pending", &Preparation::pending);
 
     nb::class_<Renderer>(module, "Renderer")
-        .def("__init__", [](Renderer* self, nb::object context, bool precompiled) {
+        .def("__init__", [](Renderer* self, nb::object context) {
             uintptr_t handle = context.is_none() ? 0 : nb::cast<uintptr_t>(context);
             if (!context.is_none() && !handle) throw InteropError("shared_context cannot be zero; use None for offscreen rendering");
-            new (self) Renderer(handle, precompiled);
-        }, nb::kw_only(), nb::arg("shared_context").none() = nb::none(), "precompiled_shaders"_a = false)
+            new (self) Renderer(handle);
+        }, nb::kw_only(), nb::arg("shared_context").none() = nb::none())
         .def("create_scene", &Renderer::create_scene)
         .def("create_render_target", [](Renderer& self, nb::handle width, nb::handle height, const std::string& format, bool depth) {
             return self.create_render_target(pixel_size(width, "width"), pixel_size(height, "height"), format, depth);
@@ -415,7 +413,6 @@ NB_MODULE(_native, module) {
         .def("finish", &Renderer::finish, nb::call_guard<nb::gil_scoped_release>())
         .def("close", &Renderer::close, nb::call_guard<nb::gil_scoped_release>())
         .def_prop_ro("closed", &Renderer::closed)
-        .def_prop_ro("precompiled_shaders", &Renderer::precompiled_shaders)
         .def_prop_ro("shared_context", &Renderer::shared_context)
         .def_prop_ro("gl_platform", &Renderer::gl_platform)
         .def_prop_ro("stats", &Renderer::stats)

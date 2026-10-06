@@ -1,4 +1,4 @@
-"""Which material a glTF material gets, and that the choice does not change its pixels."""
+"""Which archive entry a glTF material gets, and that the choice does not change its pixels."""
 
 import struct
 import zlib
@@ -27,9 +27,9 @@ def sphere_asset(extensions=None, metallic=0.3, roughness=0.35, base_color=(0.6,
     return pack(doc, binary)
 
 
-def render_sphere(asset, precompiled=False, size=96):
+def render_sphere(asset, size=96):
     """Sun, IBL, and a curved surface: every lobe contributes to some pixel."""
-    with filly.Renderer(precompiled_shaders=precompiled) as renderer:
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         camera = scene.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
@@ -46,25 +46,22 @@ def render_sphere(asset, precompiled=False, size=96):
         return target.read().astype(int), model.material("surface")._shader
 
 
-@pytest.mark.parametrize("precompiled", [False, True])
-def test_iridescence_without_strength_matches_the_plain_material(precompiled):
+def test_iridescence_without_strength_matches_the_plain_material():
     """An iridescence-only material has no anisotropic lobe, which differs at zero strength."""
     # Measured with the anisotropic lobe: 89 of 9216 pixels differed by 1 in this scene.
     rough_metal = {"metallic": 1, "roughness": 0.7}
-    plain, _ = render_sphere(sphere_asset(**rough_metal), precompiled)
-    film, _ = render_sphere(sphere_asset({"KHR_materials_iridescence": {"iridescenceFactor": 0}}, **rough_metal), precompiled)
+    plain, _ = render_sphere(sphere_asset(**rough_metal))
+    film, _ = render_sphere(sphere_asset({"KHR_materials_iridescence": {"iridescenceFactor": 0}}, **rough_metal))
     assert plain[48, 48, :3].max() > 40
     np.testing.assert_array_equal(film, plain)
 
 
-@pytest.mark.parametrize("precompiled", [False, True])
-def test_specular_only_material_is_not_refractive(precompiled):
-    """The SDK archive's transmission entry matches specular-only keys before its specular entry."""
+def test_specular_only_material_is_not_refractive():
+    """Filament's own archive drew specular-only materials with its transmission entry."""
     extensions = {"KHR_materials_specular": {"specularFactor": 0.4, "specularColorFactor": [1, 0.8, 0.6]}}
-    image, (name, refractive) = render_sphere(sphere_asset(extensions), precompiled)
+    image, (name, refractive) = render_sphere(sphere_asset(extensions))
     assert not refractive, name
-    compiled, _ = render_sphere(sphere_asset(extensions), False)
-    np.testing.assert_allclose(image, compiled, atol=1)
+    assert image[48, 48, :3].max() > 40
 
 
 def render_rim(asset, size=64):

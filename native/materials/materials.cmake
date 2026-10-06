@@ -9,7 +9,7 @@
 find_program(FILLY_UBERZ uberz PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
 find_program(FILLY_MATINFO matinfo PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
 if(NOT FILLY_MATC OR NOT FILLY_UBERZ)
-  message(FATAL_ERROR "FILLY_MATERIALS=archive needs matc and uberz in ${FILLY_MATERIAL_TOOLS}. "
+  message(FATAL_ERROR "filly's material archive needs matc and uberz in ${FILLY_MATERIAL_TOOLS}. "
     "See docs/how-to/build.md.")
 endif()
 
@@ -56,8 +56,8 @@ set(_core
   "int emissiveIndex" "float3 emissiveFactor" "float emissiveStrength" "sampler2d emissiveMap"
   "mat3 emissiveUvMatrix high")
 
-# Refraction code shared with the runtime path: the three raw strings in native/refraction.h,
-# in variables rather than a list because the GLSL contains semicolons.
+# Refraction code: the three raw strings in native/refraction.h, in variables rather than a
+# list because the GLSL contains semicolons.
 file(READ "${FILLY_SOURCE_DIR}/native/refraction.h" _hook)
 foreach(_i RANGE 2)
   string(FIND "${_hook}" "R\"SHADER(" _start)
@@ -73,8 +73,8 @@ foreach(_i RANGE 2)
 endforeach()
 
 # Only entries with volume have vertex code. A material with vertex code gets its own depth
-# program; without it, shadow maps use the engine's default depth program, as the runtime path's
-# materials do, and shadow edges stay the same.
+# program; without it, shadow maps use the engine's default depth program, and shadow edges stay
+# the same as with the removed runtime material path.
 set(_volume_vertex [=[
 vertex {
     void materialVertex(inout MaterialVertexInputs material) {

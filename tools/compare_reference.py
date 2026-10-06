@@ -129,7 +129,7 @@ def render_filly(args):
 
     filly.set_log_level("warning")
     out = Path(args.worker_output)
-    with filly.Renderer(precompiled_shaders=args.shaders == "precompiled") as renderer:
+    with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         scene.background = (0, 0, 0, 1)
         scene.refraction = True
@@ -289,7 +289,8 @@ def main():
     parser.add_argument("--antialiasing", choices=("none", "fxaa"), default="none")
     parser.add_argument("--msaa", type=int, choices=(1, 4), default=1, help="MSAA sample count on both sides")
     parser.add_argument("--shaders", choices=("compiled", "precompiled"), default="compiled",
-                        help="'precompiled' uses Renderer(precompiled_shaders=True) and passes --ubershader to gltf_viewer")
+                        help="gltf_viewer's materials: 'precompiled' passes --ubershader. filly always uses its "
+                             "material archive")
     parser.add_argument("--frames", type=int, default=3, help="filly frames before readback")
     parser.add_argument("--viewer-frames", type=int, default=60,
                         help="gltf_viewer frames before capture; asynchronous texture loads need several")

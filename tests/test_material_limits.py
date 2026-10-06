@@ -1,4 +1,4 @@
-"""Texture-count limits and precompiled-archive gaps must fail or fall back, never abort."""
+"""Materials with many textures and extension combinations must load and render, never abort."""
 
 import json
 import struct
@@ -7,21 +7,15 @@ import sys
 import textwrap
 import zlib
 
-import numpy as np
 import pytest
 
 import filly
-# Filament 1.77.1 lit materials have 8 texture samplers; see gltf_prepare.cpp.
-MAX_LIT_TEXTURES = 8
-# The archive material path has no per-material sampler rules: extension textures share the
-# generic samplers of an archive entry. See docs/explanation/material-precompilation.md.
-ARCHIVE = filly._native._materials == "archive"
-runtime_only = pytest.mark.skipif(ARCHIVE, reason="texture-count rules of the runtime material path")
-archive_only = pytest.mark.skipif(not ARCHIVE, reason="extension texture slots of the archive material path")
 
 pytestmark = pytest.mark.gpu
 
-# The nine-texture material from the preflight's documentation, then two specular textures.
+# Nine texture slots, which once exceeded the sampler limit of a compiled lit material, then two
+# specular textures. Extension textures share the generic samplers of an archive entry; see
+# docs/explanation/material-precompilation.md.
 SLOTS = [
     ("pbrMetallicRoughness", "baseColorTexture"), ("pbrMetallicRoughness", "metallicRoughnessTexture"),
     (None, "normalTexture"), (None, "occlusionTexture"), (None, "emissiveTexture"),
@@ -73,14 +67,14 @@ def textured_asset(count, extensions=None, name="many", slots=None, distinct=Fal
             + struct.pack("<II", len(binary), 0x004E4942) + binary)
 
 
-def render_in_subprocess(asset, mode, strict=False):
+def render_in_subprocess(asset, strict=False):
     """Load and render in a child process, so a native abort fails one test instead of pytest."""
     script = textwrap.dedent(f"""
         import sys, warnings
         import filly
         filly.set_log_level("off")
         warnings.simplefilter("ignore")
-        with filly.Renderer(precompiled_shaders={mode == "precompiled"}) as renderer:
+        with filly.Renderer() as renderer:
             scene = renderer.create_scene()
             scene.refraction = True
             scene.tone_mapping = "aces_legacy"
@@ -105,69 +99,31 @@ def render_in_subprocess(asset, mode, strict=False):
     return result.stdout.decode().strip()
 
 
-@pytest.mark.parametrize("count", [MAX_LIT_TEXTURES, pytest.param(MAX_LIT_TEXTURES + 1, marks=runtime_only)])
-def test_compiled_texture_limit_is_measured(count):
-    output = render_in_subprocess(textured_asset(count), "compiled")
-    if count <= MAX_LIT_TEXTURES:
-        assert output == "rendered"
-    else:
-        assert "'many' uses 9 textures" in output and "precompiled_shaders=True" in output
-
-
-@runtime_only
-def test_preflight_names_material_and_suggests_precompiled_shaders():
-    with filly.Renderer() as renderer:
-        with pytest.raises(filly.AssetError, match=r"Material 'rough coat' uses 9 textures.*precompiled_shaders=True"):
-            renderer.create_scene().load(textured_asset(9, name="rough coat"))
-    # Filament's precompiled materials drop sheen for clearcoat, so precompiled shaders can render it.
-    with filly.Renderer(precompiled_shaders=True) as renderer:
-        with pytest.warns(filly.AssetCompatibilityWarning, match="without some of its features"):
-            renderer.create_scene().load(textured_asset(9))
-
-
-@pytest.mark.parametrize("count", [9, 11])
-def test_precompiled_shaders_renders_materials_over_the_limit(count):
-    assert render_in_subprocess(textured_asset(count), "precompiled") == "rendered"
+@pytest.mark.parametrize("count", [8, 9, 11])
+def test_materials_with_many_textures_render(count):
+    assert render_in_subprocess(textured_asset(count)) == "rendered"
 
 
 @pytest.mark.parametrize("extensions", [
-    {"KHR_materials_transmission": {"transmissionFactor": 1}},
-    {"KHR_materials_iridescence": {"iridescenceFactor": 1}},
-])
-@pytest.mark.parametrize("mode", ["compiled", "precompiled"])
-@runtime_only
-def test_generated_materials_report_the_limit(extensions, mode):
-    iridescent = "KHR_materials_iridescence" in extensions
-    allowed = MAX_LIT_TEXTURES - 3 if iridescent else MAX_LIT_TEXTURES
-    assert render_in_subprocess(textured_asset(allowed, extensions), mode) == "rendered"
-    output = render_in_subprocess(textured_asset(allowed + 1, extensions), mode)
-    assert output.startswith("AssetError: Material 'many'"), output
-
-
-@pytest.mark.parametrize("extensions", [
-    # No precompiled material has sheen, specular, and IOR; the SDK's fallback then aborted.
     {"KHR_materials_sheen": {"sheenColorFactor": [1, 1, 1]}, "KHR_materials_specular": {}, "KHR_materials_ior": {"ior": 1.4}},
-    # The precompiled clearcoat material ignores IOR.
     {"KHR_materials_clearcoat": {"clearcoatFactor": 1}, "KHR_materials_ior": {"ior": 2.0}},
 ])
-def test_precompiled_shaders_compiles_archive_gaps(extensions):
-    assert render_in_subprocess(textured_asset(0, extensions), "precompiled") == "rendered"
-    images = {}
-    for mode in ("compiled", "precompiled"):
-        with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
-            scene = renderer.create_scene()
-            camera = scene.create_camera()
-            camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
-            camera.position = (0, 0, 3)
-            camera.look_at((0, 0, 0))
-            scene.camera = camera
-            scene.add_directional_light(direction=(0.3, -0.2, -1), intensity=100000)
-            scene.load(textured_asset(0, extensions), strict=True)
-            target = renderer.create_render_target(width=32, height=32)
-            renderer.render(scene, target)
-            images[mode] = target.read()
-    assert images["compiled"][16, 16, :3].max() > 20
-    np.testing.assert_allclose(images["precompiled"], images["compiled"], atol=1)
+def test_extension_combinations_render(extensions):
+    """Combinations that Filament's own material archive lacked, which once aborted the process."""
+    assert render_in_subprocess(textured_asset(0, extensions)) == "rendered"
+    with filly.Renderer() as renderer:
+        scene = renderer.create_scene()
+        camera = scene.create_camera()
+        camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
+        camera.position = (0, 0, 3)
+        camera.look_at((0, 0, 0))
+        scene.camera = camera
+        scene.add_directional_light(direction=(0.3, -0.2, -1), intensity=100000)
+        scene.load(textured_asset(0, extensions), strict=True)
+        target = renderer.create_render_target(width=32, height=32)
+        renderer.render(scene, target)
+        assert target.read()[16, 16, :3].max() > 20
+
 
 CLEARCOAT_SHEEN = [(None, "normalTexture"),
                    ("KHR_materials_clearcoat", "clearcoatTexture"), ("KHR_materials_clearcoat", "clearcoatRoughnessTexture"),
@@ -175,17 +131,15 @@ CLEARCOAT_SHEEN = [(None, "normalTexture"),
                    ("KHR_materials_sheen", "sheenColorTexture"), ("KHR_materials_sheen", "sheenRoughnessTexture")]
 
 
-@archive_only
 @pytest.mark.parametrize("extensions", [
     {"KHR_materials_iridescence": {"iridescenceFactor": 1}},
     {"KHR_materials_transmission": {"transmissionFactor": 1}},
 ])
 def test_archive_roles_that_share_a_texture_share_a_sampler(extensions):
     """11 texture slots of one image need 2 extension samplers (linear and sRGB)."""
-    assert render_in_subprocess(textured_asset(11, extensions), "compiled", strict=True) == "rendered"
+    assert render_in_subprocess(textured_asset(11, extensions), strict=True) == "rendered"
 
 
-@archive_only
 @pytest.mark.parametrize("extensions, capacity", [
     ({"KHR_materials_clearcoat": {"clearcoatFactor": 1}, "KHR_materials_sheen": {"sheenColorFactor": [1, 1, 1]}}, 4),
     ({"KHR_materials_clearcoat": {"clearcoatFactor": 1}, "KHR_materials_sheen": {"sheenColorFactor": [1, 1, 1]},
@@ -204,4 +158,4 @@ def test_archive_drops_the_least_important_extension_textures(extensions, capaci
             scene.load(asset)
         with pytest.raises(filly.AssetError, match="renders without its"):
             scene.load(asset, strict=True)
-    assert render_in_subprocess(asset, "compiled") == "rendered"
+    assert render_in_subprocess(asset) == "rendered"

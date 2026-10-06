@@ -188,14 +188,14 @@ uv run --no-sync python tools/check_sample_assets.py
 
 The tool caches downloads in `.deps/sample-audit/assets`, keeps each asset's upstream README
 and catalog screenshot,
-and writes `report-compiled.json` and `gallery-compiled.html` under `.deps/sample-audit`.
+and writes `report-archive.json` and `gallery-archive.html` under `.deps/sample-audit`.
 Each child process has a 120-second timeout. An error or native abort is recorded without
 stopping the rest of the catalog. No Git checkout is needed.
 
-To check only selected assets or the fast material mode:
+To check only selected assets:
 
 ```powershell
-uv run --no-sync python tools/check_sample_assets.py --mode precompiled --models MosquitoInAmber CompareDispersion DiffuseTransmissionTeacup
+uv run --no-sync python tools/check_sample_assets.py --models MosquitoInAmber CompareDispersion DiffuseTransmissionTeacup
 ```
 
 A selected run replaces that mode's report with the selected results. Use a separate `--output`

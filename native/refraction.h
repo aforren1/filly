@@ -7,7 +7,8 @@ namespace filly::detail {
 // which keeps parity with gltf_viewer. Orthographic views use the SDK's offset for tan(FOV) = 1,
 // a 45-degree view: the blur is then the same fraction of the image height as in that view,
 // independent of camera distance, orthographic extents, and scene units.
-// The material compiler inserts this code before the SDK's lighting functions.
+// materials.cmake reads the three strings into the refraction entries, and matc inserts the code
+// before the SDK's lighting functions. Nothing compiles this header.
 // Keep the sampler dispatch in sync with the pinned SDK when upgrading it.
 inline constexpr const char* refraction_prefix = R"SHADER(
 #if defined(MATERIAL_HAS_LIGHTING) && !defined(VARIANT_HAS_DEPTH)

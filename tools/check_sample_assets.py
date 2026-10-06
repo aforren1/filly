@@ -22,6 +22,8 @@ import warnings
 REVISION = "c6a6bd13ab2b3c685c7903d03561b8a9392f38b8"
 REPOSITORY = "https://github.com/KhronosGroup/glTF-Sample-Assets"
 RAW = f"https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/{REVISION}/"
+# Names the report, gallery, and image directory; filly has one material path.
+MODE = "archive"
 
 
 def write_json(path, value):
@@ -102,7 +104,7 @@ def worker(path, output, mode, *, lighting="auto", view=None, projection=None, h
             }
             result["limitations"] = [message for ext, message in limits.items() if ext in result["extensions_used"]]
             filly.set_log_level("warning")
-            with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
+            with filly.Renderer() as renderer:
                 scene = renderer.create_scene()
                 scene.background = (0.15, 0.15, 0.15, 1)
                 scene.refraction = True
@@ -192,8 +194,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path(".deps/sample-audit"))
     parser.add_argument("--models", nargs="+", help="Catalog names; default: all assets")
-    parser.add_argument("--mode", choices=("compiled", "precompiled"), default="compiled",
-                        help="precompiled uses Renderer(precompiled_shaders=True)")
     parser.add_argument("--lighting", choices=("auto", "environment"), default="auto")
     parser.add_argument("--view", type=float, nargs=2, metavar=("YAW", "PITCH"), help="Fitted camera angles in degrees; second view adds 20 degrees of yaw")
     parser.add_argument("--projection", choices=("perspective", "orthographic"), help="Override imported cameras with a fitted projection")
@@ -210,7 +210,7 @@ def main():
         parser.error("--view requires finite angles and -90 < pitch < 90 degrees")
     output = args.output.resolve()
     if args.worker:
-        worker(args.worker.resolve(), output, args.mode, lighting=args.lighting, view=args.view,
+        worker(args.worker.resolve(), output, MODE, lighting=args.lighting, view=args.view,
                projection=args.projection, height=args.height)
         return
     cache = output / "assets"
@@ -252,12 +252,12 @@ def main():
     if args.download_only:
         return
     report = {"repository": REPOSITORY, "revision": REVISION, "python": sys.version,
-              "platform": sys.platform, "mode": args.mode,
+              "platform": sys.platform, "mode": MODE,
               "scope": "One variant per catalog asset, first imported camera or two fitted views, clip 0 at start/midpoint; no conformance claim",
               "results": []}
     for item, variant, path in selections:
         name = item["name"]
-        destination = output / args.mode / name
+        destination = output / MODE / name
         destination.mkdir(parents=True, exist_ok=True)
         result_path = destination / "result.json"
         if result_path.exists():
@@ -265,7 +265,7 @@ def main():
         with (destination / "process.log").open("w", encoding="utf-8") as log:
             try:
                 command = [sys.executable, str(Path(__file__).resolve()), "--worker", str(path),
-                           "--output", str(destination), "--mode", args.mode,
+                           "--output", str(destination),
                            "--lighting", args.lighting, "--height", str(args.height)]
                 if args.view is not None:
                     command += ["--view", *map(str, args.view)]
@@ -284,9 +284,9 @@ def main():
         result.update(name=name, variant=variant,
                       source=f"{REPOSITORY}/tree/{REVISION}/Models/{name}")
         report["results"].append(result)
-        write_json(output / f"report-{args.mode}.json", report)
+        write_json(output / f"report-{MODE}.json", report)
         print(f"{name}: {result['status']}" + (f" ({result['error']})" if "error" in result else ""), flush=True)
-    print(f"Report: {output / f'report-{args.mode}.json'}", flush=True)
+    print(f"Report: {output / f'report-{MODE}.json'}", flush=True)
     write_gallery(output, report)
 
 

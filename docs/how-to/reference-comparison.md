@@ -64,7 +64,7 @@ All metrics use 8-bit sRGB RGB values. Alpha is not compared.
 | `--environment studio\|uniform\|PATH` | Environment panorama. `studio` and `uniform` are generated. |
 | `--sun` | Add `gltf_viewer`'s default SUN light: its direction, 100,000 lux, no shadows. |
 | `--antialiasing fxaa`, `--msaa 4` | Enable the same antialiasing on both sides. |
-| `--shaders precompiled` | Use filly `precompiled_shaders=True` and `gltf_viewer --ubershader`. |
+| `--shaders precompiled` | Run `gltf_viewer --ubershader`. filly always uses its material archive. |
 | `--no-skybox` | Hide the environment on both sides. |
 | `--size WxH`, `--focal-length MM` | Image size and lens focal length. The default is `gltf_viewer`'s 28 mm. |
 
@@ -103,7 +103,8 @@ Two environment differences remain. They cause no measurable difference for the 
 ## Results
 
 Run on September 29, 2026: Windows 11, Intel Iris Xe, OpenGL 4.5 driver 32.0.101.7088,
-512 × 512 pixels, 28 mm lens, `precompiled_shaders=False`, no antialiasing, skybox visible.
+512 × 512 pixels, 28 mm lens, `precompiled_shaders=False` (filly's runtime material path, removed
+on October 6, 2026), no antialiasing, skybox visible.
 On the same day, after the change to explicit output encoding and scene option properties,
 DamagedHelmet (MAE 0.0001, max error 1, PSNR 89.45 dB) and TransmissionTest (MAE 0.0000,
 max error 1, PSNR 101.07 dB) in the studio environment gave the same metrics as below.
@@ -184,8 +185,10 @@ parents, such as AttenuationTest and TransmissionTest, match.
 | `--shaders precompiled` | DamagedHelmet, MetalRoughSpheres, ClearCoatTest, TransmissionTest, TransmissionRoughnessTest, AttenuationTest | Same as compiled | 2 | 0 |
 | `--antialiasing fxaa --msaa 4` | BoxTextured, DamagedHelmet, MetalRoughSpheres | 0 to 0.0001 | 8 | 0 |
 
-With precompiled shaders, both sides produce the same metrics as with compiled shaders, including the
-MosquitoInAmber divergence.
+With precompiled shaders (filly's former `precompiled_shaders=True` and `gltf_viewer --ubershader`),
+both sides produced the same metrics as with compiled shaders, including the MosquitoInAmber
+divergence. For filly's material archive against `gltf_viewer`, see
+[material precompilation](../explanation/material-precompilation.md#parity-with-gltf_viewer).
 With `--sun`, both sides use a SUN light. Before `add_sun_light()` existed, filly used a
 directional light, and the specular highlights differed by up to 33.
 

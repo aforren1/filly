@@ -16,9 +16,6 @@
 namespace filly::detail {
 namespace {
 
-// Selects the material path's preparation: the archive path plans extension texture slots, and
-// the runtime path checks its sampler rules.
-constexpr bool archive_materials = FILLY_MATERIALS_ARCHIVE != 0;
 constexpr double float_max = 3.402823466e38;
 constexpr double pi = 3.141592653589793;
 
@@ -104,31 +101,6 @@ void parse(Document& document, const std::vector<uint8_t>& bytes) {
 }
 
 // Resources ---------------------------------------------------------------------------------
-
-std::filesystem::path resource_path(const std::string& path, const std::string& uri) {
-    std::string decoded;
-    for (size_t j = 0; j < uri.size(); ++j) {
-        if (uri[j] != '%') { decoded += uri[j]; continue; }
-        auto hex = [](char c) -> int {
-            if (c >= '0' && c <= '9') return c - '0';
-            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-            return -1;
-        };
-        if (j + 2 >= uri.size() || hex(uri[j+1]) < 0 || hex(uri[j+2]) < 0)
-            throw AssetError("Invalid resource URI escape: " + uri);
-        const char value = char(hex(uri[j+1]) * 16 + hex(uri[j+2]));
-        if (!value) throw AssetError("Resource URI contains a null byte");
-        decoded += value;
-        j += 2;
-    }
-    auto u8 = [](const std::string& value) {
-        const auto* first = reinterpret_cast<const char8_t*>(value.data());
-        return std::filesystem::path(std::u8string(first, first + value.size()));
-    };
-    // An absolute path in the URI replaces the document folder.
-    return u8(path).parent_path() / u8(decoded);
-}
 
 std::vector<uint8_t> base64(std::string_view text) {
     auto value = [](char c) -> int {
@@ -272,50 +244,9 @@ const std::set<std::string, std::less<>> supported = {
 // Metadata only: these cannot change the rendered image.
 const std::set<std::string, std::less<>> ignored = {"KHR_xmp", "KHR_xmp_json_ld"};
 
-// Filament 1.77.1 compiles glTF materials at feature level 1: 16 fragment samplers, of which a lit
-// material with screen-space reflection or refraction leaves 8 for textures
-// (filamat MaterialBuilder::checkMaterialLevelFeatures). Measured: a 9th texture aborts the
-// process in the SDK's compiled provider, and fails compilation in filly's generator.
-constexpr int max_lit_textures = 8;
-// Anisotropy and iridescence materials always declare these three samplers.
-constexpr int surface_samplers = 3;
-
 std::string material_name(const cgltf_material& material, size_t index, const char* separator) {
     if (auto name = text(material.name)) return *name;
     return std::string("material") + separator + std::to_string(index);
-}
-
-// Rejects lit materials whose texture samplers exceed the shader limit, before Filament aborts.
-void check_texture_count(const cgltf_material& m, size_t index, const PrepareOptions& options, const Issues& issue) {
-    // Unlit uses one texture; diffuse transmission uses its own fixed material.
-    if (m.unlit || m.has_diffuse_transmission) return;
-    auto has = [](const cgltf_texture_view& view) { return int(view.texture != nullptr); };
-    int count = m.has_pbr_specular_glossiness
-        // gltfio then samples these two textures in place of the metallic-roughness pair.
-        ? has(m.pbr_specular_glossiness.diffuse_texture) + has(m.pbr_specular_glossiness.specular_glossiness_texture)
-        : has(m.pbr_metallic_roughness.base_color_texture) + has(m.pbr_metallic_roughness.metallic_roughness_texture);
-    count += has(m.normal_texture) + has(m.occlusion_texture) + has(m.emissive_texture);
-    if (m.has_clearcoat) count += has(m.clearcoat.clearcoat_texture) + has(m.clearcoat.clearcoat_roughness_texture)
-                                  + has(m.clearcoat.clearcoat_normal_texture);
-    if (m.has_sheen) count += has(m.sheen.sheen_color_texture) + has(m.sheen.sheen_roughness_texture);
-    if (m.has_transmission) count += has(m.transmission.transmission_texture);
-    if (m.has_volume) count += has(m.volume.thickness_texture);
-    if (m.has_specular) count += has(m.specular.specular_texture) + has(m.specular.specular_color_texture);
-    const auto name = repr(material_name(m, index, " "));
-    const auto uses = "Material " + name + " uses " + std::to_string(count) + " textures; ";
-    if ((m.has_anisotropy || m.has_iridescence) && count + surface_samplers > max_lit_textures)
-        throw AssetError(uses + "with anisotropy or iridescence the limit is "
-                         + std::to_string(max_lit_textures - surface_samplers));
-    if (count <= max_lit_textures) return;
-    if (!m.has_transmission && !m.has_volume) {
-        if (!options.precompiled)
-            throw AssetError(uses + "compiled lit materials support at most " + std::to_string(max_lit_textures)
-                             + ". Use Renderer(precompiled_shaders=True) for this asset.");
-        // Filament's precompiled materials then drop clearcoat, sheen, IOR, or specular inputs.
-        issue(uses + "precompiled shaders render it without some of its features.");
-        return;
-    }
-    throw AssetError(uses + "lit materials with this combination support at most " + std::to_string(max_lit_textures));
 }
 
 // Buffers and meshopt -----------------------------------------------------------------------
@@ -324,7 +255,7 @@ struct Loader {
     cgltf_data* data;
     const std::string& path;
     std::shared_ptr<BufferStore> store = std::make_shared<BufferStore>();
-    // Parsed only for documents with meshopt or instancing, which cgltf reads incompletely.
+    // Parsed only for documents with instancing, which cgltf reads incompletely.
     std::optional<json::Value> json;
 
     const json::Value& document() {
@@ -358,38 +289,9 @@ void attach(cgltf_data* data, const BufferStore& store) {
 struct MeshoptView {
     size_t view;
     bool khr;
-    const json::Value* extension;
+    size_t buffer, start, size, count, stride;
+    std::string mode, filter;
 };
-
-std::vector<MeshoptView> meshopt_views(Loader& loader) {
-    auto* data = loader.data;
-    bool any = false;
-    for (size_t i = 0; i < data->buffer_views_count; ++i) {
-        const auto& view = data->buffer_views[i];
-        any = any || view.has_meshopt_compression
-            || extension_text(view.extensions, view.extensions_count, "KHR_meshopt_compression");
-    }
-    if (!any) return {};
-    const auto& doc = loader.document();
-    static const char* names[] = {"EXT_meshopt_compression", "KHR_meshopt_compression"};
-    if (const auto* buffers = doc.find("buffers"); buffers && buffers->is_array()) {
-        for (const auto& buffer : buffers->items) {
-            const auto* extensions = buffer.find("extensions");
-            if (extensions && extensions->find(names[0]) && extensions->find(names[1]))
-                invalid("A buffer cannot use both meshopt extensions");
-        }
-    }
-    std::vector<MeshoptView> result;
-    const auto* views = doc.find("bufferViews");
-    for (size_t i = 0; views && i < views->items.size() && i < data->buffer_views_count; ++i) {
-        const auto* extensions = views->items[i].find("extensions");
-        const auto* ext = extensions ? extensions->find(names[0]) : nullptr;
-        const auto* khr = extensions ? extensions->find(names[1]) : nullptr;
-        if (ext && khr) invalid("A buffer view cannot use both meshopt extensions");
-        if (ext || khr) result.push_back({i, khr != nullptr, khr ? khr : ext});
-    }
-    return result;
-}
 
 size_t meshopt_field(const json::Value& ext, const char* key, bool optional = false) {
     const auto* value = ext.find(key);
@@ -399,6 +301,68 @@ size_t meshopt_field(const json::Value& ext, const char* key, bool optional = fa
     }
     if (!value->is_index()) invalid("Invalid meshopt buffer range");
     return size_t(value->number);
+}
+
+std::vector<MeshoptView> meshopt_views(Loader& loader) {
+    auto* data = loader.data;
+    static const char* names[] = {"EXT_meshopt_compression", "KHR_meshopt_compression"};
+    for (size_t i = 0; i < data->buffers_count; ++i) {
+        const auto& buffer = data->buffers[i];
+        if (extension_text(buffer.extensions, buffer.extensions_count, names[0])
+                && extension_text(buffer.extensions, buffer.extensions_count, names[1]))
+            invalid("A buffer cannot use both meshopt extensions");
+    }
+    std::vector<MeshoptView> result;
+    // "filter" keys that cgltf or the KHR parse account for, and the EXT views that cgltf reads
+    // as NONE.
+    size_t known_filters = 0;
+    std::vector<size_t> unfiltered;
+    for (size_t i = 0; i < data->buffer_views_count; ++i) {
+        const auto& view = data->buffer_views[i];
+        const char* khr = extension_text(view.extensions, view.extensions_count, names[1]);
+        if (view.has_meshopt_compression && khr) invalid("A buffer view cannot use both meshopt extensions");
+        if (view.has_meshopt_compression) {
+            static const char* modes[] = {"", "ATTRIBUTES", "TRIANGLES", "INDICES"};
+            static const char* filters[] = {"NONE", "OCTAHEDRAL", "QUATERNION", "EXPONENTIAL"};
+            const auto& mc = view.meshopt_compression;
+            if (mc.mode == cgltf_meshopt_compression_mode_invalid || mc.mode >= std::size(modes)
+                    || mc.filter >= std::size(filters))
+                invalid("Invalid meshopt mode or filter");
+            if (mc.filter == cgltf_meshopt_compression_filter_none) unfiltered.push_back(i);
+            else ++known_filters;
+            result.push_back({i, false, cgltf_buffer_index(data, mc.buffer), mc.offset, mc.size, mc.count, mc.stride,
+                              modes[mc.mode], filters[mc.filter]});
+        } else if (khr) {
+            // cgltf does not read KHR_meshopt_compression, so only its own object is parsed.
+            const json::Value ext = extension_value(khr);
+            const auto* mode = ext.find("mode");
+            const auto* filter = ext.find("filter");
+            if (!mode || !mode->is_string() || (filter && !filter->is_string())) invalid("Invalid meshopt mode or filter");
+            if (filter) ++known_filters;
+            result.push_back({i, true, meshopt_field(ext, "buffer"), meshopt_field(ext, "byteOffset", true),
+                              meshopt_field(ext, "byteLength"), meshopt_field(ext, "count"),
+                              meshopt_field(ext, "byteStride"), mode->text, filter ? filter->text : "NONE"});
+        }
+    }
+    // cgltf reads an unknown EXT filter, such as COLOR, as NONE, and does not keep the extension
+    // object. The document is parsed only if it has more "filter" keys than the known ones.
+    if (!unfiltered.empty()) {
+        const std::string_view text(data->json, data->json_size);
+        size_t keys = 0;
+        for (size_t at = text.find("\"filter\""); at != text.npos; at = text.find("\"filter\"", at + 8)) ++keys;
+        const auto* views = keys > known_filters ? loader.document().find("bufferViews") : nullptr;
+        for (const size_t i : unfiltered) {
+            if (!views || !views->is_array() || i >= views->items.size()) break;
+            const auto* extensions = views->items[i].find("extensions");
+            const auto* ext = extensions ? extensions->find(names[0]) : nullptr;
+            const auto* filter = ext ? ext->find("filter") : nullptr;
+            if (!filter || (filter->is_string() && filter->text == "NONE")) continue;
+            if (filter->is_string() && filter->text == "COLOR")
+                invalid("COLOR filtering requires KHR_meshopt_compression");
+            invalid("Invalid meshopt mode or filter");
+        }
+    }
+    return result;
 }
 
 // Loads every buffer, and decodes meshopt views into the buffers that they reference. A buffer
@@ -412,7 +376,7 @@ void load_buffers(Loader& loader, SourcePatches& patches) {
     std::vector<size_t> decoded_end(data->buffers_count, 0);
     for (const auto& item : views) {
         compressed[item.view] = true;
-        const size_t source = meshopt_field(*item.extension, "buffer");
+        const size_t source = item.buffer;
         if (source >= data->buffers_count) invalid("Meshopt decoded length does not match its buffer view");
         content[source] = true;
         const auto& view = data->buffer_views[item.view];
@@ -453,10 +417,7 @@ void load_buffers(Loader& loader, SourcePatches& patches) {
     // Decode everything before writing, since a view may decode into its own source buffer.
     std::vector<std::vector<uint8_t>> results;
     for (const auto& item : views) {
-        const auto& ext = *item.extension;
-        const size_t count = meshopt_field(ext, "count"), stride = meshopt_field(ext, "byteStride");
-        const size_t source = meshopt_field(ext, "buffer");
-        const size_t start = meshopt_field(ext, "byteOffset", true), size = meshopt_field(ext, "byteLength");
+        const size_t count = item.count, stride = item.stride, source = item.buffer, start = item.start, size = item.size;
         const auto& view = data->buffer_views[item.view];
         if (count * stride != view.size) invalid("Meshopt decoded length does not match its buffer view");
         if (view.stride && view.stride != stride) invalid("Meshopt stride does not match its buffer view");
@@ -464,13 +425,9 @@ void load_buffers(Loader& loader, SourcePatches& patches) {
         if (start + size > std::min(input.size, data->buffers[source].size))
             invalid("Meshopt range exceeds its source buffer");
         const uint8_t* payload = input.data + start;
-        const auto* mode = ext.find("mode");
-        const auto* filter = ext.find("filter");
-        if (!mode || !mode->is_string() || (filter && !filter->is_string())) invalid("Invalid meshopt mode or filter");
-        const std::string filter_name = filter ? filter->text : "NONE";
-        if (!item.khr && (filter_name == "COLOR" || (mode->text == "ATTRIBUTES" && size && payload[0] == 0xa1)))
-            invalid("Vertex version 1 and COLOR filtering require KHR_meshopt_compression");
-        results.push_back(decode_meshopt(payload, size, count, stride, mode->text, filter_name));
+        if (!item.khr && item.mode == "ATTRIBUTES" && size && payload[0] == 0xa1)
+            invalid("Vertex version 1 requires KHR_meshopt_compression");
+        results.push_back(decode_meshopt(payload, size, count, stride, item.mode, item.filter));
     }
     for (size_t i = 0; i < views.size(); ++i) {
         auto& view = data->buffer_views[views[i].view];
@@ -1401,7 +1358,6 @@ void prepare_materials(const cgltf_data* data, PreparedAsset& tables, const std:
         auto& source = tables.materials[index];
         // Provider-built instances keep the name gltfio would give them; unnamed ones get an index.
         source.label = m.name ? std::string(m.name) : "material_" + std::to_string(index);
-        source.root_label = m.name ? std::string(m.name) : "material";
         source.emissive_factor = {m.emissive_factor[0], m.emissive_factor[1], m.emissive_factor[2]};
         if (!m.has_anisotropy && !m.has_iridescence) continue;
         if (m.unlit || m.has_pbr_specular_glossiness || m.has_diffuse_transmission)
@@ -1423,13 +1379,6 @@ void prepare_materials(const cgltf_data* data, PreparedAsset& tables, const std:
         if (!std::all_of(std::begin(v), std::end(v), finite_float) || !(0 <= v[0] && v[0] <= 1 && 0 <= v[2] && v[2] <= 1
                 && v[3] >= 1 && std::min(v[4], v[5]) >= 0))
             invalid("Invalid anisotropy or iridescence factors");
-        // The archive path binds these through its extension texture plan.
-        if (!archive_materials && m.has_anisotropy)
-            surface.anisotropy_texture = texture_info(m.anisotropy.anisotropy_texture, path);
-        if (!archive_materials && m.has_iridescence) {
-            surface.iridescence_texture = texture_info(m.iridescence.iridescence_texture, path);
-            surface.thickness_texture = texture_info(m.iridescence.iridescence_thickness_texture, path);
-        }
         source.kind = MaterialKind::surface;
         source.source = tables.surfaces.size();
         tables.surfaces.push_back(std::move(surface));
@@ -1485,8 +1434,8 @@ void prepare_materials(const cgltf_data* data, PreparedAsset& tables, const std:
     }
 }
 
-// Archive entry, texture slots, and UV sets of each glTF material for the archive path. The
-// provider applies the plan; warnings come from here, so strict loads raise them as errors.
+// Archive entry, texture slots, and UV sets of each glTF material. The provider applies the
+// plan; warnings come from here, so strict loads raise them as errors.
 void plan_archive_materials(const cgltf_data* data, PreparedAsset& tables, const std::string& path, const Issues& issue) {
     using R = ExtensionRole;
     using E = ArchiveEntry;
@@ -1623,6 +1572,31 @@ std::vector<uint8_t> read_file(const std::filesystem::path& file) {
     return bytes;
 }
 
+std::filesystem::path resource_path(const std::string& path, const std::string& uri) {
+    std::string decoded;
+    for (size_t j = 0; j < uri.size(); ++j) {
+        if (uri[j] != '%') { decoded += uri[j]; continue; }
+        auto hex = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        if (j + 2 >= uri.size() || hex(uri[j+1]) < 0 || hex(uri[j+2]) < 0)
+            throw AssetError("Invalid resource URI escape: " + uri);
+        const char value = char(hex(uri[j+1]) * 16 + hex(uri[j+2]));
+        if (!value) throw AssetError("Resource URI contains a null byte");
+        decoded += value;
+        j += 2;
+    }
+    auto u8 = [](const std::string& value) {
+        const auto* first = reinterpret_cast<const char8_t*>(value.data());
+        return std::filesystem::path(std::u8string(first, first + value.size()));
+    };
+    // An absolute path in the URI replaces the document folder.
+    return u8(path).parent_path() / u8(decoded);
+}
+
 std::vector<uint8_t> decode_meshopt(const uint8_t* source, size_t size, size_t count, size_t stride,
                                     const std::string& mode, const std::string& filter) {
     if (!count || !stride || stride > 256 || count > (size_t(512) << 20) / stride)
@@ -1683,8 +1657,6 @@ Prepared prepare_asset(std::vector<uint8_t> bytes, const std::string& path, cons
         if (m.has_dispersion && (!m.has_volume || m.unlit || m.has_pbr_specular_glossiness))
             throw AssetError("Dispersion requires a volume material without unlit or specular-glossiness");
     }
-    if (!archive_materials)
-        for (size_t i = 0; i < data->materials_count; ++i) check_texture_count(data->materials[i], i, options, issue);
 
     Loader loader{data, path};
     load_buffers(loader, prepared.patches);
@@ -1706,7 +1678,7 @@ Prepared prepare_asset(std::vector<uint8_t> bytes, const std::string& path, cons
     prepare_cameras(data, tables);
     prepare_animations(data, tables, prepared.patches, issue);
     prepare_materials(data, tables, path);
-    if (archive_materials) plan_archive_materials(data, tables, path, issue);
+    plan_archive_materials(data, tables, path, issue);
     for (size_t i = 0; i < data->images_count; ++i) {
         const auto& image = data->images[i];
         if (image.mime_type || !image.buffer_view) continue;

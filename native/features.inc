@@ -360,8 +360,8 @@ void Node::set_morph_weights(const float* values, size_t count) {
     rm.setMorphWeights(rm.getInstance(utils::Entity::import(entity_)), values, count);
 }
 float Camera::exposure() const {
-    data_->check(); auto* c = data_->camera;
-    return std::log2(c->getAperture() * c->getAperture() / c->getShutterSpeed() * 100.0f / c->getSensitivity());
+    data_->check();
+    return f::Exposure::ev100(*data_->camera);
 }
 void Camera::set_exposure(float ev100) {
     data_->check(); finite(ev100);

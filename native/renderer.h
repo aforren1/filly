@@ -314,7 +314,6 @@ public:
     // A model with one node and one glTF material whose geometry is the caller's arrays.
     // arrays.indices and arrays.triangles are required.
     Model create_mesh(const MeshArrays& arrays, const MeshMaterial& material);
-    bool precompiled_shaders() const;
     Light add_directional_light(Vec3 direction, float intensity, Vec3 color);
     Light add_sun_light(Vec3 direction, float intensity, Vec3 color, float angular_radius,
                         float halo_size, float halo_falloff);
@@ -507,7 +506,7 @@ private:
 
 class Renderer {
 public:
-    explicit Renderer(uintptr_t shared_context = 0, bool precompiled_shaders = false);
+    explicit Renderer(uintptr_t shared_context = 0);
     Scene create_scene();
     OffscreenTarget create_render_target(int64_t width, int64_t height,
                                          const std::string& format, bool depth);
@@ -534,7 +533,6 @@ public:
     void reset_gl_state();
     void close();
     bool closed() const;
-    bool precompiled_shaders() const;
     uintptr_t shared_context() const;
     // "wgl", "glx", "egl", or "webgl".
     std::string gl_platform() const;

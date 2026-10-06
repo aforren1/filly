@@ -1,5 +1,5 @@
 // filly's material for KHR_materials_diffuse_transmission. materials.cmake writes one file per
-// blending mode. The runtime material path builds the same material in native/materials.cpp.
+// blending mode.
 // Surface shading is custom: light from behind the sheet passes through it, tinted and
 // attenuated by the volume. An irradiance cubemap supplies the environment behind the sheet.
 material {

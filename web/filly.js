@@ -401,10 +401,8 @@ class Handle
  * @param {Object} [options]
  * @param {Function} [options.onHandBack] - called after filly hands the context back, for the
  *   page renderer to forget its cached GL state (PIXI: () => pixiRenderer.reset()).
- * @param {boolean} [options.precompiledShaders] - accepted for parity; the web build always
- *   uses precompiled materials.
  */
-export async function createRenderer(gl, { onHandBack = null, precompiledShaders = false } = {})
+export async function createRenderer(gl, { onHandBack = null } = {})
 {
 	const module = await loadModule();
 	let context = contexts.get(gl);
@@ -418,7 +416,7 @@ export async function createRenderer(gl, { onHandBack = null, precompiledShaders
 		context.onHandBack.add(onHandBack);
 	}
 	context.enter();
-	const native = callNative(module, () => new module.Renderer(context.handle, precompiledShaders));
+	const native = callNative(module, () => new module.Renderer(context.handle));
 	context.renderers.add(native);
 	return new Renderer(context, native, onHandBack);
 }

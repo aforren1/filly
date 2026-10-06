@@ -18,7 +18,7 @@ desktop filly:
 
 The web build compiles filly's core with its precompiled [material archive](material-precompilation.md)
 and its output passes, for GLSL ES 3.00 (`matc -p mobile`). The material path is therefore the
-same as on the desktop with `FILLY_MATERIALS=archive`.
+same as on the desktop.
 
 ## One context, no copy
 

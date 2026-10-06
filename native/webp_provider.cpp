@@ -9,6 +9,7 @@
 
 #include <filament/Engine.h>
 #include <filament/Texture.h>
+#include <utils/Log.h>
 #include <webp/decode.h>
 
 #include <atomic>
@@ -138,5 +139,15 @@ private:
 };
 }
 
-g::TextureProvider* create_webp_provider(f::Engine* engine) { return new WebpProvider(engine); }
+g::TextureProvider* create_webp_provider(f::Engine* engine) {
+    // A later SDK can include WebP. Then this provider is redundant, so tell the maintainer once.
+    static const bool checked = [engine] {
+        if (std::unique_ptr<g::TextureProvider>(g::createWebpProvider(engine)))
+            utils::slog.w << "filly: the Filament SDK has a WebP provider; filly's own provider is redundant"
+                          << utils::io::endl;
+        return true;
+    }();
+    (void)checked;
+    return new WebpProvider(engine);
+}
 }

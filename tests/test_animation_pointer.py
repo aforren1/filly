@@ -107,8 +107,7 @@ def test_material_pixels_normalized_output_and_clip_switch(renderer, scene, tria
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("mode", ["compiled", "precompiled"])
-def test_pointer_uses_material_index_and_reaches_node_local_copy(triangle_glb, mode):
+def test_pointer_uses_material_index_and_reaches_node_local_copy(triangle_glb):
     doc, binary = unpack(triangle_glb)
     doc["materials"].append(json.loads(json.dumps(doc["materials"][0])))
     doc["materials"][1]["name"] = "animated"
@@ -117,7 +116,7 @@ def test_pointer_uses_material_index_and_reaches_node_local_copy(triangle_glb, m
     doc["nodes"].append({"name": "other", "mesh": 1})
     doc["scenes"][0]["nodes"].append(1)
     add_clip(doc, binary, "/materials/1/pbrMetallicRoughness/baseColorFactor", [1, 0, 0, 1, 0, 1, 0, 1], kind="VEC4")
-    with filly.Renderer(precompiled_shaders=mode == "precompiled") as renderer:
+    with filly.Renderer() as renderer:
         model = renderer.create_scene().load(pack(doc, binary))
         first = model.material("red")
         second = model.material("animated")

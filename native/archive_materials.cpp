@@ -1,6 +1,5 @@
-// The glTF material provider of the archive material path (CMake FILLY_MATERIALS=archive).
-// Every glTF material gets an instance of an entry in filly's precompiled material archive
-// (native/materials). Nothing is compiled at run time. See
+// filly's glTF material provider. Every glTF material gets an instance of an entry in filly's
+// precompiled material archive (native/materials). Nothing is compiled at run time. See
 // docs/explanation/material-precompilation.md.
 #include "materials.h"
 #include "webp_provider.h"
@@ -196,7 +195,7 @@ public:
         auto* instance = kind == ArchiveEntry::DiffuseTransmission && source && source->kind == MaterialKind::diffuse
             ? diffuse_instance(config, *source)
             : standard_instance(config, kind, plan, source, label);
-        records.push_back({instance, *config, false});
+        records.push_back({instance, *config});
         if (source) bindings.emplace_back(index, instance);
         return instance;
     }
@@ -236,7 +235,8 @@ public:
         set_if(mi, "ior", 1.5f);
         set_if(mi, "specularStrength", 1.0f);
         set_if(mi, "specularColorFactor", m::float3(1.0f));
-        // Volume without KHR_materials_transmission refracts completely, as in the runtime path.
+        // Volume without KHR_materials_transmission refracts completely, as the removed runtime
+        // material path did.
         set_if(mi, "transmissionFactor", k.hasTransmission ? 0.0f : 1.0f);
         set_if(mi, "volumeThicknessFactor", 0.0f);
         set_if(mi, "volumeAbsorption", m::float3(0.0f));
@@ -258,7 +258,7 @@ public:
             const ExtensionTexture* texture = plan && plan->roles[role].slot >= 0 ? &plan->roles[role] : nullptr;
             mi->setParameter((prefix + "Slot").c_str(), texture ? int(texture->slot) : -1);
             mi->setParameter((prefix + "Index").c_str(), texture ? int(texture->uv) : 0);
-            // Anisotropy and iridescence keep the runtime path's column order (M * uv).
+            // Anisotropy and iridescence use filly's column order (M * uv); see surface.mat.in.
             const bool column = role == size_t(ExtensionRole::anisotropy) || role == size_t(ExtensionRole::iridescence)
                 || role == size_t(ExtensionRole::iridescenceThickness);
             const auto uv = texture ? matrix(texture->transform) : identity;
@@ -376,21 +376,13 @@ private:
 ArchiveProvider* provider_of(g::MaterialProvider* provider) { return static_cast<ArchiveProvider*>(provider); }
 }
 
-g::MaterialProvider* create_material_provider(f::Engine* engine, bool) { return new ArchiveProvider(engine); }
+g::MaterialProvider* create_material_provider(f::Engine* engine) { return new ArchiveProvider(engine); }
 void set_prepared_asset(g::MaterialProvider* provider, const PreparedAsset* asset) { provider_of(provider)->set_asset(asset); }
 std::vector<f::Texture*> take_material_textures(g::MaterialProvider* provider) {
     return std::exchange(provider_of(provider)->textures, {});
 }
 std::vector<MaterialBinding> take_material_bindings(g::MaterialProvider* provider) { return std::exchange(provider_of(provider)->bindings, {}); }
 std::vector<MaterialRecord> take_material_records(g::MaterialProvider* provider) { return std::exchange(provider_of(provider)->records, {}); }
-f::MaterialInstance* create_material_instance(g::MaterialProvider* provider, g::MaterialKey& key, const char* label) {
-    auto* p = provider_of(provider);
-    const size_t mark = p->records.size();
-    g::UvMap uv{};
-    auto* instance = p->createMaterialInstance(&key, &uv, label, nullptr);
-    p->records.resize(mark);
-    return instance;
-}
 void configure_diffuse_environment(g::MaterialProvider* provider, f::MaterialInstance* instance,
                                    f::Texture* irradiance, float intensity, float rotation) {
     if (!instance->getMaterial()->hasParameter("backlightIntensity")) return;

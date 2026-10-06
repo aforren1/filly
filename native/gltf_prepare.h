@@ -14,11 +14,6 @@
 #include <string>
 #include <vector>
 
-// 1 when the module uses filly's material archive (CMake FILLY_MATERIALS=archive).
-#ifndef FILLY_MATERIALS_ARCHIVE
-#define FILLY_MATERIALS_ARCHIVE 0
-#endif
-
 namespace filament { class Texture; }
 
 namespace filly::detail {
@@ -41,14 +36,14 @@ struct DiffuseSource {
     Vec3 absorption = {};
     AssetTexture thickness_texture;
 };
+// Factors of KHR_materials_anisotropy and KHR_materials_iridescence. Their textures are in the
+// material's ArchivePlan.
 struct SurfaceSource {
-    // The extensions present. Only these lobes are compiled: an anisotropic lobe at zero strength
-    // still differs from the isotropic one in float arithmetic.
+    // The extensions present. The provider sets the factors of these only.
     bool has_anisotropy = false, has_iridescence = false;
     float anisotropy = 0, rotation = 0, iridescence = 0, ior = 1.3f, minimum = 100, maximum = 400;
-    AssetTexture anisotropy_texture, iridescence_texture, thickness_texture;
 };
-// The archive material path (FILLY_MATERIALS=archive) ----------------------------------------
+// Material archive -------------------------------------------------------------------------------
 // Entries of filly's material archive. The names match the uberz spec flags that materials.cmake
 // writes.
 // Refraction entries stay contiguous; preparation tests the range.
@@ -94,8 +89,6 @@ struct MaterialSource {
     size_t source = 0;
     // Instance name for provider-built materials: the glTF name, or material_<index>.
     std::string label;
-    // The name that gltfio gives MaterialProvider::getMaterial(): the glTF name, or "material".
-    std::string root_label;
     // The unscaled glTF emissiveFactor. gltfio 1.77.1 multiplies it by emissiveStrength and also
     // passes emissiveStrength to the shader, which squares the strength; this restores the factor.
     std::array<float, 3> emissive_factor{};
@@ -143,8 +136,8 @@ struct PreparedAsset {
     std::vector<SurfaceSource> surfaces;
     std::vector<AnimationSource> animations;
     std::vector<CameraSource> cameras;
-    // Archive material path only: one plan per glTF material, and the glTF textures that
-    // extension roles use, by glTF texture index (other entries stay empty).
+    // One plan per glTF material, and the glTF textures that extension roles use, by glTF
+    // texture index (other entries stay empty).
     std::vector<ArchivePlan> plans;
     std::vector<AssetTexture> textures;
     // Model-space bounds of the rest pose; see compute_bounds. Minimum above maximum means no
@@ -169,7 +162,6 @@ struct PreparedAsset {
     struct DecodedTexture { const AssetTexture* source; bool srgb; filament::Texture* texture; };
     mutable std::vector<DecodedTexture> decoded;
     bool masked = false;
-    bool custom_materials() const { return !diffuse.empty() || !surfaces.empty(); }
 };
 
 // The accessors of the rest animation. gltfio's animator keeps a node's translation, rotation,
@@ -214,7 +206,7 @@ struct SourcePatches {
 };
 
 struct PrepareOptions {
-    bool strict = false, refraction = false, precompiled = false;
+    bool strict = false, refraction = false;
 };
 
 struct Prepared {
@@ -227,6 +219,9 @@ struct Prepared {
 
 // Reads a file through a wide path on Windows.
 std::vector<uint8_t> read_file(const std::filesystem::path& file);
+// Resolves a percent-encoded glTF URI against the folder of the UTF-8 document path.
+// Throws AssetError for an invalid escape or a null byte.
+std::filesystem::path resource_path(const std::string& path, const std::string& uri);
 // path: absolute UTF-8 path of the document, or empty for bytes, which must be self-contained.
 // Compatibility messages are appended to warnings; with strict, the first one throws.
 Prepared prepare_asset(std::vector<uint8_t> bytes, const std::string& path, const PrepareOptions& options,

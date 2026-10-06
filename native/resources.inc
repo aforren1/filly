@@ -275,8 +275,6 @@ void Material::set_texture_transform(int slot, std::array<float, 2> offset, std:
         throw FillyError("Assign a texture to this slot before setting its transform");
     const auto matrix = g::matrixFromUvTransform(offset.data(), rotation, scale.data());
     auto* instance = material_instance(data_, index_, detail::texture_maps[slot]);
-    if (!instance->getMaterial()->hasParameter(detail::texture_matrices[slot]))
-        throw AssetError("This material was compiled without texture transforms because it keeps other glTF textures");
     instance->setParameter(detail::texture_matrices[slot], matrix);
     assignment->transforms[slot] = matrix;
 }
