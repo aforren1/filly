@@ -3,14 +3,14 @@
 filly is a Python 3D renderer for glTF scenes, built on
 [Google Filament](https://github.com/google/filament).
 
-Load a glTF model, light it, pose it, and render it. You get the result as a NumPy image, or
+Filly can load a glTF model, light it, pose it, and render it. You get the result as a NumPy image, or
 filly draws it into an OpenGL texture that your own window shows. Your program keeps control of
 the window and of frame timing, so filly fits into applications that already own a display loop,
 such as PsychoPy experiments or pyglet, moderngl, and zengl programs.
 
 ![A wooden playground horse rocking on its spring, rendered with filly](docs/images/horse.gif)
 
-*"Wooden Playground Horse" by [Batuhan13](https://sketchfab.com/Batuhan13),
+*"[Wooden Playground Horse](https://sketchfab.com/3d-models/wooden-playground-horse-aa1c440f48a44e558dcc9097b35a6a6d)" by [Batuhan13](https://sketchfab.com/Batuhan13),
 [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/). See [attribution](examples/assets/ATTRIBUTION.md).*
 
 ## Install
@@ -18,7 +18,7 @@ such as PsychoPy experiments or pyglet, moderngl, and zengl programs.
 filly is not on PyPI yet. [Build it from source](docs/how-to/build.md).
 
 It needs Python 3.10 or later, Windows or Linux on x86_64, and an OpenGL 4.1 driver. On Linux,
-offscreen rendering works without a display. macOS is not supported.
+offscreen rendering works without a display. macOS is not supported at this time.
 
 ## Render an image
 
@@ -29,7 +29,7 @@ from PIL import Image  # only to save the image
 with filly.Renderer() as renderer:
     scene = renderer.create_scene()
     horse = scene.load("examples/assets/wooden_playground_horse.glb")
-    horse.apply_animation(0, 1.25)  # a pose from its spring animation
+    horse.apply_animation(0, 1.25) # a pose from its spring animation
 
     camera = scene.create_camera()
     camera.set_perspective(fov_y=30, near=0.1, far=100)
@@ -39,20 +39,19 @@ with filly.Renderer() as renderer:
 
     target = renderer.create_render_target(width=800, height=600)
     renderer.render(scene, target)
-    Image.fromarray(target.read()).save("horse.png")  # (600, 800, 4) uint8 RGBA
+    Image.fromarray(target.read()).save("horse.png") # (600, 800, 4) uint8 RGBA
 ```
 
 ## Draw in a PsychoPy window
 
 filly renders into a texture that PsychoPy draws directly, with no copy through the CPU.
-PsychoPy still flips the window.
 
 ```python
 from psychopy import core, visual
 from filly.integrations.psychopy import SharedTarget, create_renderer
 
 win = visual.Window((1024, 768), units="pix")
-renderer = create_renderer(win)  # shares the window's OpenGL context
+renderer = create_renderer(win) # shares the window's OpenGL context
 scene = renderer.create_scene()
 horse = scene.load("examples/assets/wooden_playground_horse.glb")
 camera = scene.create_camera()
@@ -62,7 +61,7 @@ scene.camera = camera
 scene.add_directional_light(direction=(-1, -1, -2), intensity=100_000)
 
 target = SharedTarget(renderer, win, 512, 512)
-stim = target.as_psychopy_texture()  # an ImageStim: position, size, masks, and opacity work
+stim = target.as_psychopy_texture() # an ImageStim
 clock = core.Clock()
 while clock.getTime() < 3:
     horse.apply_animation(0, clock.getTime())
@@ -88,18 +87,15 @@ Close the target, then the renderer, then the window. The same pattern works wit
   panorama or prefiltered KTX files.
 - **Stimuli from arrays:** textures and meshes from NumPy arrays, updated in place each frame,
   for gratings, noise, or deforming shapes.
-- **Predictable output:** sRGB by default, or linear on request. Effects such as antialiasing,
-  fog, and bloom are off until you enable them. With default settings, the same scene gives the
-  same pixels on every frame.
-- **Several views per frame:** each `render()` call can take its own camera and viewport, for
-  example for side-by-side stereo.
-- **Browsers:** the same core compiles to WebAssembly for WebGL2. It renders into a texture
-  that the page's own renderer draws, such as PIXI in PsychoJS. See
+- **Predictable output:** sRGB (default) or linear. Effects such as antialiasing,
+  fog, and bloom are off until you enable them. With default settings, the same scene gives the same pixels on every frame.
+- **Several views per frame:** each `render()` call can take its own camera and viewport, for example for side-by-side stereo.
+- **Browsers:** the same core compiles to WebAssembly for WebGL2. It renders into a texture that the page's own renderer draws, such as PIXI in PsychoJS. See
   [the web build](docs/explanation/web.md).
 
 ## Examples
 
-Each example is in `examples/` and runs with `python examples/<name>.py`.
+See the `examples/` folder.
 
 | Example | Shows |
 | --- | --- |
