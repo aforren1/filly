@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "filly"
-version = "0.1.0"
+version = "0.2.0dev0"
 description = "A Python 3D renderer for glTF scenes, built on Google Filament"
 readme = "README.md"
 license = "MIT"
@@ -20,7 +20,7 @@ Issues = "https://github.com/aforren1/filly/issues"
 
 [project.optional-dependencies]
 examples = ["Pillow>=10"]
-psychopy = ["psychopy-lib==2026.2.4"]
+psychopy = ["psychopy>=2021.1.0"]
 pyglet = ["pyglet>=1.4.11"]
 moderngl = ["pyglet>=1.4.11", "moderngl>=5.12"]
 zengl = ["pyglet>=1.4.11", "zengl>=2.7"]
@@ -38,4 +38,4 @@ sdist.exclude = [".deps", ".venv", "build", "dist", "Microsoft", ".vscode"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["gpu: requires a working OpenGL driver", "interop: requires a host WGL or GLX context", "psychopy: requires psychopy-lib and a display", "browser: runs the web build in a browser (see tests/test_web.py)"]
+markers = ["gpu: requires a working OpenGL driver", "interop: requires a host WGL or GLX context", "psychopy: requires psychopy and a display", "browser: runs the web build in a browser (see tests/test_web.py)"]

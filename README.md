@@ -15,10 +15,9 @@ such as PsychoPy experiments or pyglet, moderngl, and zengl programs.
 
 ## Install
 
-filly is not on PyPI yet. [Build it from source](docs/how-to/build.md).
+You can install filly from [PyPI](https://pypi.org/project/filly/) or [build it from source](docs/how-to/build.md).
 
-It needs Python 3.10 or later, Windows or Linux on x86_64, and an OpenGL 4.1 driver. On Linux,
-offscreen rendering works without a display. macOS is not supported at this time.
+It needs Python 3.10 or later, Windows or Linux on x86_64, and an OpenGL 4.1 driver. On Linux, offscreen rendering works without a display. macOS is not supported at this time.
 
 ## Render an image
 
