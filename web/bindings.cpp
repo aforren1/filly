@@ -298,7 +298,12 @@ EMSCRIPTEN_BINDINGS(filly) {
         .field("liveModels", &Stats::live_models)
         .field("liveLights", &Stats::live_lights)
         .field("materialCopies", &Stats::material_copies)
-        .field("framesRendered", &Stats::frames_rendered);
+        .field("framesRendered", &Stats::frames_rendered)
+        // Read-only: stats only travel to JavaScript, so the setters never run.
+        .field("gpuFrameMs", +[](const Stats& stats) { return optional_value(stats.gpu_frame_ms); },
+               +[](Stats&, val) {})
+        .field("gpuFrameNumber", +[](const Stats& stats) { return optional_value(stats.gpu_frame_number); },
+               +[](Stats&, val) {});
 
     function("setLogLevel", &set_log_level);
     function("currentGlContext", optional_override([] { return double(current_gl_context()); }));

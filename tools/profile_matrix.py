@@ -6,7 +6,7 @@
 MATRIX.json is a list of configurations:
 
     [{"name": "helmet-1080-a", "python": "C:/tmp/prof/w-a/v/Scripts/python.exe",
-      "args": ["helmet", "--frame-info"], "env": {"SHIM_MCCOMPAT": "0x800000001"}}, ...]
+      "args": ["helmet"], "env": {"SHIM_MCCOMPAT": "0x800000001"}}, ...]
 
 Each round runs every configuration once, in a fresh process, in an order rotated by one
 position per round, so that drift in GPU clocks and temperature spreads over all
@@ -29,7 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 METRICS = (
-    ("frame_info", "p50", "GPU Filament frame (FrameInfo)"),
+    ("gpu_frame", "p50", "GPU Filament frame (Stats.gpu_frame_ms)"),
     ("gpu_filament_frame", "p50", "GPU start->acquired (host timestamps)"),
     ("gpu_host_draw", "p50", "GPU host draw"),
     ("render", "p50", "render() wall"),
@@ -128,9 +128,9 @@ def cmd_run(args):
                 record["stderr"] = completed.stderr[-2000:]
             with open(log, "a") as stream:
                 stream.write(json.dumps(record) + "\n")
-            fi = (record["summary"] or {}).get("phases", {}).get("frame_info", {}).get("p50")
+            gpu = (record["summary"] or {}).get("phases", {}).get("gpu_frame", {}).get("p50")
             print(f"round {round_index} {config['name']:28s} exit={completed.returncode} load={load:4.0f}% "
-                  f"frame_info_p50={fi if fi is None else round(fi, 3)} ({record['seconds']:.0f} s)", flush=True)
+                  f"gpu_frame_p50={gpu if gpu is None else round(gpu, 3)} ({record['seconds']:.0f} s)", flush=True)
     session["end"] = time.strftime("%Y-%m-%d %H:%M:%S")
     session["power_end"] = power_state()
     (out / "session.json").write_text(json.dumps(session, indent=1))

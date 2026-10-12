@@ -170,7 +170,7 @@ warning appears. Child processes isolate any future native abort.
 | --- | --- |
 | `MeshoptCubeTest` | Modern meshopt data now decodes, including version 1 vertex data and the COLOR filter. |
 | `CubeVisibility`, `LightVisibility`, `NodeVisibilityTest` | Authored visibility, parent inheritance, and boolean animation now apply to meshes and lights. Cameras remain usable. |
-| `SimpleInstancing` | Instance transforms now render through mesh-sharing child nodes. Explicit GPU draw batching remains unimplemented. |
+| `SimpleInstancing` | Instance transforms now render through mesh-sharing child nodes. Filament's automatic instancing batches their draws. |
 | `TrafficCone` | Draft retroreflection is ignored with a warning. |
 | `ScatteringSkull` | Draft volume scattering is ignored with a warning. Diffuse transmission uses local thickness and absorption. |
 | `TransmissionTest`, `XmpMetadataRoundedCube` | XMP metadata is ignored without a warning. |

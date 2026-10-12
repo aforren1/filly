@@ -89,10 +89,10 @@ GPU: host draw                              0.065    0.124    0.129    0.134
 | GPU: start -> acquired | Shared hosts only. GL timestamps in the host context before `render()` and after `acquire()`. The host queue waits for Filament's fence, so this is Filament's frame on the GPU timeline, including driver-thread latency and queueing. It is an upper bound on Filament's GPU time. |
 | GPU: host draw | GPU time of the host draw. |
 
-With the instrumented build of [Tracy](#split-native-cpu-time-with-tracy), `--frame-info` adds
-Filament's own GPU frame time (`Renderer::getFrameInfoHistory()`, a `GL_TIME_ELAPSED` query from
-`beginFrame()` to `endFrame()`). It includes GPU idle gaps inside the frame and excludes the host
-draw. It is available only in a paced loop; see [Limits](#limits).
+The row `GPU: Filament frame (Stats.gpu_frame_ms)` is Filament's own GPU frame time (a
+`GL_TIME_ELAPSED` query from `beginFrame()` to `endFrame()`), for the measured frames. It
+includes GPU idle gaps inside the frame and excludes the host draw. It is available only in a
+paced loop; see [Limits](#limits) and [statistics](../reference/api.md#statistics).
 
 The table does not split Filament's native CPU time into its parts (filly bookkeeping,
 `Renderer::render`, `endFrame`, the driver thread). The `nsys` subcommand shows the GL calls of
@@ -246,8 +246,7 @@ message that names the anchor that no longer matches.
 
 Other `build` options:
 
-- `--no-tracy`: only the `Renderer._frame_info_history()` binding, for `cpu --frame-info`
-  without Tracy overhead.
+- `--no-tracy`: no Tracy client and no zones: a plain scratch build, for example of `--source`.
 - `--define NAME=VALUE`: an extra CMake definition.
 - `--source DIR`: build another source tree instead of the project, for example a snapshot of
   an earlier revision or a copy with probe switches. The tree needs `CMakeLists.txt`,
@@ -307,11 +306,11 @@ Toolkit`).
   nsys `wddm` trace, and WPR need an elevated shell. The Tracy zones do not; they cover only the
   zones listed in [Split native CPU time with Tracy](#split-native-cpu-time-with-tracy), not
   Filament's internals.
-- **Filament's GPU frame timer is not exposed.** `Renderer::getFrameInfoHistory()` is not bound.
-  In a scratch build that binds it, it reported GPU time on Intel for paced loops (60 Hz sleep,
-  vsync, or `finish()` per frame), offscreen and shared, on both output paths. In an
-  unthrottled loop it reported nothing: its 16-frame queue fills, and while the queue is full,
-  Filament skips both the new timer query and the read of finished ones.
+- **Filament's GPU frame timer needs a paced loop.** `Stats.gpu_frame_ms` reported GPU time on
+  Intel and NVIDIA for paced loops (60 Hz sleep, vsync, or `finish()` per frame), offscreen and
+  shared, on both output paths. In an unthrottled loop it reported nothing: Filament's 16-frame
+  queue fills, and while the queue is full, Filament skips both the new timer query and the
+  read of finished ones.
 - **Intel GPU clocks drop at light load.** In a 60 Hz loop at 512 x 512, Filament's GPU time for
   the same frame rose from about 0.38 ms to 0.7 ms within one second. GPU time depends on the
   load around it; measure in the loop that you will use.

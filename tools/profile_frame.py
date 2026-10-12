@@ -473,10 +473,9 @@ def run_frames(args):
     total = args.warmup + args.frames
     previous = None
     mark = timer.mark if timer else (lambda point: None)
-    frame_info = {} if args.frame_info else None
-    if args.frame_info and not hasattr(renderer, "_frame_info_history"):
-        raise SystemExit("--frame-info needs a build with Renderer._frame_info_history "
-                         "(tools/profile_tracy.py build).")
+    # Stats.gpu_frame_ms reports an earlier frame; keyed by its number. Builds before the field
+    # existed report nothing.
+    gpu_frames = {}
     try:
         for index in range(total):
             capture = renderdoc is not None and index == args.warmup
@@ -495,12 +494,9 @@ def run_frames(args):
                 with markers.range("render"):
                     renderer.render(scene, target)
                 t2 = clock()
-                if frame_info is not None:
-                    # Filament reports a frame one or more frames later; keep the newest value.
-                    for entry in renderer._frame_info_history():
-                        if entry[1] > 0:
-                            frame_info[entry[0]] = entry[1] * 1e-6
                 stats = renderer.stats
+                if getattr(stats, "gpu_frame_ms", None) is not None:
+                    gpu_frames[stats.gpu_frame_number] = stats.gpu_frame_ms
                 submit = stats.cpu_submit_ms
                 t3 = t4 = t5 = t2
                 if host.shared:
@@ -558,9 +554,8 @@ def run_frames(args):
         if timer and row["frame"] in timer.results:
             row.update(timer.results[row["frame"]])
     host.timer_missed = timer.missed if timer else 0
-    # Filament's frame ids count beginFrame() calls from 1, one per render() here.
-    host.frame_info = [ms for frame_id, ms in sorted((frame_info or {}).items())
-                       if frame_id > args.warmup]
+    # Frame numbers count render() calls from 1, and the scenario renders once per frame.
+    host.gpu_frames = [ms for number, ms in sorted(gpu_frames.items()) if number > args.warmup]
     return spec, host, rows, captures
 
 
@@ -596,13 +591,13 @@ def cpu_table(spec, host, rows, args):
     if spec["host"] != "offscreen":
         lines.append(f"GPU rows: host-context GL_TIMESTAMP queries; frames without results: "
                      f"{host.timer_missed}")
-    if getattr(host, "frame_info", None):
-        values = host.frame_info
-        lines.append(f"{'GPU: Filament FrameInfo gpuFrameDuration':40s} "
+    if host.gpu_frames:
+        values = host.gpu_frames
+        lines.append(f"{'GPU: Filament frame (Stats.gpu_frame_ms)':40s} "
                      + " ".join(f"{percentile(values, q):8.3f}" for q in (0.5, 0.95, 0.99, 1.0))
                      + f"  ({len(values)} frames)")
-    elif args.frame_info:
-        lines.append("GPU: Filament FrameInfo reported no frames (unthrottled loop?)")
+    else:
+        lines.append("GPU: Stats.gpu_frame_ms reported no frames (unthrottled loop, or an older build)")
     intervals = [row["interval"] for row in rows if not math.isnan(row["interval"])]
     if intervals:
         typical = statistics.median(intervals)
@@ -624,10 +619,10 @@ def cmd_cpu(args):
             if not all(math.isnan(v) for v in values):
                 summary["phases"][key] = {f"p{int(q * 100)}": percentile(values, q) for q in (0.5, 0.95, 0.99)}
                 summary["phases"][key]["max"] = percentile(values, 1.0)
-        if getattr(host, "frame_info", None):
-            summary["phases"]["frame_info"] = {f"p{int(q * 100)}": percentile(host.frame_info, q)
-                                               for q in (0.5, 0.95, 0.99)}
-            summary["phases"]["frame_info"]["n"] = len(host.frame_info)
+        if host.gpu_frames:
+            summary["phases"]["gpu_frame"] = {f"p{int(q * 100)}": percentile(host.gpu_frames, q)
+                                              for q in (0.5, 0.95, 0.99)}
+            summary["phases"]["gpu_frame"]["n"] = len(host.gpu_frames)
         intervals = [row["interval"] for row in rows if not math.isnan(row["interval"])]
         if intervals:
             typical = statistics.median(intervals)
@@ -1081,8 +1076,6 @@ def main():
     cpu.add_argument("--nvtx", action="store_true", help="emit NVTX ranges (for nsys)")
     cpu.add_argument("--report", help="also write the table to this file")
     cpu.add_argument("--summary-json", help="write percentiles per phase as JSON (for profile_matrix.py)")
-    cpu.add_argument("--frame-info", action="store_true",
-                     help="report Filament's getFrameInfoHistory() GPU time (instrumented build only)")
     cpu.add_argument("--renderdoc-capture", help=argparse.SUPPRESS)
     sub.add_parser("renderdoc", parents=[scenario, replay_options], help="GPU time per pass (RenderDoc)")
     replay_parser = sub.add_parser("replay", parents=[replay_options], help="replay an existing capture")

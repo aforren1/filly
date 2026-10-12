@@ -16,6 +16,7 @@
 #include <emscripten/html5.h>
 #include <filament/Engine.h>
 
+#include <array>
 #include <memory>
 #include <string>
 
@@ -61,9 +62,22 @@ void delete_host_texture(uint32_t texture) {
 namespace detail {
 struct Signal {};
 
+// EXT_disjoint_timer_query_webgl2 tokens.
+constexpr GLenum TIME_ELAPSED = 0x88BF;
+constexpr GLenum GPU_DISJOINT = 0x8FBB;
+
 struct GlInterop::Impl {
     uintptr_t context = 0;
     std::unique_ptr<filament::backend::PlatformWebGL> platform = std::make_unique<filament::backend::PlatformWebGL>();
+    // Frame timer queries in a ring; the oldest in flight is at `next - count`. A result becomes
+    // available only after the page returns to the event loop, so a few frames are in flight.
+    // When all four are, a frame goes untimed instead of waiting.
+    struct Query { GLuint name = 0; uint64_t frame = 0; };
+    std::array<Query, 4> queries{};
+    size_t next = 0, count = 0;
+    std::optional<bool> timer_supported;
+    bool timing = false;
+    std::optional<std::pair<uint64_t, double>> latest;
 };
 
 GlInterop::GlInterop(uintptr_t context) : impl_(std::make_unique<Impl>()) {
@@ -71,7 +85,13 @@ GlInterop::GlInterop(uintptr_t context) : impl_(std::make_unique<Impl>()) {
         throw InteropError("The web build renders only into the page's WebGL2 context; pass its handle");
     impl_->context = context;
 }
-GlInterop::~GlInterop() = default;
+GlInterop::~GlInterop() {
+    // The page's context frees them with itself otherwise.
+    if (current_gl_context() != impl_->context) return;
+    if (impl_->timing) glEndQuery(TIME_ELAPSED);
+    for (const auto& query : impl_->queries)
+        if (query.name) glDeleteQueries(1, &query.name);
+}
 filament::backend::Platform* GlInterop::platform() { return impl_->platform.get(); }
 const char* GlInterop::platform_name() const { return "webgl"; }
 bool GlInterop::shared() const { return true; }
@@ -117,5 +137,50 @@ void GlInterop::set_srgb_writes(filament::Engine&, bool value) {
     if (value) throw InteropError("output_path 'direct' with sRGB encoding is not available in WebGL2");
 }
 void GlInterop::finish_host() {}
+void GlInterop::begin_frame_timer() {
+    auto& d = *impl_;
+    if (!d.timer_supported)
+        d.timer_supported = emscripten_webgl_enable_extension(
+            EMSCRIPTEN_WEBGL_CONTEXT_HANDLE(d.context), "EXT_disjoint_timer_query_webgl2");
+    if (!*d.timer_supported) return;
+    // A frame that threw before end_frame_timer() leaves its query active.
+    if (d.timing) {
+        glEndQuery(TIME_ELAPSED);
+        d.timing = false;
+    }
+    // Read the finished queries in order. A disjoint event (for example a GPU clock change)
+    // makes the results of every query in flight unreliable, so they are dropped.
+    while (d.count) {
+        auto& query = d.queries[(d.next + d.queries.size() - d.count) % d.queries.size()];
+        GLuint available = 0;
+        glGetQueryObjectuiv(query.name, GL_QUERY_RESULT_AVAILABLE, &available);
+        if (!available) break;
+        GLint disjoint = 0;
+        glGetIntegerv(GPU_DISJOINT, &disjoint);
+        if (disjoint) {
+            d.count = 0;
+            break;
+        }
+        GLuint nanoseconds = 0;
+        glGetQueryObjectuiv(query.name, GL_QUERY_RESULT, &nanoseconds);
+        if (nanoseconds) d.latest = std::make_pair(query.frame, double(nanoseconds) * 1e-6);
+        --d.count;
+    }
+    if (d.count == d.queries.size()) return;
+    auto& query = d.queries[d.next];
+    if (!query.name) glGenQueries(1, &query.name);
+    glBeginQuery(TIME_ELAPSED, query.name);
+    d.timing = true;
+}
+void GlInterop::end_frame_timer(uint64_t frame) {
+    auto& d = *impl_;
+    if (!d.timing) return;
+    glEndQuery(TIME_ELAPSED);
+    d.queries[d.next].frame = frame;
+    d.next = (d.next + 1) % d.queries.size();
+    ++d.count;
+    d.timing = false;
+}
+std::optional<std::pair<uint64_t, double>> GlInterop::frame_time() const { return impl_->latest; }
 }
 }

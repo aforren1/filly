@@ -5,6 +5,9 @@ Nanobind converts Python values at the boundary. Filament types stay in the nati
 The Windows WGL and Linux GLX adapters are isolated in `native/gl_interop.cpp`, and the Linux
 headless EGL platform in `native/egl_platform.cpp`.
 
+For how filly's concepts map to Filament and gltfio, and which code depends on Filament
+internals, see [filly and Filament](filament.md).
+
 ## Ownership
 
 Every native resource retains the engine state. The engine tracks resources through weak references.
@@ -208,6 +211,29 @@ joint and weight uploads (Iris Xe laptop, September 30, 2026). Models of an asse
 frames do no bounds work. The same rest-pose box, in the mesh node's frame, replaces gltfio's
 culling box for skinned renderables, which had the same fault and could cull a visible mesh.
 
+gltfio also has `FilamentInstance::recomputeBoundingBoxes()`. It skins every vertex with the
+joints' current transforms and sets the culling boxes of one instance. filly does not use it.
+A prototype that called it once per asset and copied the boxes to later models gave these results
+(October 12, 2026, Iris Xe laptop):
+
+- It ignores morph targets on skinned primitives. The box of a skinned mesh does not include its
+  morph targets.
+- It reads `JOINTS_0` and `WEIGHTS_0` without checks. A skinned primitive without these
+  attributes stopped the process with an access violation; filly loads it. A joint index past
+  the end of the skin's joint list reads outside an array.
+- One large primitive is slower: 149 ms against 54 ms for a skinned primitive with 1,000,000
+  vertices. gltfio runs one job per primitive, so the same vertices in 8 primitives took 34 ms
+  against 58 ms.
+- It reads every position of rigid meshes: 6 ms for 1,000,000 vertices, against less than
+  0.1 ms for accessor bounds. In the Khronos sample assets, the accessor bounds gave the same
+  boxes as the data.
+- It joins the primitive boxes of a mesh in the node's frame. filly moves each primitive box into
+  the model's frame first, which gives a smaller box under a rotated node.
+
+On the 149 Khronos sample assets that load (of 150) and the horse demo, `Model.bounds` and
+`Node.bounds` from the two methods agreed within 0.01% of the box size, except in three assets
+with rotated multi-primitive meshes. There, filly's boxes were smaller, by up to 0.14% of the model and 10% of one node.
+
 ## Output encoding
 
 The encoding does not depend on other options. Earlier, disabling postprocessing wrote linear
@@ -398,7 +424,8 @@ setting has no effect there.
 
 ## Shared OpenGL textures
 
-The default Filament WGL platform does not implement external sync creation. The wrapper supplies
+Filament's desktop platforms (WGL, GLX, and EGL) do not implement external sync creation; only
+Android's EGL platform does. See [upstream issues](../reference/upstream-issues.md). The wrapper supplies
 a small WGL, GLX, or EGL platform subclass through Filament's public platform interface, for
 offscreen engines too. It places GL fences, waits, and the `GL_FRAMEBUFFER_SRGB` setting in the Filament
 command stream through `Engine::createSync()`.
@@ -589,8 +616,9 @@ skybox; closing the environment removes it from every scene first, then destroys
 textures. A visible skybox writes opaque background pixels even in a transparent view.
 
 Native [glTF preparation](#gltf-preparation) decodes meshopt buffers and expands
-`EXT_mesh_gpu_instancing` before gltfio loads the document. Instance children share mesh resources, but this path does not
-reduce draw calls with explicit GPU batching. Node visibility is evaluated in parent-first order
+`EXT_mesh_gpu_instancing` before gltfio loads the document. Instance children share mesh resources and
+material instances, so Filament's automatic instancing, which every renderer turns on, draws up
+to 64 of them per call (8 in WebGL). Node visibility is evaluated in parent-first order
 without per-frame allocation and controls scene membership for meshes and lights.
 
 Volume materials use filly's solid refraction entries. Filament 1.77.1 passes only a mesh

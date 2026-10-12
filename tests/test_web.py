@@ -55,6 +55,52 @@ def tree_glb():
             + struct.pack("<II", len(positions), 0x004E4942) + positions)
 
 
+def instances_glb():
+    """27 rotated and scaled boxes of one EXT_mesh_gpu_instancing node, with one material.
+
+    More instances than one automatic-instancing draw holds in WebGL (8), so that the web build
+    draws several batches.
+    """
+    box = filly.shapes.box(0.5, 0.5, 0.5)
+    grid = np.stack(np.meshgrid(*[np.arange(3)] * 3, indexing="ij"), -1).reshape(-1, 3)
+    translations = ((grid - 1) * 0.8).astype(np.float32)
+    angles = np.linspace(0, np.pi, 27, dtype=np.float32)
+    rotations = np.stack([np.sin(angles / 2) * 0.6, np.sin(angles / 2) * 0.8, 0 * angles, np.cos(angles / 2)], -1)
+    scales = np.repeat(np.linspace(0.6, 1.2, 27, dtype=np.float32)[:, None], 3, 1)
+    arrays = [box["positions"], box["normals"], box["indices"].reshape(-1), translations,
+              rotations.astype(np.float32), scales]
+    binary, views, accessors = b"", [], []
+    for array in arrays:
+        views.append({"buffer": 0, "byteOffset": len(binary), "byteLength": array.nbytes})
+        accessor = {"bufferView": len(views) - 1, "componentType": 5125 if array.dtype == np.uint32 else 5126,
+                    "count": len(array), "type": {1: "SCALAR", 3: "VEC3", 4: "VEC4"}[array.shape[1] if array.ndim > 1 else 1]}
+        if not accessors:
+            accessor.update(min=array.min(0).tolist(), max=array.max(0).tolist())
+        accessors.append(accessor)
+        binary += array.tobytes()
+    document = {
+        "asset": {"version": "2.0"},
+        "extensionsUsed": ["EXT_mesh_gpu_instancing"],
+        "extensionsRequired": ["EXT_mesh_gpu_instancing"],
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0, "extensions": {"EXT_mesh_gpu_instancing": {"attributes": {
+            "TRANSLATION": 3, "ROTATION": 4, "SCALE": 5}}}}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}, "indices": 2, "material": 0}]}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [0.8, 0.5, 0.2, 1], "metallicFactor": 0,
+                                                "roughnessFactor": 0.6}}],
+        "buffers": [{"byteLength": len(binary)}],
+        "bufferViews": views,
+        "accessors": accessors,
+    }
+    encoded = json.dumps(document).encode()
+    encoded += b" " * (-len(encoded) % 4)
+    length = 12 + 8 + len(encoded) + 8 + len(binary)
+    return (struct.pack("<III", 0x46546C67, 2, length)
+            + struct.pack("<II", len(encoded), 0x4E4F534A) + encoded
+            + struct.pack("<II", len(binary), 0x004E4942) + binary)
+
+
 def _web_build():
     build = Path(os.environ.get("FILLY_WEB_BUILD", ROOT / "build" / "web"))
     if not (build / "filly-core.wasm").is_file():
@@ -80,6 +126,8 @@ def _run_page(browser, page, folder):
         for name in ("api.html", "handover.html"):
             shutil.copy(WEB / name, folder)
         (folder / "tree.glb").write_bytes(tree_glb())
+        (folder / "instances.glb").write_bytes(instances_glb())
+        shutil.copytree(ROOT / "tests" / "data" / "draco-box", folder / "draco-box")
     result = subprocess.run([node, str(WEB / "run_page.mjs"), str(folder), page, browser, executable],
                             capture_output=True, text=True, timeout=300, cwd=WEB)
     assert result.returncode == 0, result.stderr[-3000:]
@@ -225,12 +273,45 @@ def test_lit_box_matches_desktop(page_results):
         scene.environment = renderer.create_environment(np.ones((8, 16, 3), np.float32))
         scene.environment_intensity = 15000
         desktop = _render(renderer, scene, 160, 120)
+    _assert_matches_desktop(web, desktop)
+
+
+def test_instances_match_desktop(page_results):
+    # The web build batches at most 8 instances per draw, desktop 64.
+    web = np.array(_value(page_results, "instances")).reshape(120, 160, 4)
+    with filly.Renderer() as renderer:
+        scene = renderer.create_scene()
+        scene.background = (0.1, 0.2, 0.3, 1)
+        scene.load(instances_glb())
+        camera = renderer.create_camera()
+        camera.set_perspective(fov_y_deg=35, near=0.5, far=20)
+        camera.position = (1, 2, 5)
+        camera.look_at((0, 0, 0))
+        scene.camera = camera
+        scene.add_directional_light(direction=(-1, -2, -1), intensity=80000)
+        scene.environment = renderer.create_environment(np.ones((8, 16, 3), np.float32))
+        scene.environment_intensity = 15000
+        desktop = _render(renderer, scene, 160, 120)
+    # 27 boxes have more edges than one.
+    _assert_matches_desktop(web, desktop, flat_share=0.75)
+
+
+def test_draco_matches_desktop(page_results):
+    # Draco decoding is Filament's; the web build links its own copy of the decoder.
+    from test_draco import DRACO_BOX, render_box
+    web = np.array(_value(page_results, "draco")).reshape(120, 160, 4)
+    with filly.Renderer() as renderer:
+        desktop = render_box(renderer, DRACO_BOX)
+    _assert_matches_desktop(web, desktop)
+
+
+def _assert_matches_desktop(web, desktop, flat_share=0.9):
     # Flat 3 x 3 neighborhoods match within one level; edges rasterize differently.
     padded = np.pad(desktop, ((1, 1), (1, 1), (0, 0)), mode="edge")
     stack = np.stack([padded[1 + dy:121 + dy, 1 + dx:161 + dx] for dy in (-1, 0, 1) for dx in (-1, 0, 1)])
     flat = (stack.max(axis=0) - stack.min(axis=0)).max(axis=2) <= 4
     difference = np.abs(desktop - web).max(axis=2)
-    assert flat.mean() > 0.9
+    assert flat.mean() > flat_share
     assert difference[flat].max() <= 1, np.bincount(difference[flat])
     assert (difference > 1).mean() < 0.05
 
@@ -291,6 +372,22 @@ def test_camera_defaults(page_results):
         "none": "Scene has no camera. Set scene.camera, or pass camera= to render()",
         "closed": "Scene has no camera: its camera was closed. Set scene.camera, or pass camera= to render()",
     }
+
+
+def test_gpu_frame_time(page_results):
+    value = _value(page_results, "gpu_frame_time")
+    assert value["initial"] == [None, None]
+    if not value["timer"]:
+        # Firefox and Safari do not offer EXT_disjoint_timer_query_webgl2.
+        assert value["times"] == []
+        return
+    assert len(value["times"]) > 10, value
+    for number, ms, rendered in value["times"]:
+        assert ms > 0 and number < rendered
+    # Even frame numbers rendered 16384 times the pixels of odd ones.
+    large = np.median([ms for number, ms, _ in value["times"] if number % 2 == 0])
+    small = np.median([ms for number, ms, _ in value["times"] if number % 2 == 1])
+    assert large > 2 * small, value
 
 
 def test_handover(handover_results):

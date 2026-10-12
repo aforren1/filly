@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <utility>
 
 namespace filament { class Engine; class Sync; namespace backend { class Platform; } }
 
@@ -48,6 +50,16 @@ public:
     // sets it, and it decides whether writes to sRGB attachments are encoded. Only scenes with
     // output_path 'direct' enable it; filly's encode pass writes encoded values raw.
     void set_srgb_writes(filament::Engine& engine, bool value);
+#if defined(__EMSCRIPTEN__)
+    // Filament's WebGL backend compiles out its GPU timer queries, so the web build brackets
+    // each frame with its own EXT_disjoint_timer_query_webgl2 query. The single-threaded
+    // build runs a frame's GL calls between the two calls. Without the extension, both do
+    // nothing.
+    void begin_frame_timer();
+    void end_frame_timer(uint64_t frame);
+    // The newest frame whose query has finished, and its GPU time in milliseconds.
+    std::optional<std::pair<uint64_t, double>> frame_time() const;
+#endif
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -3,8 +3,8 @@
 CPU: the time that Texture.update() or Model.update_mesh() takes on the calling thread (copy
 into staging storage and command submission). Completion: the extra wall time of
 update + render + finish over render + finish for a tiny target, which covers Filament's
-driver thread and the GPU upload. filly's public module exposes no GPU timer; Filament's
-FrameInfo is available only in a tools/profile_tracy.py build.
+driver thread and the GPU upload. Stats.gpu_frame_ms cannot measure uploads: they run before
+the frame's timer query starts.
 """
 
 import argparse

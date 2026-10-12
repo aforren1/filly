@@ -23,6 +23,15 @@ The environment table lists the Windows setup; Linux setups are listed with thei
 
 ## Results
 
+### Draco (October 12)
+
+filly had no Draco test. `tests/test_draco.py` now loads the Khronos Box sample with and without
+`KHR_draco_mesh_compression` (fixtures in `tests/data`). The bounds agree within 0.001 (Draco
+quantization), and less than 1% of the pixels differ by more than 2 levels, all on the
+silhouette. The browser test `test_draco_matches_desktop` passed in Chrome, Edge, and Firefox. A
+manual check of the Khronos Avocado sample (Draco against GLB, with textures) gave the same
+result: 194 of 65,536 pixels differed, all on edges.
+
 ### PsychoPy 2024.2 (October 12)
 
 The adapter no longer passes the target to `ImageStim` as an image, because PsychoPy 2024.2

@@ -31,6 +31,9 @@ struct Stats {
     double readback_ms = 0;
     size_t live_models = 0, live_lights = 0, material_copies = 0;
     uint64_t frames_rendered = 0;
+    // Filament's GPU timer for one earlier frame: it reports a frame two or more frames late.
+    std::optional<double> gpu_frame_ms;
+    std::optional<uint64_t> gpu_frame_number;
 };
 
 namespace detail {

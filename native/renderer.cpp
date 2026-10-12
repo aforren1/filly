@@ -172,6 +172,11 @@ struct State {
     std::vector<std::weak_ptr<Resource>> resources;
     std::thread::id thread = std::this_thread::get_id();
     Stats stats;
+    // Steady-clock span of each recent render() frame. Filament's frame history holds 16 frames
+    // and has no filly frame numbers; its beginFrame time falls in one span. Preparation::ready()
+    // also begins frames, so counting Filament's frames would not give render() calls.
+    struct FrameSpan { int64_t begin = 0, end = 0; uint64_t number = 0; };
+    std::array<FrameSpan, 16> frame_spans{};
     std::unique_ptr<GlInterop> interop;
     // GL_FRAMEBUFFER_SRGB in Filament's context, as last queued.
     bool srgb_writes = false;
@@ -1609,6 +1614,11 @@ Renderer::Renderer(uintptr_t shared_context) {
     state_->engine = state_->interop->create_engine();
     if (!state_->engine) throw BackendError("Could not create the OpenGL engine");
     state_->renderer = state_->engine->createRenderer();
+    // EXT_mesh_gpu_instancing children share geometry and material instances, so Filament draws
+    // up to 64 of them per call (8 in WebGL). With 1,000 or more instances this saved 35 to 70%
+    // of the frame on Intel; scenes without repeated primitives showed no measurable cost, and
+    // pixels were identical. See docs/reference/performance.md#automatic-instancing.
+    state_->engine->setAutomaticInstancingEnabled(true);
     state_->frame_chain = state_->engine->createSwapChain(1, 1, 0);
     if (!state_->frame_chain) throw BackendError("Could not create the headless frame swap chain");
     // With GL_EXT_shader_framebuffer_fetch (Intel Iris Xe 32.0.101.7088), the color-grading
@@ -1927,6 +1937,13 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
     // renderStandaloneView() skips endFrame()'s garbage collection, so destroyed entity indices
     // are never recycled. A false beginFrame() only means the GPU is behind; the caller asked
     // for this frame, so it is rendered anyway, as the Renderer API permits.
+#if defined(__EMSCRIPTEN__)
+    // Commands queued before this frame, such as uploads, run now and stay outside the frame's
+    // timer, as on desktop, where Filament's timer starts in beginFrame() on its driver thread.
+    state_->engine->flush();
+    state_->interop->begin_frame_timer();
+#endif
+    const auto frame_begin = std::chrono::steady_clock::now();
     state_->renderer->beginFrame(state_->frame_chain);
     if (fill) {
         state_->renderer->render(fill);
@@ -1935,6 +1952,7 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
     state_->renderer->render(view);
     if (exact) detail::render_output(*state_, data, target, region);
     state_->renderer->endFrame();
+    const auto frame_end = std::chrono::steady_clock::now();
     view->setRenderTarget(nullptr);
     // Views must not keep a render target that the caller may close before the next call.
     if (exact) {
@@ -1958,9 +1976,22 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
         if (target.imported) target.ready = std::move(done);
         else state_->interop->destroy(*state_->engine, done);
     }
+#if defined(__EMSCRIPTEN__)
+    // The single-threaded build runs the frame's GL calls in flush(), before the timer ends.
+    // render() of an imported target flushes again, with nothing left to run.
+    state_->engine->flush();
+    state_->interop->end_frame_timer(state_->stats.frames_rendered + 1);
+#else
     if (!target.imported) state_->engine->flush();
+#endif
     target.rendered = true;
-    ++state_->stats.frames_rendered;
+    const auto number = ++state_->stats.frames_rendered;
+    // Filament records a frame's begin time in beginFrame(), or in endFrame() when its frame
+    // skipper deferred the frame, so the span covers both.
+    auto nanoseconds = [](auto time) {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
+    };
+    state_->frame_spans[number % state_->frame_spans.size()] = {nanoseconds(frame_begin), nanoseconds(frame_end), number};
     state_->stats.cpu_submit_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - start).count();
 }
@@ -2110,6 +2141,26 @@ Stats Renderer::stats() const {
         if (auto light = detail::resource_cast<detail::LightData>(resource); light && light->entity)
             ++result.live_lights;
     }
+#if defined(__EMSCRIPTEN__)
+    if (const auto time = state_->interop->frame_time()) {
+        result.gpu_frame_number = time->first;
+        result.gpu_frame_ms = time->second;
+    }
+#else
+    // Newest first. Filament adds a frame once its timer query and its completion fence are
+    // done, and updates the history only in beginFrame().
+    const auto history = state_->renderer->getFrameInfoHistory(state_->renderer->getMaxFrameHistorySize());
+    for (const auto& info : history) {
+        if (info.gpuFrameDuration <= 0) continue;
+        const auto span = std::find_if(state_->frame_spans.begin(), state_->frame_spans.end(), [&](const auto& s) {
+            return s.number && info.beginFrame >= s.begin && info.beginFrame <= s.end;
+        });
+        if (span == state_->frame_spans.end()) continue;
+        result.gpu_frame_ms = double(info.gpuFrameDuration) * 1e-6;
+        result.gpu_frame_number = span->number;
+        break;
+    }
+#endif
     return result;
 }
 

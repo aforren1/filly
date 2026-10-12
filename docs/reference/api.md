@@ -79,7 +79,7 @@ Assets with roughly 18,000 or more meshes can still exceed the ring and abort th
 | `closed` | Report whether the engine is closed. |
 | `shared_context` | The host context handle given at creation, or `0` for an offscreen renderer. Read-only. |
 | `gl_platform` | The OpenGL binding of the engine: `"wgl"`, `"glx"`, or `"egl"`. Read-only. |
-| `stats` | Return a `Stats` snapshot of frame counters and CPU timings. |
+| `stats` | Return a `Stats` snapshot of frame counters, CPU timings, and the GPU time of an earlier frame. See [statistics](#statistics). |
 
 The names tell what filly does with an object and who owns its storage. `render()` writes into a
 target; materials sample a texture. `create_*` methods return objects whose storage filly owns:
@@ -102,8 +102,10 @@ because it closes with its model.
 An API call from another thread raises `FillyError`.
 Close the renderer and release its children on the creating thread.
 
-`Stats` contains the last measured CPU duration of each operation, in milliseconds:
-`cpu_submit_ms`, `host_wait_ms`, `host_release_ms`, `finish_ms`, and `readback_ms`.
+### Statistics
+
+`renderer.stats` returns a `Stats` snapshot. It contains the last measured CPU duration of each
+operation, in milliseconds: `cpu_submit_ms`, `host_wait_ms`, `host_release_ms`, `finish_ms`, and `readback_ms`.
 Values start at zero and change only when that operation completes. Submission includes the
 incoming host-fence dependencies of the target and of imported textures, bone updates, native
 rendering, and command flush. It can include
@@ -113,7 +115,46 @@ and transfer, but excludes conversion to a NumPy array.
 `live_models`, `live_lights`, and `material_copies` count live native resources, including imported
 lights and every model of an asset. Closed Python handles do not contribute. `material_copies` counts node-local
 materials. These counts do not measure GPU memory or shader caches.
-`frames_rendered` counts submissions. Statistics do not measure display latency or GPU time.
+`frames_rendered` counts submissions. Statistics do not measure display latency.
+
+`gpu_frame_ms` is the GPU time of one earlier frame, in milliseconds. `gpu_frame_number` tells
+which frame: it is the `frames_rendered` value just after that frame's `render()`. Both are
+`None` until a result is available. The value is for one frame, not an average. Each `render()`
+is one frame, so a loop that renders two targets per display refresh gets a separate value for
+each:
+
+```python
+stats = renderer.stats
+if stats.gpu_frame_ms is not None:
+    gpu_times[stats.gpu_frame_number] = stats.gpu_frame_ms
+```
+
+- **What it includes.** The value is Filament's frame timer: a `GL_TIME_ELAPSED` query from
+  `beginFrame()` to `endFrame()` in Filament's context. It includes every pass of the frame
+  (shadows, scene, MSAA resolve, output passes) and GPU idle time inside the frame, for example
+  while Filament's driver thread issues commands. It excludes texture and mesh uploads that
+  were queued before `render()`, and the host's draw of an imported target.
+- **Delay.** Filament reads a timer when a later frame begins and publishes it after the frame's
+  completion fence. The value changes only during `render()`. In a loop that is paced by the
+  display, by a sleep, or by `finish()`, the reported frame is 2 to 3 frames old:
+  `frames_rendered - gpu_frame_number` is 2 with `finish()` after each frame and 3 in a 60 Hz
+  loop.
+- **Unthrottled loops.** A loop that submits frames faster than the GPU completes them fills
+  Filament's 16-frame history, and Filament then skips its timer. The value stays `None`, or
+  keeps an old frame number. `python -m filly.benchmark` is such a loop.
+- **Frames that are not renders.** `Preparation.ready()` also begins Filament frames. They are
+  never reported.
+- **Web.** The web build times each frame with its own `EXT_disjoint_timer_query_webgl2` query.
+  Chrome and Edge have the extension; Firefox and Safari do not, and there both values stay
+  `null`. A result arrives only after the page returns to the event loop: with one
+  `requestAnimationFrame` per frame, the reported frame is 2 frames old. A disjoint event, for
+  example a GPU clock change, drops the results of the frames in flight.
+
+On the development laptop at 1920 x 1080, `gpu_frame_ms` for DamagedHelmet was within 8% of the
+sum of RenderDoc's per-pass replay times: 2.48 ms against 2.37 ms on Intel Iris Xe, and 0.29 ms
+against 0.31 ms on NVIDIA RTX A500. It stayed below the GPU time that GL timestamps in a
+PsychoPy or pyglet host measured around the frame. See
+[Performance](performance.md#gpu-frame-time-validation).
 
 ### Prepare a scene
 
@@ -533,7 +574,12 @@ is a separate override; turning a model back on preserves authored and animated 
 `EXT_mesh_gpu_instancing` expands TRS attributes into child nodes that share mesh resources.
 Parent transforms and animation apply to every instance. Sparse accessors and normalized signed
 quaternions are supported. Application-defined attributes such as `_COLOR` are ignored.
-This is a compatibility path, not hardware draw batching; large instance counts can remain expensive.
+filly turns on Filament's automatic instancing, so the GPU draws up to 64 instances that share a
+primitive and a material in one call (8 in WebGL). A node-local material copy takes its instance
+out of the batch; skinned and morphed primitives are never batched. Each instance is still one
+renderable on the CPU: culling and command setup grow with the count. At 1920 x 1080, 20,000
+instances took 14 ms (Intel) to 23 ms (NVIDIA) of `cpu_submit_ms`. See
+[Performance](performance.md#automatic-instancing).
 
 Diffuse transmission uses a custom shader with direct and environment backlighting.
 It supports factor and color textures, UV sets 0 and 1, texture transforms, sampler filters,

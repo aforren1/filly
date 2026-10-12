@@ -47,8 +47,33 @@ def test_transform_visibility_and_history(renderer, scene, triangle_glb):
     np.testing.assert_array_equal(target.read(), first)
     assert renderer.stats.frames_rendered == 5
     assert renderer.stats.cpu_submit_ms >= 0
-    # GPU time is not measured, so there is no field that could suggest it.
-    assert not hasattr(renderer.stats, "gpu_ms")
+
+
+def test_gpu_frame_time_names_its_frame(renderer, scene, triangle_glb):
+    assert renderer.stats.gpu_frame_ms is None
+    assert renderer.stats.gpu_frame_number is None
+    scene.load(triangle_glb)
+    scene.msaa = 4
+    small = renderer.create_render_target(width=16, height=16)
+    large = renderer.create_render_target(width=2048, height=2048)
+    times = {}
+    for i in range(40):
+        # Even frame numbers render the large target.
+        renderer.render(scene, small if i % 2 == 0 else large)
+        renderer.finish()
+        stats = renderer.stats
+        if stats.gpu_frame_ms is None:
+            assert stats.gpu_frame_number is None
+            continue
+        assert stats.gpu_frame_ms > 0
+        # Filament reports a frame after later frames have begun.
+        assert 1 <= stats.gpu_frame_number < stats.frames_rendered
+        times[stats.gpu_frame_number] = stats.gpu_frame_ms
+    assert len(times) > 20
+    # 16384 times the pixels: the frame number must point at the frame that was timed.
+    large_ms = np.median([ms for number, ms in times.items() if number % 2 == 0])
+    small_ms = np.median([ms for number, ms in times.items() if number % 2 == 1])
+    assert large_ms > 2 * small_ms
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])

@@ -332,10 +332,12 @@ Loading from bytes is important for packaged experiment resources.
 **Decision (glTF scope).**
 
 - `gltfio` supplies core glTF 2.0 and `KHR_lights_punctual`, unlit, clearcoat, sheen, transmission, volume, IOR, specular, emissive strength, specular-glossiness, variants, dispersion, texture transforms, Basis Universal textures, mesh quantization, and Draco.
-- This project adds `KHR_materials_diffuse_transmission` (a custom material), the glTF parameters of `KHR_materials_anisotropy` and `KHR_materials_iridescence` (on Filament's own shading inputs), a tested subset of `KHR_animation_pointer`, `KHR_node_visibility`, `EXT_mesh_gpu_instancing` (expanded into nodes), `EXT_meshopt_compression` and `KHR_meshopt_compression` (meshoptimizer 1.0), and WebP through a libwebp 1.5.0 texture provider.
+- This project adds `KHR_materials_diffuse_transmission` (a custom material), the glTF parameters of `KHR_materials_anisotropy` and `KHR_materials_iridescence` (on Filament's own shading inputs), a tested subset of `KHR_animation_pointer`, `KHR_node_visibility`, `EXT_mesh_gpu_instancing` (expanded into nodes, which Filament's automatic instancing draws in batches), `EXT_meshopt_compression` and `KHR_meshopt_compression` (meshoptimizer 1.0), and WebP through a libwebp 1.5.0 texture provider.
 - Volume thickness uses the complete node transform, as `KHR_materials_volume` requires; Filament 1.77.1 uses only the mesh node's scale.
 - Draft extensions were removed: `KHR_materials_volume_scatter` and `KHR_materials_retroreflection` are unknown extensions.
 - This is not a conformance claim.
+
+**Decision (automatic instancing: always on).** Every renderer calls `Engine::setAutomaticInstancingEnabled(true)`. The expanded instance nodes share a primitive and a material instance, so Filament draws up to 64 per call (8 in WebGL). At 1080p with `finish()` per frame, render plus finish on Intel Iris Xe fell from 8.6 to 5.5 ms for 1,000 instances and from 91 to 28 ms for 20,000; on NVIDIA RTX A500 the GPU frame fell by up to 87% while the CPU-bound frame did not change. Scenes without repeated primitives (DamagedHelmet, Sponza, the wooden horse) showed no difference beyond the spread of the rounds on either GPU, and every tested scene rendered identical pixels with it off and on, including per-instance transforms, culling, and node-local materials. No measured case was slower with it on by more than the spread of the rounds, so it is not an option. See docs/reference/performance.md, Automatic instancing.
 
 **Decision (validation).** Filament's `gltf_viewer` 1.77.1 is the reference. A comparison tool renders the Khronos sample assets in both with the same camera, lights, environment, and `tone_mapping="aces_legacy"`. Filament-material assets match within two 8-bit levels, except assets whose volumes have scaled parents (the volume decision above). See [docs/how-to/reference-comparison.md](docs/how-to/reference-comparison.md).
 
@@ -821,13 +823,15 @@ Expose enough instrumentation to diagnose missed deadlines.
 stats = renderer.stats
 ```
 
-Fields: `cpu_submit_ms`, `host_wait_ms`, `host_release_ms`, `finish_ms`, `readback_ms`, `frames_rendered`, and live resource counts (`live_models`, `live_lights`, `material_copies`).
+Fields: `cpu_submit_ms`, `host_wait_ms`, `host_release_ms`, `finish_ms`, `readback_ms`, `frames_rendered`, live resource counts (`live_models`, `live_lights`, `material_copies`), and the GPU time of one earlier frame (`gpu_frame_ms`, `gpu_frame_number`).
 
 Exact fields depend on what Filament reliably exposes.
 
 Do not fabricate GPU timings if they cannot be measured robustly.
 
-**Open.** GPU time per frame is not exposed. Filament's frame timer queries (`Renderer::getFrameInfoHistory()`) gave usable per-frame GPU times on the tested Intel driver in a profiling build; exposing them needs validation on more drivers. Application-level markers are not implemented:
+**Decision (GPU frame time).** `gpu_frame_ms` is one frame's GPU time, not an average, and `gpu_frame_number` names that frame by its `frames_rendered` count; both are `None` until a result exists. On desktop the value is Filament's frame timer (`Renderer::getFrameInfoHistory()`, a `GL_TIME_ELAPSED` query from `beginFrame()` to `endFrame()`). Filament's frame ids also count the frames that `Preparation.ready()` begins, so filly matches each history entry to a `render()` call by its `beginFrame` time. Filament reports a frame only after later frames begin, so the number is needed to know which frame a value belongs to: an average or an unnamed latest value would mix frames of different targets and scenes. Filament's WebGL backend compiles out its timer queries; the web build brackets each frame with its own `EXT_disjoint_timer_query_webgl2` query, which Chrome and Edge offer and Firefox does not. Validation on Intel Iris Xe and NVIDIA RTX A500 at 1080p: within 8% of RenderDoc's per-pass replay sum, below the host GL timestamps around the frame in PsychoPy and pyglet, and attributed to the right frame when frames alternate between a 16 x 16 and a 2048 x 2048 target (docs/reference/performance.md, GPU frame time validation). In an unthrottled loop Filament's 16-frame history fills and it skips its timer, so the value stays `None` or old; this is documented, not worked around.
+
+**Open.** Application-level markers are not implemented:
 
 ```python
 with renderer.marker("stimulus"):

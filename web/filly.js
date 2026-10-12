@@ -587,14 +587,17 @@ export class Renderer extends Handle
 		this._call("finish");
 	}
 
-	/** Frame counters and CPU timings, as Renderer.stats in Python. */
+	/** Frame counters, CPU timings, and GPU frame time, as Renderer.stats in Python. */
 	get stats()
 	{
-		// 64-bit counters arrive as BigInt; their values fit a Number.
+		// 64-bit counters arrive as BigInt; their values fit a Number. Null stays null.
 		const stats = this._get("stats");
 		for (const key of Object.keys(stats))
 		{
-			stats[key] = Number(stats[key]);
+			if (stats[key] !== null)
+			{
+				stats[key] = Number(stats[key]);
+			}
 		}
 		return stats;
 	}

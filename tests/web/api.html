@@ -7,6 +7,7 @@ import { AssetError, createRenderer, FillyError, ImportedTexture, shapes, Textur
 
 const gl = document.querySelector("canvas").getContext("webgl2");
 const renderer = await createRenderer(gl);
+const initialStats = renderer.stats;
 const results = {};
 const SIZE = 64;
 
@@ -242,6 +243,51 @@ await check("lit_box", async () =>
 	return Array.from(pixels);
 });
 
+await check("instances", async () =>
+{
+	const scene = renderer.createScene();
+	scene.background = [0.1, 0.2, 0.3, 1];
+	await scene.loadUrl("instances.glb");
+	const camera = renderer.createCamera();
+	camera.setPerspective({ fovYDeg: 35, near: 0.5, far: 20 });
+	camera.position = [1, 2, 5];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	scene.addDirectionalLight({ direction: [-1, -2, -1], intensity: 80000 });
+	scene.environment = renderer.createEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8);
+	scene.environmentIntensity = 15000;
+	const target = renderer.createRenderTarget(160, 120);
+	renderer.render(scene, target);
+	const pixels = await target.read();
+	target.close();
+	camera.close();
+	scene.close();
+	return Array.from(pixels);
+});
+
+// The scene of render_box() in tests/test_draco.py.
+await check("draco", async () =>
+{
+	const scene = renderer.createScene();
+	scene.background = [0.1, 0.2, 0.3, 1];
+	await scene.loadUrl("draco-box/Box.gltf");
+	const camera = renderer.createCamera();
+	camera.setPerspective({ fovYDeg: 35, near: 0.5, far: 20 });
+	camera.position = [1.5, 1.2, 2.5];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	scene.addDirectionalLight({ direction: [-1, -2, -1], intensity: 80000 });
+	scene.environment = renderer.createEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8);
+	scene.environmentIntensity = 15000;
+	const target = renderer.createRenderTarget(160, 120);
+	renderer.render(scene, target);
+	const pixels = await target.read();
+	target.close();
+	camera.close();
+	scene.close();
+	return Array.from(pixels);
+});
+
 await check("model_tree", async () =>
 {
 	const scene = renderer.createScene();
@@ -428,6 +474,40 @@ await check("camera_defaults", async () =>
 	target.close();
 	scene.close();
 	return { across, down, keptNear, errors };
+});
+
+// Frames alternate between a small and a large target, so the reported frame number can be
+// checked against the reported time. Query results arrive only after the page yields.
+await check("gpu_frame_time", async () =>
+{
+	const scene = renderer.createScene();
+	scene.msaa = 4;
+	scene.createMesh({ ...shapes.uvSphere({ radius: 0.6 }), baseColor: [0.8, 0.6, 0.4, 1] });
+	scene.addDirectionalLight({ direction: [-1, -1, -2], intensity: 100000 });
+	const camera = renderer.createCamera();
+	camera.position = [0, 0, 3];
+	scene.camera = camera;
+	const small = renderer.createRenderTarget(16, 16);
+	const large = renderer.createRenderTarget(2048, 2048);
+	const times = [];
+	const before = renderer.stats.framesRendered;
+	for (let i = 0; i < 40; i++)
+	{
+		renderer.render(scene, (before + i) % 2 === 0 ? small : large);
+		renderer.handBack();
+		await new Promise((resolve) => requestAnimationFrame(resolve));
+		const stats = renderer.stats;
+		if (stats.gpuFrameMs !== null && stats.gpuFrameNumber > before)
+		{
+			times.push([stats.gpuFrameNumber, stats.gpuFrameMs, stats.framesRendered]);
+		}
+	}
+	small.close();
+	large.close();
+	camera.close();
+	scene.close();
+	return { initial: [initialStats.gpuFrameMs, initialStats.gpuFrameNumber], times,
+		timer: Boolean(gl.getExtension("EXT_disjoint_timer_query_webgl2")) };
 });
 
 results.platform = renderer.glPlatform;

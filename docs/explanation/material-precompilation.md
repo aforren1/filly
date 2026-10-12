@@ -89,8 +89,11 @@ texture), and a `mat3` UV transform.
    has a non-`UNSUPPORTED` flag for every feature the key uses, and whose `REQUIRED` flags the key
    has.
 4. Without a match it returns spec 0 (lit opaque). `createMaterialInstance()` then sets parameters
-   that spec 0 may lack, and Filament aborts the process. filly avoids this path: `ArchiveSpecs`
-   in `materials.cpp` repeats the match and compiles the key instead.
+   that spec 0 may lack. Missing uniforms are ignored silently; a missing texture sampler fails a
+   Filament precondition, which aborts the process or throws. See [upstream issue
+   B2](../reference/upstream-issues.md#b2). filly avoids this path: its own provider
+   (`native/archive_materials.cpp`) selects entries from filly's archive and never falls back to
+   spec 0.
 
 Consequences, *measured* by reading the shipped archive (`uberarchive.lib`) and by a JSON-level
 model of the matching over the sample assets:

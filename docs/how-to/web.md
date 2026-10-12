@@ -158,6 +158,25 @@ The page keeps drawing while the browser compiles. `prepare()` rejects with `Fil
 A uniform panorama, for example `new Float32Array(8 * 16 * 3).fill(1)`, skips environment
 filtering and takes a few milliseconds instead of about 260 ms.
 
+## Measure GPU frame time
+
+`renderer.stats` has `gpuFrameMs` and `gpuFrameNumber`, as `gpu_frame_ms` and
+`gpu_frame_number` in Python. filly times each `render()` with a WebGL timer query, and the
+result arrives after the page returns to the event loop. With one `requestAnimationFrame` per
+frame, the value is for the frame 2 frames earlier:
+
+```javascript
+const stats = renderer.stats;
+if (stats.gpuFrameMs !== null)
+{
+	gpuTimes.set(stats.gpuFrameNumber, stats.gpuFrameMs);
+}
+```
+
+The timer needs `EXT_disjoint_timer_query_webgl2`. Chrome and Edge have it; Firefox and Safari
+do not, and there both values stay `null`. Filament's WebGL backend has no timer of its own. See
+[statistics](../reference/api.md#statistics) for what the time includes.
+
 ## Make meshes from arrays
 
 `shapes.plane()`, `shapes.box()`, `shapes.uvSphere()`, and `shapes.cylinder()` return flat

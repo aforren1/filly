@@ -110,8 +110,10 @@ See the `examples/` folder.
   [compare with Filament's viewer](docs/how-to/reference-comparison.md),
   [use filly in a web page](docs/how-to/web.md)
 - Reference: [API](docs/reference/api.md), [performance](docs/reference/performance.md),
-  [validation](docs/reference/validation.md), [sample assets](docs/reference/sample-assets.md)
+  [validation](docs/reference/validation.md), [sample assets](docs/reference/sample-assets.md),
+  [upstream Filament issues](docs/reference/upstream-issues.md)
 - Explanation: [design and limits](docs/explanation/design.md),
+  [filly and Filament](docs/explanation/filament.md),
   [tested assumptions](docs/explanation/assumptions.md),
   [material precompilation](docs/explanation/material-precompilation.md),
   [the web build](docs/explanation/web.md)

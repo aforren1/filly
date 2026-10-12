@@ -20,9 +20,6 @@ Zones:
   `driver commit` (the glFlush() that ends a frame on the headless swap chain), and
   `driver createSync`.
 
-The copy also binds Filament's Renderer::getFrameInfoHistory() as
-`Renderer._frame_info_history()`, for `profile_frame.py cpu --frame-info`.
-
 Tracy 0.14.1 is pinned. The Windows binaries are checked against the SHA-256 digest that GitHub
 publishes for the release asset. GitHub publishes no digest for the source archive; its
 SHA-256 is recorded here and checked.
@@ -97,9 +94,9 @@ def replace_once(text, old, new, where):
 
 
 def instrument(src, tracy_source, tracy=True):
-    """Add the frame-info binding, and optionally Tracy zones, to the scratch copy.
+    """Add Tracy zones to the scratch copy.
 
-    Without `tracy`, the zone macros compile to nothing.
+    Without `tracy`, the zone macros compile to nothing, so the copy builds as it is.
     """
     cmake = src / "CMakeLists.txt"
     text = cmake.read_text()
@@ -129,8 +126,8 @@ target_link_libraries(filly_core PRIVATE ws2_32 dbghelp)
                       ("    state_->renderer->endFrame();\n", "Filament::endFrame"),
                       ("    if (!target.imported) state_->engine->flush();\n", "Engine::flush")):
         text = replace_once(text, old, f"    {{ ZoneScopedN(\"{name}\");\n    {old.strip()}\n    }}\n", name)
-    text = replace_once(text, "    target.rendered = true;\n    ++state_->stats.frames_rendered;\n",
-                        "    target.rendered = true;\n    ++state_->stats.frames_rendered;\n    FrameMarkNamed(\"render\");\n",
+    text = replace_once(text, "    const auto number = ++state_->stats.frames_rendered;\n",
+                        "    const auto number = ++state_->stats.frames_rendered;\n    FrameMarkNamed(\"render\");\n",
                         "FrameMark")
     # After the nested-acquire early return, so that the adapters' inner acquire() calls in
     # draw() do not add zero-length instances.
@@ -141,38 +138,6 @@ target_link_libraries(filly_core PRIVATE ws2_32 dbghelp)
                         "    if (data_->access == Access::SUBMITTED) { ZoneScopedN(\"wait_on_host\"); "
                         "interop.wait_on_host(data_->ready); }\n", "wait_on_host")
     renderer.write_text(text)
-
-    # Renderer._frame_info_history(): Filament's getFrameInfoHistory() for profile_frame.py
-    # --frame-info. Tuples of (frameId, gpuFrameDuration, denoised, beginFrame, endFrame,
-    # backendBeginFrame, backendEndFrame, gpuFrameComplete), in nanoseconds.
-    text = renderer.read_text()
-    text += """
-std::vector<std::array<int64_t, 8>> filly::Renderer::frame_info_history() const {
-    std::vector<std::array<int64_t, 8>> out;
-    auto history = state_->renderer->getFrameInfoHistory(state_->renderer->getMaxFrameHistorySize());
-    for (const auto& f : history)
-        out.push_back({int64_t(f.frameId), f.gpuFrameDuration, f.denoisedGpuFrameDuration, f.beginFrame,
-                       f.endFrame, f.backendBeginFrame, f.backendEndFrame, f.gpuFrameComplete});
-    return out;
-}
-"""
-    renderer.write_text(text)
-    header = src / "native" / "renderer.h"
-    text = header.read_text()
-    text = replace_once(text, "#pragma once\n", "#pragma once\n#include <array>\n#include <vector>\n", "renderer.h")
-    text = replace_once(text, "    Stats stats() const;\n",
-                        "    Stats stats() const;\n    std::vector<std::array<int64_t, 8>> frame_info_history() const;\n",
-                        "Renderer::stats declaration")
-    header.write_text(text)
-    bindings = src / "native" / "bindings.cpp"
-    text = bindings.read_text()
-    text = replace_once(text, "#include <nanobind/nanobind.h>\n",
-                        "#include <nanobind/nanobind.h>\n#include <nanobind/stl/array.h>\n#include <nanobind/stl/vector.h>\n",
-                        "bindings.cpp include")
-    finish = '        .def("finish", &Renderer::finish, nb::call_guard<nb::gil_scoped_release>())\n'
-    text = replace_once(text, finish, finish + '        .def("_frame_info_history", &Renderer::frame_info_history)\n',
-                        "Renderer.finish binding")
-    bindings.write_text(text)
 
     interop = src / "native" / "gl_interop.cpp"
     text = interop.read_text()
@@ -303,7 +268,7 @@ def main():
     build = sub.add_parser("build", help="copy, instrument, and build filly")
     build.add_argument("--jobs", type=int, default=2, help="parallel compile jobs (default 2)")
     build.add_argument("--python-version", default="3.12")
-    build.add_argument("--no-tracy", action="store_true", help="frame-info binding only, no Tracy client")
+    build.add_argument("--no-tracy", action="store_true", help="no Tracy client: a plain scratch build, for example of --source")
     build.add_argument("--source", help="build this source tree instead of the project, for example a "
                        "snapshot of an earlier revision or a probe copy (needs CMakeLists.txt, "
                        "pyproject.toml, README.md, native, src)")

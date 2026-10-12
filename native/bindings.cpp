@@ -318,7 +318,9 @@ NB_MODULE(_native, module) {
         .def_ro("live_models", &Stats::live_models)
         .def_ro("live_lights", &Stats::live_lights)
         .def_ro("material_copies", &Stats::material_copies)
-        .def_ro("frames_rendered", &Stats::frames_rendered);
+        .def_ro("frames_rendered", &Stats::frames_rendered)
+        .def_ro("gpu_frame_ms", &Stats::gpu_frame_ms)
+        .def_ro("gpu_frame_number", &Stats::gpu_frame_number);
 
     nb::class_<RenderTarget> render_target(module, "RenderTarget");
     closable(render_target, "Render target is closed");

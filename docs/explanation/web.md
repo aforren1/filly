@@ -70,7 +70,9 @@ queries:
   that. A lit scene uses about 8 units.
 - **Property reads.** Reads such as `target.width` or `renderer.stats` call no GL and queue no
   GL work, so they do not enter the context. A read after hand back thus does not take the
-  context from the page again.
+  context from the page again. The GPU frame timer reads its finished queries in `render()`,
+  not in `stats`: three reads per finished query (availability, disjoint state, result). In
+  Chrome, an availability and a disjoint read took less than 1 microsecond together.
 
 Filament's own reset still unbinds every unit at the next render: 6 calls per unit, with 32
 units on ANGLE. The core reports at most 32 units to Filament, the limit of its samplers on

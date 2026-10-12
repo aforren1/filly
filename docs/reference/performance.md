@@ -11,11 +11,11 @@ filly or to a scene would recover. The tools and the method are in
 | Machine | Optimus laptop: Intel Iris Xe (driver 32.0.101.7088) drives the 1920 x 1200, 60 Hz panel; NVIDIA RTX A500 Laptop GPU (driver 596.58, 32.0.15.9658). |
 | Power | AC for every result in this page unless a section says "battery". Windows power scheme Balanced, no power-mode overlay. |
 | Load | CPU load before each run: median 15 to 16%, maximum 35%. Runs waited while the load was above 35%. |
-| Build | Scratch venvs built with `tools/profile_tracy.py build --no-tracy`, which adds only `Renderer._frame_info_history()`. [Output path (September 30, 2026)](#output-path-september-30-2026) names its builds. The other sections used the tree of the morning of September 30: runtime material path (`w-rt`), archive path with 39 entries (`w-ar`), and runtime with the headless-swap candidate fix (`w-ns`), all with color grading as the default output path. PsychoPy runs use `.deps\psychopy311` (runtime path). |
+| Build | Scratch venvs built with `tools/profile_tracy.py build --no-tracy`, which then added only `Renderer._frame_info_history()`, the binding that `Stats.gpu_frame_ms` replaced on October 12, 2026. [Output path (September 30, 2026)](#output-path-september-30-2026) names its builds. The other sections used the tree of the morning of September 30: runtime material path (`w-rt`), archive path with 39 entries (`w-ar`), and runtime with the headless-swap candidate fix (`w-ns`), all with color grading as the default output path. PsychoPy runs use `.deps\psychopy311` (runtime path). |
 | Loop | `profile_frame.py cpu`: 120 warmup frames, 600 measured frames. Offscreen frames are paced by a sleep at 60 Hz (or 144 Hz where stated). Hosts swap with vsync at 60 Hz. The model turns 0.5 degrees per frame. |
 | Rounds | 5 rounds; each round runs every configuration once in a fresh process, in an order rotated by one per round. |
 | Cells | Median of the 5 per-round medians, with the range of the per-round medians in brackets. Milliseconds. |
-| GPU time | "GPU frame" is Filament's own timer, `Renderer::getFrameInfoHistory()` `gpuFrameDuration`: a `GL_TIME_ELAPSED` query from `beginFrame()` to `endFrame()`. It includes GPU idle gaps inside the frame and the headless `SwapBuffers` (a `glFlush()` since the swap fix), and excludes the host draw. |
+| GPU time | "GPU frame" is Filament's own timer, `Renderer::getFrameInfoHistory()` `gpuFrameDuration`, now `Stats.gpu_frame_ms`: a `GL_TIME_ELAPSED` query from `beginFrame()` to `endFrame()`. It includes GPU idle gaps inside the frame and the headless `SwapBuffers` (a `glFlush()` since the swap fix), and excludes the host draw. |
 
 Scene: DamagedHelmet (or the named asset) filling the view, one directional light, a small
 studio environment for image-based lighting, background color. "Empty" is the same scene
@@ -443,6 +443,119 @@ The first GL call after the headless `SwapBuffers` (`glFenceSync`) blocks the dr
 until the next vertical blank of the 60 Hz display. Offscreen, a frame's GPU work can then wait
 up to one refresh after `render()` returns (p95 16.9 ms at 60 Hz, median 8.4 ms at 144 Hz
 pacing). With the fix, the driver thread finishes each frame about 1 ms after `render()`.
+
+## Automatic instancing
+
+`EXT_mesh_gpu_instancing` expands into one child node per instance, and the children share the
+mesh's vertex and index buffers and the material instance. Filament's automatic instancing
+(`Engine::setAutomaticInstancingEnabled`) merges consecutive draws in the sorted command list
+that have the same material instance, primitive, index range, and raster state, and that are
+not skinned, morphed, or instanced already. It draws up to 64 of them in one call (8 in WebGL),
+and copies their per-object data into a temporary uniform buffer for each pass. filly now turns
+it on for every renderer.
+
+Measured on October 12, 2026 with a probe build that had an environment switch for the
+setting. 1920 x 1080 offscreen, the lighting of the DamagedHelmet scenario, AC. `finish()` after
+each frame, so each frame is complete before the next starts. 60 warmup and 300 measured
+frames in 3 interleaved rounds; 6 rounds for DamagedHelmet, Sponza, and the wooden horse on
+Intel, and for 1,000 and 5,000 spheres, DamagedHelmet, and Sponza on NVIDIA. Cells: median of
+the per-round medians, range in brackets, ms. "Render + finish" is the wall time of `render()`
+and `finish()`. Generated assets: N UV spheres of 256 triangles (64 for 20,000) with one
+material; "5,000 x 8 materials" splits them over 8 materials. SimpleInstancing is the Khronos
+sample.
+
+Intel Iris Xe:
+
+| Scene | Instancing | `cpu_submit_ms` | GPU frame | Render + finish |
+| --- | --- | ---: | ---: | ---: |
+| SimpleInstancing | off | 0.198 [0.183-0.217] | 1.483 [1.480-1.487] | 2.846 [2.798-2.909] |
+| SimpleInstancing | on | 0.181 [0.180-0.234] | 1.331 [1.296-1.336] | 2.584 [2.539-2.695] |
+| 1,000 spheres | off | 0.477 [0.469-0.501] | 5.816 [5.814-5.826] | 8.557 [8.417-8.670] |
+| 1,000 spheres | on | 0.505 [0.495-0.524] | 3.832 [3.746-3.835] | 5.503 [5.450-5.517] |
+| 5,000 spheres | off | 1.367 [1.327-1.369] | 11.089 [10.992-12.245] | 19.552 [18.125-20.313] |
+| 5,000 spheres | on | 1.731 [1.685-1.735] | 9.514 [9.511-9.515] | 12.640 [12.552-12.705] |
+| 5,000 x 8 materials | off | 1.507 [1.480-1.510] | 11.339 [10.106-11.797] | 19.290 [19.080-19.843] |
+| 5,000 x 8 materials | on | 1.836 [1.815-1.865] | 9.903 [9.822-10.300] | 13.253 [13.060-13.366] |
+| 20,000 spheres | off | 10.596 [6.097-10.887] | 35.717 [34.724-36.011] | 91.277 [65.039-94.321] |
+| 20,000 spheres | on | 14.218 [7.703-14.602] | 8.990 [8.961-8.997] | 28.171 [19.773-28.559] |
+| DamagedHelmet | off | 0.152 [0.132-0.210] | 2.477 [2.470-2.499] | 3.711 [3.661-4.024] |
+| DamagedHelmet | on | 0.176 [0.139-0.253] | 2.493 [2.478-2.505] | 3.781 [3.679-4.064] |
+| Sponza | off | 0.171 [0.156-0.320] | 3.981 [3.437-4.143] | 5.649 [5.418-6.376] |
+| Sponza | on | 0.212 [0.174-0.321] | 4.009 [3.016-4.141] | 5.862 [4.650-6.340] |
+| Wooden horse | off | 0.166 [0.127-0.221] | 1.882 [1.774-1.939] | 3.157 [2.929-3.441] |
+| Wooden horse | on | 0.135 [0.129-0.233] | 1.823 [1.778-1.916] | 2.987 [2.917-3.410] |
+
+NVIDIA RTX A500:
+
+| Scene | Instancing | `cpu_submit_ms` | GPU frame | Render + finish |
+| --- | --- | ---: | ---: | ---: |
+| SimpleInstancing | off | 0.410 [0.184-0.584] | 0.174 [0.154-0.174] | 1.616 [0.866-1.978] |
+| SimpleInstancing | on | 0.428 [0.192-0.563] | 0.177 [0.169-0.181] | 1.651 [0.887-1.870] |
+| 1,000 spheres | off | 1.453 [0.971-1.743] | 0.436 [0.344-0.724] | 3.781 [2.739-4.164] |
+| 1,000 spheres | on | 1.423 [1.039-1.624] | 0.398 [0.394-0.399] | 3.175 [2.550-3.457] |
+| 5,000 spheres | off | 4.754 [4.153-5.330] | 2.769 [1.328-3.509] | 9.804 [7.449-11.465] |
+| 5,000 spheres | on | 5.129 [2.021-6.112] | 1.189 [1.183-1.191] | 9.730 [5.333-11.006] |
+| 20,000 spheres | off | 20.211 [14.861-23.698] | 14.633 [10.039-18.676] | 30.604 [29.935-44.278] |
+| 20,000 spheres | on | 22.905 [16.378-24.053] | 1.872 [1.845-2.610] | 31.165 [27.107-31.779] |
+| DamagedHelmet | off | 0.366 [0.180-0.466] | 0.294 [0.287-0.382] | 1.748 [1.201-2.255] |
+| DamagedHelmet | on | 0.368 [0.278-0.425] | 0.291 [0.286-0.536] | 1.697 [1.330-2.686] |
+| Sponza | off | 0.445 [0.331-0.593] | 0.419 [0.416-0.515] | 2.207 [1.871-2.926] |
+| Sponza | on | 0.489 [0.328-0.531] | 0.419 [0.418-0.429] | 2.290 [1.956-2.648] |
+| Wooden horse | off | 0.334 [0.258-0.510] | 0.221 [0.221-0.223] | 1.621 [1.463-1.859] |
+| Wooden horse | on | 0.320 [0.269-0.344] | 0.220 [0.219-0.222] | 1.556 [1.504-1.610] |
+
+- **Instanced assets.** On Intel, instancing cut render plus finish by 9% (SimpleInstancing),
+  36% (1,000), 31 to 35% (5,000), and 69% (20,000). On NVIDIA the GPU frame fell by up to 87%,
+  but the frame stayed bound by Filament's CPU work on the main thread, so render plus finish
+  did not change beyond the spread of the rounds.
+- **Cost.** The temporary uniform buffer adds main-thread time when instances are batched: 0.03
+  ms at 1,000 instances, 0.36 ms at 5,000, and 3.6 ms at 20,000 on Intel. It is smaller than
+  the driver and GPU time that it saves on Intel.
+- **Scenes without repeated primitives** (DamagedHelmet, Sponza with 103 primitives and 25
+  materials, the wooden horse) showed no difference larger than the spread of the rounds on
+  either GPU. Filament then only scans the sorted command list.
+- **Pixels.** Every scene above rendered identical pixels with instancing off and on, without
+  and with shadows and MSAA 4x, at 800 x 600. So did the 1,000-sphere scene after per-instance
+  edits: a moved instance, a scaled instance, an instance moved out of the view, and two
+  node-local material copies.
+- **60 Hz paced loop** (5 rounds of 600 frames, no `finish()`): the same direction. For 1,000
+  instances on Intel the GPU frame went from 6.1 to 4.3 ms; for 20,000, `cpu_submit_ms` went
+  from 28 to 14 ms, because frames without instancing filled Filament's command queue.
+
+## GPU frame time validation
+
+`Stats.gpu_frame_ms` exposes Filament's frame timer. On October 12, 2026 it was compared with
+independent measures on both GPUs (DamagedHelmet, 1920 x 1080, AC, 60 Hz pacing unless stated):
+
+| Check | Intel Iris Xe | NVIDIA RTX A500 |
+| --- | ---: | ---: |
+| `gpu_frame_ms`, offscreen, median of rounds (instancing tables above) | 2.48 ms | 0.29 ms |
+| RenderDoc replay, sum of passes (median of 10 replays; excludes gaps between passes) | 2.37 ms | 0.31 ms |
+| `gpu_frame_ms`, PsychoPy host, vsync, median of 597 frames | 2.69 ms | 0.34 ms |
+| Host GL timestamps, `render()` to `acquire()`, same run (upper bound) | 4.54 ms | 1.34 ms |
+| `gpu_frame_ms`, pyglet host, vsync, median of 597 frames | 2.64 ms | 0.33 ms |
+| Host GL timestamps, same run (upper bound) | 3.42 ms | 1.22 ms |
+
+- The timer is within 5% (Intel) and 8% (NVIDIA) of the RenderDoc sum, and below the host's
+  upper bound in every run. The nsys workload trace could not split Filament's frames in this
+  build (the last range of a frame runs to the next frame), so it gave no third measure.
+- The frame number matches the timed frame: frames that alternate between a 16 x 16 and a
+  2048 x 2048 MSAA target report times that alternate with them (`tests/test_renderer.py`).
+- Other scenarios on Intel, 200 frames: ACES tone mapping 3.31 ms, direct output 1.59 ms, FXAA
+  3.47 ms, MSAA 4x 4.35 ms, shadows 3.83 ms. The values follow the
+  [output path](#output-path-september-30-2026) results.
+- Delay: `frames_rendered - gpu_frame_number` was 3 in a 60 Hz loop and 2 with `finish()` after
+  each frame, on both GPUs.
+- Unthrottled loops (offscreen, no pacing, 600 frames at 1080p and 256 x 256, both GPUs): no
+  value at all, as described in [Limits](../how-to/profile.md#limits).
+- Web: in headless Chrome 154 and Edge 155 on ANGLE (Direct3D 11, Intel), filly's own timer
+  query reported every frame after a delay of 2 frames, with one `requestAnimationFrame` between
+  frames. A lit sphere took 4.70 ms at 1080p and 0.80 ms at 256 x 256; the same scene on desktop
+  took 3.24 ms and 0.37 ms. The browser's Direct3D pipeline is a different driver path, so these
+  values were checked only for frame attribution, not against an independent tool. An
+  availability read and a disjoint read together took less than 1 microsecond in Chrome.
+  Firefox 157 does not offer
+  `EXT_disjoint_timer_query_webgl2`.
 
 ## Ranked recoverable frame time
 
