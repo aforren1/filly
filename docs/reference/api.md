@@ -63,37 +63,55 @@ Assets with roughly 18,000 or more meshes can still exceed the ring and abort th
 | Member | Behavior |
 | --- | --- |
 | `create_scene()` | Return an empty `Scene`. |
-| `create_render_target(*, width, height, format="rgba8", depth=True)` | Return an `OffscreenTarget`. Dimensions must be 1 through 8192. |
-| `import_gl_texture(texture_id, *, width, height, format="rgba8", depth=True)` | Return an `ImportedTarget` for a host-owned 2D texture with `GL_RGBA8` storage. Requires a shared context. See [imported targets](#importedtarget). |
-| `render(scene, target, *, camera=None, viewport=None, clear=True)` | Submit one frame to an `OffscreenTarget` or `ImportedTarget` and flush it to the driver. See [render calls](#render-calls). Return `None`. |
+| `create_camera()` | Return a [`Camera`](#camera) with a default projection. Any scene of this renderer can use it. |
+| `load_asset(source, *, strict=False)` | Return an [`Asset`](#assets) that any scene of this renderer can `add()`. |
+| `load_environment(path)` | Return an [`Environment`](#environment-lighting) from a 2:1 Radiance HDR, PNG, or JPEG panorama. |
+| `create_environment(pixels)` | Return an `Environment` from a NumPy panorama. |
+| `load_environment_ktx(ibl_path, skybox_path=None)` | Return an `Environment` from `cmgen` KTX cubemaps. |
+| `create_render_target(*, width, height, format="rgba8", depth=True)` | Return a `RenderTarget`. Dimensions must be 1 through 8192. |
+| `import_gl_target(texture_id, *, width, height, format="rgba8", depth=True, on_renderer_close=None)` | Return an `ImportedTarget` for a host-owned 2D texture with `GL_RGBA8` storage. Requires a shared context. See [imported targets](#importedtarget). |
+| `render(scene, target, *, camera=None, viewport=None, clear=True)` | Submit one frame to a `RenderTarget` or `ImportedTarget` and flush it to the driver. See [render calls](#render-calls). Return `None`. |
 | `create_texture(pixels, *, color_space, mipmaps=False, filter="linear", wrap="repeat")` | Return a [`Texture`](#texture) with the pixels of a NumPy array. |
-| `import_gl_input(texture_id, *, width, height, color_space, filter="linear", wrap="repeat")` | Return a [`HostTexture`](#hosttexture) that materials sample. Requires a shared context. |
+| `import_gl_texture(texture_id, *, width, height, color_space, filter="linear", wrap="repeat")` | Return an [`ImportedTexture`](#importedtexture) that materials sample. Requires a shared context. |
 | `prepare(scene)` | Start to compile the programs of the scene and return a [`Preparation`](#prepare-a-scene). Does not block. |
 | `finish()` | Block until prior GPU work finishes. |
-| `close()` | Release native resources. Repeated calls are valid. |
+| `close()` | Call the `on_renderer_close` callbacks of open imported targets, then release every resource of the renderer. Repeated calls are valid. |
 | `closed` | Report whether the engine is closed. |
 | `shared_context` | The host context handle given at creation, or `0` for an offscreen renderer. Read-only. |
 | `gl_platform` | The OpenGL binding of the engine: `"wgl"`, `"glx"`, or `"egl"`. Read-only. |
 | `stats` | Return a `Stats` snapshot of frame counters and CPU timings. |
 
+The names tell what filly does with an object and who owns its storage. `render()` writes into a
+target; materials sample a texture. `create_*` methods return objects whose storage filly owns:
+`RenderTarget`, `Texture`, and `Environment`. `load_*` methods read a file or bytes into objects
+that filly owns. `import_gl_*` methods wrap an OpenGL texture that the host owns:
+`ImportedTarget` and `ImportedTexture`.
+
 Target `width` and `height` accept Python and NumPy integers. They also accept floats with an
 integral value, such as `1024.0` or `win.size[0] / 2` for an even width. A fractional or
 non-finite float raises `ValueError`. Other types, including `bool`, raise `TypeError`.
 
-The renderer supports `with`. Use all objects on the thread that created the renderer.
+Every object that has `close()` supports `with`: `Renderer`, `Scene`, `Model`, `Camera`,
+`Light`, `Asset`, `Environment`, `RenderTarget`, `ImportedTarget`, `Texture`, `ImportedTexture`, and the host targets in
+`filly.integrations`. Entering returns the object and raises `FillyError` if it is closed; leaving
+calls `close()`, also when the block raises. An imported camera raises `FillyError` on entering,
+because it closes with its model.
+
+`close()` on the renderer closes everything that it created. Objects that it closed report
+`closed=True`, and later calls on them raise `FillyError`. Use all objects on the thread that created the renderer.
 An API call from another thread raises `FillyError`.
 Close the renderer and release its children on the creating thread.
 
 `Stats` contains the last measured CPU duration of each operation, in milliseconds:
 `cpu_submit_ms`, `host_wait_ms`, `host_release_ms`, `finish_ms`, and `readback_ms`.
 Values start at zero and change only when that operation completes. Submission includes the
-incoming host-fence dependencies of the target and of host textures, bone updates, native
+incoming host-fence dependencies of the target and of imported textures, bone updates, native
 rendering, and command flush. It can include
 backpressure. Host wait measures fence publication and queuing the GPU dependency in
 `ImportedTarget.acquire()`. It is not GPU completion time. Readback includes native allocation
 and transfer, but excludes conversion to a NumPy array.
 `live_models`, `live_lights`, and `material_copies` count live native resources, including imported
-lights and clones. Closed Python handles do not contribute. `material_copies` counts node-local
+lights and every model of an asset. Closed Python handles do not contribute. `material_copies` counts node-local
 materials. These counts do not measure GPU memory or shader caches.
 `frames_rendered` counts submissions. Statistics do not measure display latency or GPU time.
 
@@ -124,7 +142,9 @@ and the first render of a lit sphere took 11 to 13 ms instead of 17 to 24 ms. Fo
 `render(scene, target, *, camera=None, viewport=None, clear=True)` renders one frame.
 
 - `camera`: a `Camera` of the same renderer. It replaces `scene.camera` for this call only. A
-  scene without a camera can render with one. Without `camera`, `scene.camera` is required.
+  scene without a camera can render with one. Without `camera`, `scene.camera` is required. A
+  scene has no camera until you set one, and loses it when that camera closes; the `FillyError`
+  tells which of these happened.
 - `viewport`: `(x, y, width, height)` in target pixels, counted from the lower-left corner. It
   must lie inside the target. Values follow the target size rules above. Default: the whole
   target.
@@ -156,29 +176,29 @@ was 0.1 to 0.3 ms per call.
 
 | Member | Behavior |
 | --- | --- |
-| `create_camera()` | Create a `Camera`. |
-| `camera` | Get or set the active camera. It must belong to the same renderer. |
-| `load(source, *, strict=False, clonable=False)` | Load glTF or GLB from a path, `Path`, or `bytes`, and return a `Model`. GLB is detected by its `glTF` magic, not by the file name. Set `clonable=True` to allow [`model.clone()`](#clones). |
+| `camera` | Get or set the active camera. It must belong to the same renderer. A new scene has no camera; getting it then raises `FillyError`. |
+| `load(source, *, strict=False)` | Load glTF or GLB from a path, `Path`, or `bytes`, and return a `Model`. GLB is detected by its `glTF` magic, not by the file name. To show a file more than once, use an [`Asset`](#assets). |
+| `add(asset)` | Return a new `Model` of an [`Asset`](#assets) of the same renderer. |
 | `create_mesh(positions, indices, *, normals=None, uvs=None, colors=None, base_color=(1, 1, 1, 1), metallic=0, roughness=1, emissive=(0, 0, 0), unlit=False, double_sided=False, alpha_mode="opaque")` | Return a `Model` made from arrays. See [generated meshes](#generated-meshes). |
 | `add_directional_light(*, direction, intensity=50000, color=(1, 1, 1))` | Return a `Light`. Intensity is in lux. |
 | `add_sun_light(*, direction, intensity=100000, color=(1, 1, 1), angular_radius_deg=0.545, halo_size=10.0, halo_falloff=80.0)` | Return a sun `Light`: a directional light with a disc. Intensity is in lux. |
-| `add_point_light(*, position, intensity=100, color=(1, 1, 1), range=10)` | Return a point `Light`. Intensity is in candela; range is in scene units. |
-| `add_spot_light(*, position, direction, intensity=100, color=(1, 1, 1), range=10, inner=0.3, outer=0.6)` | Return a spot `Light`. Cone half-angles are in radians; intensity is in candela. |
+| `add_point_light(*, position, intensity=50000, color=(1, 1, 1), range=10)` | Return a point `Light`. Intensity is in candela; range is in scene units. See [default intensities](#default-intensities). |
+| `add_spot_light(*, position, direction, intensity=50000, color=(1, 1, 1), range=10, cone_deg=(15, 30))` | Return a spot `Light`. `cone_deg` is the inner and outer half-angle in degrees; intensity is in candela. |
 | `background` | Get or set linear RGBA values in `[0, 1]`. Default: `(0, 0, 0, 1)`. |
-| [Rendering options](#rendering-options) | `encoding`, `output_path`, `tone_mapping`, `antialiasing`, `msaa`, `shadows`, `refraction`, `transparent`, `dithering`, `ssao`, `bloom`, `fog`, `depth_of_field`, `vignette`, `set_fog_options()`, `set_vignette_options()`. |
-| [Environment members](#environment-lighting) | `load_environment()`, `set_environment()`, `load_environment_ktx()`, `clear_environment()`, `environment_intensity`, `environment_visible`, `environment_rotation`. |
-| `close()` | Release the scene's models, lights, cameras, environment, and view. Repeated calls are valid. |
+| [Rendering options](#rendering-options) | `encoding`, `output_path`, `tone_mapping`, `antialiasing`, `msaa`, `shadows`, `transparent`, `dithering`, `ssao`, `bloom`, `fog`, `depth_of_field`, `vignette`, and the [fog](#fog) and [vignette](#vignette) parameters. |
+| [Environment members](#environment-lighting) | `environment`, `environment_intensity`, `environment_rotation_deg`, `environment_visible`. |
+| `close()` | Release the scene's models, lights, and view. Renderer cameras, assets, and environments stay open. Repeated calls are valid. |
 | `closed` | Report whether the scene or its renderer is closed. |
 
 Byte assets must contain all resources. Path assets can use local external buffers and images,
 also in folders with non-ASCII names. PNG, JPEG, Basis Universal KTX2, and WebP
 (`EXT_texture_webp`) textures are supported. The extension decodes WebP with libwebp 1.5.0.
-Scenes retain their loaded models, cameras, and lights.
+A scene keeps its models, its lights, and its active camera alive without Python handles.
 
-After `close()`, the scene's models, lights, and cameras report `closed=True` or raise
-`FillyError` on use. A camera from the closed scene that is active in another scene is
-detached from that scene. Rendering a closed scene, or any other call on it, raises
-`FillyError`. Other scenes are not affected.
+After `close()`, the scene's models and lights, and the imported cameras of those models, report
+`closed=True` and raise `FillyError` on use. A scene that uses one of those imported cameras loses
+it, and its next `render()` raises `FillyError`. Renderer cameras stay open. Rendering a closed
+scene, or any other call on it, raises `FillyError`. Other scenes are not affected.
 
 ### Rendering options
 
@@ -194,7 +214,6 @@ next `render()`.
 | `antialiasing` | `"none"`, `"fxaa"` | `"none"` |
 | `msaa` | `1`, `2`, `4`, `8` (effective counts depend on the driver) | `1` |
 | `shadows` | `bool`. Lights also need `light.casts_shadows = True`. | `False` |
-| `refraction` | `bool`. Set before loading glass assets. | `False` |
 | `transparent` | `bool`. Keep alpha in the output. | `False` |
 | `dithering` | `bool` | `False` |
 | `ssao` | `bool` | `False` |
@@ -205,8 +224,8 @@ next `render()`.
 
 #### Output encoding
 
-`encoding` sets how linear scene color is stored in the 8-bit target. It applies to offscreen
-targets and to imported host textures, and no other option changes it.
+`encoding` sets how linear scene color is stored in the 8-bit target. It applies to the output
+of a `RenderTarget` and of an `ImportedTarget`, and no other option changes it.
 
 - `"srgb"`: apply the sRGB transfer function. A host that samples the texture as plain RGBA8 into
   a non-sRGB framebuffer, and a NumPy readback, both see sRGB values: an unlit 0.5 grey is 188.
@@ -242,15 +261,17 @@ Instead, each conflict raises an error at the point where it occurs:
 
 | Conflict | Error |
 | --- | --- |
-| Set `output_path = "direct"` while `tone_mapping` is not `"linear"`, `antialiasing` is `"fxaa"`, `msaa` is above 1, or `refraction`, `transparent`, `dithering`, `ssao`, `bloom`, `depth_of_field`, or `vignette` is `True` | `ValueError` that names each setting. The path does not change. |
+| Set `output_path = "direct"` while `tone_mapping` is not `"linear"`, `antialiasing` is `"fxaa"`, `msaa` is above 1, or `transparent`, `dithering`, `ssao`, `bloom`, `depth_of_field`, or `vignette` is `True` | `ValueError` that names each setting. The path does not change. |
 | Set one of these options while `output_path` is `"direct"` | `ValueError`. The option does not change. |
-| Set `output_path = "direct"` while a model in the scene has a material with `alphaMode` `MASK` | `ValueError` |
-| Load an asset or create a mesh with a `MASK` material while `output_path` is `"direct"` | `AssetError`. Nothing is loaded. |
+| Set `output_path = "direct"` while a model in the scene has a material with `alphaMode` `MASK`, or a transmission or volume material | `ValueError` |
+| Load or add an asset, or create a mesh, with a `MASK` material or a transmission or volume material while `output_path` is `"direct"` | `AssetError`. The scene gets no model. |
 | Render with `encoding = "srgb"` to an [imported target](#importedtarget) whose texture has mutable storage (`glTexImage2D`) | `InteropError`. Nothing is rendered. |
 
 Filament writes the sharpened edge alpha of `MASK` materials to the target, and only the encode
-pass stores alpha one. `fog`, `shadows`, `encoding`, lights, environments, and every other material
-work on both paths. A scene that is not transparent stores alpha one on both paths.
+pass stores alpha one. Transmission and volume materials sample Filament's screen-space refraction
+pass, which the direct path has excluded from the start. `fog`, `shadows`, `encoding`, lights,
+environments, and every other material work on both paths. A scene that is not transparent
+stores alpha one on both paths.
 
 GPU frame time at 1920 x 1080 on the tested laptop, from Filament's timer in a 60 Hz loop, median
 of five interleaved rounds of 600 frames:
@@ -314,6 +335,13 @@ reflections, and dynamic resolution are not available, so no effect accumulates 
 frames. Filament 1.77.1 has no motion blur. Fog, depth of field, and vignette read only the current frame: equal
 inputs give equal output, whatever frames came before.
 
+Glass needs no option. Transmission and volume materials refract through Filament's
+screen-space refraction pass, which every scene has on the exact path. Filament runs the pass
+only in frames that draw such a material, so a scene without glass renders the same pixels in
+the same time: on the test laptop, a 1920 x 1080 frame of the horse took 0.40 to 0.48 ms with
+the pass on and off, with identical pixels. Without the pass, these materials render as flat white instead of refracting,
+which is why there is no option to turn it off.
+
 #### Fog
 
 `fog = True` blends each fragment toward a fog color by its distance from the camera:
@@ -321,13 +349,18 @@ inputs give equal output, whatever frames came before.
 camera-to-fragment vector, not the depth. Fog is uniform in height. The background color is
 not fogged; a visible environment is infinitely far away and takes the fog color.
 
-`set_fog_options(*, color=(1, 1, 1), density=0.1, start=0.0)` sets all three values.
-`color` is the linear output color of a fully fogged fragment, in `[0, 1]`. Filament scales
-the fog color by the environment intensity (30000 lux without an environment) and the camera
-exposure. The renderer divides that scale out at each `render()`, for the camera of that call,
-so the color does not depend on lighting or exposure. With an environment intensity of zero,
-fog is black. `density` is per scene unit and `start` is in scene units; both must be
-nonnegative. Fog is computed in the material shaders, so it works on both output paths.
+Each fog parameter is a scene property. A parameter keeps its value while `fog` is `False`.
+
+| Property | Values | Default |
+| --- | --- | --- |
+| `fog_color` | Linear RGB in `[0, 1]`: the output color of a fully fogged fragment. | `(1, 1, 1)` |
+| `fog_density` | Nonnegative, per scene unit. | `0.1` |
+| `fog_start` | Nonnegative distance in scene units. | `0` |
+
+Filament scales the fog color by the environment intensity (30000 lux without an environment)
+and the camera exposure. The renderer divides that scale out at each `render()`, for the camera
+of that call, so the color does not depend on lighting or exposure. With an environment intensity
+of zero, fog is black. Fog is computed in the material shaders, so it works on both output paths.
 
 #### Depth of field
 
@@ -349,11 +382,16 @@ Its noise depends on the pixel position only.
 #### Vignette
 
 `vignette = True` darkens the image toward its edges in Filament's color-grading pass, which then
-runs before filly's encode pass.
-`set_vignette_options(*, midpoint=0.5, roundness=0.5, feather=0.5, color=(0, 0, 0))` sets
-Filament's `VignetteOptions`: `midpoint` in `[0, 1]` moves the start of the falloff, `roundness`
-in `[0, 1]` goes from a rounded rectangle to a circle, `feather` in `[0.05, 1]` sets the width of
-the falloff, and `color` is the linear color at the edges. The center pixel is unchanged.
+runs before filly's encode pass. The center pixel is unchanged. Each parameter is a scene property
+with the default of Filament's `VignetteOptions`, and it keeps its value while `vignette` is
+`False`.
+
+| Property | Values | Default |
+| --- | --- | --- |
+| `vignette_midpoint` | `[0, 1]`. Moves the start of the falloff. | `0.5` |
+| `vignette_roundness` | `[0, 1]`. From a rounded rectangle to a circle. | `0.5` |
+| `vignette_feather` | `[0.05, 1]`. The width of the falloff. | `0.5` |
+| `vignette_color` | Linear RGB in `[0, 1]` at the edges. | `(0, 0, 0)` |
 
 #### Transparent output
 
@@ -368,26 +406,50 @@ stimuli behind the shared image.
 
 ### Environment lighting
 
-- `load_environment(path, *, intensity=30000, rotation_deg=0)`: load a 2:1 panorama. Radiance HDR,
-  PNG, and JPEG are accepted. HDR values retain their dynamic range.
-- `set_environment(pixels, *, intensity=30000, rotation_deg=0)`: accept a contiguous NumPy
-  `float32` RGB array with shape `(height, 2*height, 3)`. Values must be finite, nonnegative, linear light.
-- `environment_intensity`: get or set intensity in lux. Setting requires a loaded environment.
-- `environment_visible`: draw the environment as an opaque skybox. Default: `False`. The preference
-  survives environment replacement and clearing; without an environment, the background color applies.
-- `environment_rotation`: get or set rotation about Y in degrees. Setting requires a loaded
-  environment. This updates the skybox, reflections, diffuse lighting, and diffuse backlighting.
-- `load_environment_ktx(ibl_path, skybox_path=None, *, intensity=30000, rotation_deg=0)`: load a
-  prefiltered cubemap made by Filament's `cmgen` (`cmgen --format=ktx`), as `gltf_viewer` does.
-  The IBL file must contain spherical-harmonics metadata (`sh`); it supplies diffuse lighting.
-  Without `skybox_path`, the sharpest IBL level is the skybox.
-- `clear_environment()`: remove environment lighting.
+An `Environment` is image-based lighting that the renderer owns. Any of its scenes can use it,
+and they share its filtered textures, so a panorama is filtered once, not once per scene:
 
-Panorama height must be 2 through 4096. Rotation is about the Y axis in degrees. Loading filters
-the panorama for diffuse lighting and specular reflections and waits for GPU completion. Do this
-before the frame loop.
+```python
+environment = renderer.load_environment("studio.hdr")
+scene.environment = environment
+other_scene.environment = environment
+other_scene.environment_intensity = 15000  # this scene only
+```
 
-If all pixels of a panorama have the same value, `set_environment()` does not filter it: a
+Renderer methods that return an `Environment`:
+
+- `load_environment(path)`: load a 2:1 panorama. Radiance HDR, PNG, and JPEG are accepted. HDR
+  values retain their dynamic range.
+- `create_environment(pixels)`: accept a contiguous NumPy `float32` RGB array with shape
+  `(height, 2*height, 3)`. Values must be finite, nonnegative, linear light.
+- `load_environment_ktx(ibl_path, skybox_path=None)`: load a prefiltered cubemap made by
+  Filament's `cmgen` (`cmgen --format=ktx`), as `gltf_viewer` does. The IBL file must contain
+  spherical-harmonics metadata (`sh`); it supplies diffuse lighting. Without `skybox_path`, the
+  sharpest IBL level is the skybox.
+
+`Environment.close()` removes the environment from every scene that uses it and releases its
+textures; `closed` reports it. Equal environments compare equal, also as separate handles.
+
+Scene members:
+
+- `environment`: get or set the scene's `Environment`, or `None`, the default. Setting `None`
+  removes it from this scene only. An environment of another renderer raises `ValueError`, and
+  a closed one `FillyError`.
+- `environment_intensity`: intensity in lux. Default: `30000`.
+- `environment_rotation_deg`: rotation about Y in degrees. Default: `0`. This rotates the
+  skybox, reflections, diffuse lighting, and diffuse backlighting.
+- `environment_visible`: draw the environment as an opaque skybox. Default: `False`.
+
+The three settings belong to the scene: each scene that shares an environment has its own, and
+they keep their values without an environment and when it changes. Without an environment, the
+background color applies.
+
+Panorama height must be 2 through 4096. Loading filters the panorama for diffuse lighting and
+specular reflections and waits for GPU completion: 54 to 83 ms on the test machine for heights 64
+through 512. Do this before the frame loop. A scene then takes the environment in 0.03 to 0.3 ms;
+before environments were shared, each scene filtered the panorama again.
+
+If all pixels of a panorama have the same value, `create_environment()` does not filter it: a
 uniform environment is the same for all roughness levels. This took 0.8 ms instead of 54 ms on
 the test machine, and 2 to 30 ms instead of about 260 ms in Chrome. The light is the same as
 with filtering for values that R11F_G11F_B10F holds exactly, such as 1.0. For other values, 8-bit
@@ -409,12 +471,13 @@ Unknown optional glTF extensions emit `filly.AssetCompatibilityWarning`, a `User
 Unknown required extensions raise `AssetError`. `strict=True` turns compatibility warnings into errors. The metadata-only
 `KHR_xmp` and `KHR_xmp_json_ld` extensions are ignored without a warning. The draft
 `KHR_materials_volume_scatter` and `KHR_materials_retroreflection` extensions are unknown
-extensions; a material that uses them renders without that effect. Warnings also identify
-glass loaded without refraction. These checks are not a complete glTF validator.
+extensions; a material that uses them renders without that effect. These checks are not a
+complete glTF validator.
 
-The native loader runs the checks and collects the warnings. `scene.load()` issues the warnings
-after the native load returns, or before it raises an error. If a warning filter turns a
-warning into an exception, the model is closed and the exception propagates.
+The native loader runs the checks and collects the warnings. `scene.load()` and
+`renderer.load_asset()` issue the warnings after the native load returns, or before they raise an
+error. If a warning filter turns a warning into an exception, the model or asset is closed and
+the exception propagates.
 
 ### Texture limits
 
@@ -486,9 +549,31 @@ geometry outside the rendered view.
 ## Light
 
 `type` is read-only: `"directional"`, `"sun"`, `"point"`, or `"spot"`.
-Mutable properties are `color` (linear RGB in `[0,1]`), `intensity` (nonnegative), `position`,
-`direction` (nonzero), `range` (positive, point and spot only), and `casts_shadows`.
-Directional and sun intensity is in lux; point and spot intensity is in candela.
+
+| Property | Applies to | Values |
+| --- | --- | --- |
+| `color` | All | Linear RGB in `[0, 1]`. |
+| `intensity` | All | Nonnegative. Lux for directional and sun lights, candela for point and spot lights. |
+| `position` | Point, spot | Three coordinates. |
+| `direction` | Directional, sun, spot | A nonzero vector. It reads back normalized. |
+| `range` | Point, spot | Positive distance in scene units at which the light reaches zero. |
+| `cone_deg` | Spot | `(inner, outer)` half-angles in degrees, `0 <= inner <= outer < 90`. |
+| `casts_shadows` | All | `bool`. See below. |
+| `shadow_map_size` | All | Power of two from 8 through 4096. Default: 1024. |
+| `shadow_constant_bias` | All | Nonnegative, in world units. Default: 0.001. |
+| `shadow_normal_bias` | All | Nonnegative. Scales Filament's sampling-error estimate. Default: 1. |
+
+A property that does not apply to the light's type reads as `None`, and setting it raises
+`ValueError`, because the light would ignore the value.
+
+#### Default intensities
+
+At the default camera exposure (EV100 about 15), the defaults light a white diffuse surface that
+faces the light to the same level: 50000 lux for a directional light, and 50000 cd for a point or
+spot light 1 m away (illuminance is intensity over distance squared). A linear tone mapper and sRGB
+encoding store this surface as about 173 of 255. A sun light defaults to 100000 lux, as in
+`gltf_viewer`. For a light at distance `d`, multiply the intensity by `d * d` to keep the same
+brightness.
 A sun light shades like a directional light with a disc of `angular_radius_deg`, from 0.25 through
 20 degrees. Filament moves the light direction toward each pixel's reflection within that disc,
 so specular highlights change the most. A visible skybox draws the disc and its halo;
@@ -499,17 +584,15 @@ Directional, point, and spot lights can cast shadow maps. Set both `scene.shadow
 shadow-map faces, so its cost can be higher than a spot light. Filament limits the total shadow
 maps in a view.
 
-`light.set_shadow_options(*, map_size=1024, constant_bias=0.001, normal_bias=1.0)` changes
-resolution and depth bias without enabling shadows. `map_size` is the resolution per face and
-must be a power of two from 8 through 4096. Bias values must be finite and nonnegative.
-Constant bias uses world units; normal bias scales Filament's sampling-error estimate. Each
-call replaces these three settings. Set them before warmup; resolution changes can reallocate maps.
-The settings also apply to imported lights. Shadow maps do not model colored light transmission
+The shadow properties change resolution and depth bias without enabling shadows, and each one
+changes only its own value. `shadow_map_size` is the resolution per face. Set them before warmup;
+resolution changes can reallocate maps. Shadow maps do not model colored light transmission
 through glass or translucent volumes.
 
-`set_spot_cone(inner, outer)` requires `0 <= inner <= outer < pi/2` in radians. The intensity in
-candela does not change, so the brightness on the cone axis stays the same. This is the glTF rule.
-Scene-created spot lights and imported spot lights behave the same way, and so do animated cones.
+When `cone_deg` changes, the intensity in candela does not change, so the brightness on the cone
+axis stays the same. This is the glTF rule. Scene-created spot lights and imported spot lights
+behave the same way, and so do animated cones. `cone_deg` reads back the values that were set,
+authored, or animated; Filament keeps only values derived from them.
 
 Imported lights are available through `model.light(key)` and `model.lights`. The key is the
 name or glTF index of the node that carries the light. `light.node` returns that `Node`; it is
@@ -518,19 +601,41 @@ Imported light nodes retain the glTF hierarchy; animate or move their node to ch
 placement in that hierarchy.
 
 `light.close()` removes a light. Repeated calls are valid. `closed` is read-only. Imported lights
-lose their light component but retain the node for animation. The handle stays in `model.lights`
-and reports `closed=True`. Closing the model or its scene also invalidates its light handles.
+lose their light component but retain the node for animation. `model.lights` leaves closed lights
+out, as a scene's closed lights leave the scene; `model.light(key)` still returns the handle,
+because the node remains, and the handle reports `closed=True`. Other calls on it raise
+`FillyError`. Closing the model or its scene also invalidates its light handles.
 Scene-created lights release their entity and scene ownership. Lights support `==` and `hash()`.
 Two handles are equal when they refer to the same light.
 
 ## Camera
 
-- `set_perspective(*, fov_y, aspect=None, near, far)`: vertical field of view in degrees.
-- `set_lens_projection(*, focal_length_mm, aspect=None, near, far)`: perspective projection from
-  a focal length on Filament's 24 mm sensor height. `gltf_viewer` uses 28 mm.
-- `set_orthographic(*, left, right, bottom, top, near, far)`: explicit orthographic bounds.
-- `set_orthographic(*, height, center=(0, 0), near, far)`: orthographic view of `height` scene
-  units around `center`. The width is `height` times the target aspect.
+`renderer.create_camera()` returns a camera that belongs to the renderer, as in Filament. Several
+scenes can use one camera. Closing a scene does not close the cameras that it uses. A camera
+stays open until `camera.close()`, until the renderer closes, or until no handle and no scene
+refers to it. Imported cameras belong to their model; see [imported cameras](#imported-cameras).
+
+A new camera is at the origin and looks along -Z. It has a perspective projection with a vertical
+field of view of 30 degrees, `near=0.1`, and `far=100`, and it follows the target aspect. A
+desktop monitor at a typical viewing distance spans about 30 degrees vertically, so a framed model
+looks as it would on that monitor. Usually you only aim the camera:
+
+```python
+scene.camera = renderer.create_camera()
+scene.camera.frame(model)
+```
+
+- `close()`: release the camera. Scenes that use it have no active camera after that. Repeated
+  calls are valid. Raises `FillyError` for imported cameras.
+- `closed`: whether the camera, its model, or its renderer is closed.
+- `set_perspective(*, fov_y_deg, aspect=None, near=None, far=None)`: vertical field of view in
+  degrees, `0 < fov_y_deg < 180`.
+- `set_lens_projection(*, focal_length_mm, aspect=None, near=None, far=None)`: perspective
+  projection from a focal length on Filament's 24 mm sensor height. `gltf_viewer` uses 28 mm.
+- `set_orthographic(*, left, right, bottom, top, near=None, far=None)`: explicit orthographic
+  bounds.
+- `set_orthographic(*, height, center=(0, 0), near=None, far=None)`: orthographic view of `height`
+  scene units around `center`. The width is `height` times the target aspect.
 - `position`: three coordinates.
 - `look_at(target, up=(0, 1, 0))`: set the viewing direction.
 - `frame(target, *, fill=0.8, direction=None, up=(0, 1, 0), fit="sphere", near=None, far=None, aspect=None)`:
@@ -540,8 +645,8 @@ Two handles are equal when they refer to the same light.
 - `view_matrix`: copy of the view matrix.
 - `projection`: copy of Filament's projection matrix.
 - `exposure`: camera EV100 in `[-10, 24]`. Lower values produce a brighter image.
-- `focus_distance`: [depth-of-field](#depth-of-field) focus distance in scene units, positive.
-  It is 0 until set, which Filament treats as the near plane.
+- `focus_distance`: [depth-of-field](#depth-of-field) focus distance in scene units,
+  nonnegative. Default: 0. Filament focuses no closer than the near plane, so 0 focuses there.
 - `aperture`: depth-of-field f-number in `[0.5, 64]`. Default: 16. It does not change exposure.
 
 With `aspect=None`, and with the `height` form of `set_orthographic`, the projection follows the
@@ -550,23 +655,33 @@ from the last applied value. An explicit `aspect` wins over the target. A positi
 required when it is given. `set_orthographic` accepts either all four bounds or `height`, not
 both; `center` requires `height`.
 
+The `near` and `far` arguments of the projection methods and of `frame()` work as follows:
+
+- A plane that you give stays until the next projection call. `frame()` does not change it.
+- A plane that you do not give to a projection method keeps its current value: the default, or
+  the value from the last `frame()`. The next `frame()` sets it so that it encloses the target.
+
+The planes must satisfy `0 < near < far`, with given and kept planes together.
+
 `projection` returns the matrix that the next render uses for the last target aspect. Before the
 first render, a projection that follows the target uses aspect 1. After a render into a target
 with another aspect, it reflects that target. The update does not allocate memory.
 
-Require `0 < near < far`. Default exposure is approximately EV100 15, equivalent to aperture 16,
-shutter time 1/125 second, and ISO 100. Dim authored lights can require a much lower EV100.
+Default exposure is approximately EV100 15, equivalent to aperture 16, shutter time 1/125 second,
+and ISO 100. Dim authored lights can require a much lower EV100.
 
 Cameras support `==` and `hash()`. Two handles are equal when they refer to the same camera.
-`camera.node` returns the `Node` of an imported camera, and `None` for a scene-created camera.
+`camera.node` returns the `Node` of an imported camera, and `None` for a camera from `renderer.create_camera()`.
 
 ### Framing
 
-`camera.frame(target, ...)` places the camera once. It never runs by itself: call it again after
-the target moves. It returns the distance from the camera to the target's center.
+`camera.frame(target, ...)` aims the camera at a target and sets its distance, so that the target
+fills part of the view. It returns the distance from the camera to the target's center. It does
+not follow the target: call it again after the target moves.
 
 - `target`: a `Model` or a `Node`, which use their [`bounds`](#model) moved by the model's
-  current transform, or a `(min, max)` box in world coordinates.
+  current transform, or a `(min, max)` box in world coordinates. `frame()` copies the box, so a
+  later change of the model does not change the framing.
 - `fit="sphere"` frames the sphere that circumscribes the box: its center is the box center, and
   its radius is half the box diagonal times the largest scale factor of the model transform. A
   rotation of the model does not change it, so a model that spins between trials keeps the same
@@ -577,18 +692,30 @@ the target moves. It returns the distance from the camera to the target's center
   projects to a circle). For `"box"`, every projected corner lies within `fill` of the half-width
   and half-height from the image center, and at least one corner reaches it.
 - `direction`: the viewing direction, from the camera toward the target. Default: the camera's
-  current direction. `up` must not be parallel to it. The camera then looks at the target's
-  center with `up`, as `look_at()` does.
+  current direction, which is -Z for a new camera. `up` must not be parallel to it. The camera
+  then looks at the target's center with `up`, as `look_at()` does.
 - A perspective camera keeps its field of view; `frame()` sets its distance. An orthographic
   camera gets the `height` form of `set_orthographic()`, so it follows the target aspect, and a
   distance that keeps the target between the clipping planes.
-- `near` and `far`: default planes enclose the target (its sphere, or the box corners) with a
-  margin of 5% of its depth along the view, or of its sphere radius for a flatter target. Given
-  planes are used as they are. `projection` shows only `near`: Filament renders with the far
-  plane at infinity and uses `far` for culling.
-- `aspect`: the target aspect for the horizontal extent. Default: the aspect of the camera's
-  current projection, which is 1 before the first render of a camera that follows its target.
-  Pass the render target's width over height before the first render.
+- `near` and `far`: planes to use. A plane that you give here stays, as one that you give to a
+  projection method does. Each plane that you did not give since the last projection call
+  encloses the target (its sphere, or the box corners). The margin is 5% of the target's depth
+  along the view, or of its sphere radius for a flatter target. `projection` shows only `near`: Filament renders with the far plane at infinity and
+  uses `far` for culling.
+- `aspect`: the target aspect for the horizontal extent. See the next paragraphs.
+
+The distance depends on the target aspect: for `"sphere"` when the render target is taller than wide,
+and for `"box"` always. Without `aspect`, `render()` frames a camera that follows the target
+aspect again when the target aspect differs from the aspect of the framing. The camera then
+keeps the new framing. So the target fills `fill` of the view also when you frame before the
+first render, or when you render into targets of different aspects. The new framing uses the same
+copied box and arguments, and it allocates no memory. Setting `position` or `transform`, or
+calling `look_at()`, a projection method, or `frame()`, ends it.
+
+Until the first render, `position`, `transform`, and `projection` show the framing for aspect 1,
+or for the aspect of the last render. If you read them before the render, for example to place
+the camera relative to the framing, pass `aspect`. With `aspect`, `frame()` uses that aspect and
+`render()` does not frame again. A camera with a fixed aspect uses its own aspect.
 
 `frame()` raises `ValueError` for a `fill` outside `(0, 1]`, a target with empty, non-finite, or
 zero-size bounds (such as a node without a mesh below it), a zero `direction` or `up`, a
@@ -603,6 +730,9 @@ node order. Repeated calls return the same camera. Camera position, transform, a
 their node hierarchy. Use `model.node(key)` for local transforms and ordinary glTF node channels
 for camera motion.
 
+Closing a model closes its imported cameras. Scenes that use one of them have no camera after
+that, and their next `render()` raises `FillyError` that says so.
+
 Imported cameras keep their glTF projection; `set_perspective()`, `set_lens_projection()`, and
 `set_orthographic()` raise `FillyError` for them. A perspective camera without `aspectRatio`
 follows the render target, as the glTF specification requires; an authored aspect ratio is kept.
@@ -616,7 +746,7 @@ Imported perspective cameras support an omitted far plane. Imported orthographic
 - `position`: translation of the model root.
 - `visible`: add or remove the model's entities from its scene.
 - `scale`: three nonzero scale factors.
-- `rotation_euler_deg` and `rotation_euler_rad`: rotations applied about X, then Y, then Z.
+- `rotation_euler_deg`: rotations in degrees, applied about X, then Y, then Z.
 - `quaternion`: `(x, y, z, w)`. The setter normalizes nonzero inputs.
 - `nodes`: all nodes in glTF order.
 - `node(key)`: return a node by name or glTF node index.
@@ -638,9 +768,7 @@ Imported perspective cameras support an omitted far plane. Imported orthographic
 - `reset_animation()`: restore authored node transforms, morph weights, camera projections, and animated material/light/texture properties.
 - `variants`: list of material variant names.
 - `apply_variant(key)`: apply a material variant.
-- `clone(*, scene=None)`: return another instance of an asset loaded with `clonable=True`, or of
-  a generated mesh, in this model's scene or in `scene`. See [clones](#clones).
-- `memory`: a `ModelMemory` estimate of the memory that the model's asset holds. See
+- `memory`: an `AssetMemory` estimate of the memory that the model's asset holds. See
   [Memory](#memory).
 - `update_mesh(*, positions=None, normals=None, uvs=None, colors=None)`: replace vertex data of a
   [generated mesh](#generated-meshes).
@@ -680,60 +808,78 @@ mesh, light, or camera has a name. To find an unnamed node, use one of these:
 - The item that it carries: `model.lights[0].node` or `model.cameras[0].node`.
 
 `model.material(name)` edits the material that every mesh slot using it shares. Separate loaded
-models and clones have separate material instances. To change one mesh slot only, use
+models, also models of one asset, have separate material instances. To change one mesh slot only, use
 [`node.material(slot)`](#node-and-material).
 
-### Clones
+### Assets
 
-`model.clone()` returns a new `Model` in the same scene. `model.clone(scene=other)` puts the new
-`Model` in another scene of the same renderer, so one hidden prototype can serve every scene.
-The asset belongs to the renderer, not to a scene: each model holds it, so closing the scene of
-the prototype closes the prototype but not the clones in other scenes, and the clones keep the
-asset alive. A closed prototype cannot clone again. A clone keeps the material setup of the
-prototype's load, including the refraction setting that its scene had then. The asset must be loaded with
-`scene.load(source, clonable=True)`, or be a [generated mesh](#generated-meshes); otherwise
-`clone()` raises `FillyError`. A clone of a
-clone is valid. The clone shares the loaded asset's geometry, textures, and materials.
-It has its own entities, transforms, material instances, node-local materials, visibility, light
-components, skinning, and animation state. It starts from the asset's load-time state; edits to
-the source model, including runtime textures, are not copied.
+`renderer.load_asset(source, *, strict=False)` loads a glTF or GLB file, or `bytes`, and returns
+an `Asset`. It takes the same sources and gives the same warnings as `scene.load()`. The asset
+belongs to the renderer, so any of its scenes can show it: `scene.add(asset)` returns a new
+`Model` of it in that scene. `scene.load(source)` is the same as loading an asset, adding it
+once, and closing the asset.
 
-Closing a model removes only that instance from the scene. The other instances keep rendering.
-The shared asset stays in memory until its last instance closes. Filament needs the asset's
-source data to create instances. With `clonable=True`, the source data stays in CPU memory for
-the life of the asset. This costs about the size of the asset file: 3.7 MiB for the 3.6 MiB
-DamagedHelmet. With the default `clonable=False`, loading releases the source data. Each clone
-creates new material instances; it shares the decoded textures, including those of the custom
-diffuse-transmission, anisotropy, and iridescence materials. Clones with lights add their light
-components to `stats.live_lights`. Clone before the frame loop.
+```python
+asset = renderer.load_asset("horse.glb")
+left, right = scene.add(asset), scene.add(asset)
+other_scene.add(asset)
+```
+
+| Member | Behavior |
+| --- | --- |
+| `memory` | An `AssetMemory` estimate of the memory that the asset holds, shared with its models. See [Memory](#memory). |
+| `close()` | Release the source data that `scene.add()` reads. Models that exist keep rendering. Repeated calls are valid. |
+| `closed` | Report whether the asset or its renderer is closed. |
+
+Each model shares the asset's geometry, textures, and materials. It has its own entities,
+transforms, material instances, node-local materials, visibility, light components, skinning,
+morph target buffers, and animation state. It starts from the file's authored state: edits to
+another model of the asset, including runtime textures, do not carry over. Each model creates
+new material instances; it shares the decoded textures, including those of the custom
+diffuse-transmission, anisotropy, and iridescence materials. Models with lights add their light
+components to `stats.live_lights`. Add models before the frame loop: on the test laptop (Intel
+Iris Xe), an `add()` took 0.1 to 8 ms where a load took 1 to 150 ms, for files of 0.07 to 7.4 MB.
+
+Closing a model removes only that model from its scene; closing a scene closes only its own
+models. The shared asset stays in memory until the asset and its last model close. Filament
+needs the asset's source data to create models, so an open asset keeps it in CPU memory. This
+costs about the size of the file: 3.7 MiB for the 3.6 MiB DamagedHelmet. `close()` releases it;
+`scene.load()` releases it after its one model. After `close()`, `scene.add()` and `memory`
+raise `FillyError`.
+
+gltfio fills a model's morph target buffers only for the first model of an asset. filly fills
+them for each later model in the same way: positions from the morph targets, and tangent frames
+from gltfio's own tangent generation, for the same targets. This uses gltfio's `TangentsJob`,
+which the Filament SDK library contains but does not declare in its headers; `native/renderer.cpp`
+declares it for Filament 1.77.1.
 
 ### Memory
 
-`model.memory` returns a `ModelMemory` estimate of the memory that the model's asset holds.
-The model shares it with its prototype and its clones, and the last of them to close frees it.
-Use it to keep a model cache within a memory budget.
+`asset.memory` and `model.memory` return an `AssetMemory` estimate of the memory that an asset
+holds. The asset and its models share it, and the last of them to close frees it. Use it to keep
+a model cache within a memory budget.
 
 | Field | Meaning |
 | --- | --- |
 | `gpu_texture_bytes` | Every mip level of every texture of the asset, in the internal format that the texture has (for example, `SRGB8_A8` for a PNG, a compressed format for a KTX2 texture). |
 | `gpu_geometry_bytes` | Vertex, index, morph target, and bone buffers, as gltfio lays them out. |
 | `gpu_bytes` | The sum of the two. |
-| `cpu_bytes` | The source data that `clone()` needs, if the asset is clonable: the document, its buffers, and filly's tables for custom materials and property animation. Also the clip data that each instance's animator copies. A generated mesh adds its vertex arrays and staging buffers. |
-| `clone_gpu_bytes`, `clone_cpu_bytes` | What each further clone adds: its bone and morph target buffers, and its animator's copy of the clips. These stay with the asset until it closes, also after the clone closes. |
+| `cpu_bytes` | The source data that `scene.add()` needs, while the `Asset` is open: the document, its buffers, and filly's tables for custom materials and property animation. Also the clip data that each instance's animator copies. A generated mesh adds its vertex arrays and staging buffers. |
+| `instance_gpu_bytes`, `instance_cpu_bytes` | What each model adds: its bone and morph target buffers, and its animator's copy of the clips. These stay until the asset is freed (its `Asset` handle closed and its last model closed), also after the model closes. `asset.close()` releases only the source data. A loaded asset holds one instance before its first model, which that model uses. |
 | `models` | The live models that share the asset. |
 
-Clones share the textures, the vertex and index buffers, and the materials. The
+Models share the textures, the vertex and index buffers, and the materials. The
 estimate leaves out what the driver adds. On the test laptop (Intel Iris Xe, an integrated GPU),
 the GPU process memory counter measured 9 to 16% above `gpu_bytes` for the second load of an
 asset: 18.6 against 16.1 MiB (wooden horse, 2.1 MiB file), 45.0 against 40.6 MiB
 (DiffuseTransmissionPlant, 5.5 MiB), and 78.8 against 72.2 MiB (ChronographWatch, 7.1 MiB). The
-driver allocates in blocks, so single clones can add 0.5 to 3 MiB more than `clone_gpu_bytes`.
+driver allocates in blocks, so single models can add 0.5 to 3 MiB more than `instance_gpu_bytes`.
 An integrated GPU uses system memory: there the process private bytes include the GPU memory,
 about 22, 56, and 94 MiB for the same loads, against `cpu_bytes + gpu_bytes` of 18.2, 46.8, and
 79.4 MiB. For a budget on such a machine, count `cpu_bytes + gpu_bytes` against system memory. A
 discrete GPU holds `gpu_bytes` in its own memory instead. For an animated asset with many
-keyframes, `clone_cpu_bytes` is the larger part of a clone: 5.5 MiB estimated against about
-7.4 MiB measured per clone of BrainStem.
+keyframes, `instance_cpu_bytes` is the larger part of a model: 5.5 MiB estimated against about
+7.4 MiB measured per model of BrainStem.
 
 Closing the last model frees the asset to the driver and to the process heap, which reuse the
 memory for later loads. The process counters do not always fall: after closing the horse, the
@@ -743,7 +889,7 @@ its entries, not by the process counters.
 Reading `memory` issues no GPU or engine commands.
 
 Closing a model invalidates all its node, material, light, and imported camera handles. Scenes
-that use one of its cameras lose their active camera. Other assets, scene-created cameras,
+that use one of its cameras lose their active camera. Other assets, renderer cameras,
 and environment lighting remain available. Model and light close queue destruction without a
 GPU completion wait. Call `renderer.finish()` when completion is required before the next trial.
 Archive entry materials remain loaded until the renderer closes.
@@ -795,8 +941,9 @@ only if the driver thread has not yet read the buffer from three updates earlier
 time per position update on the tested machine: 0.15 ms for 1,089 vertices and 6.9 ms for
 66,049 vertices, most of it the tangent frames.
 
-`clone()` works without `clonable=True`. Clones share the vertex data, so `update_mesh()` on one
-instance changes all of them. Each clone has its own transform and materials.
+A generated mesh is one model in one scene; it has no `Asset`. For more copies, call
+`create_mesh()` again: each copy has its own vertex buffers, which `update_mesh()` changes
+independently.
 
 `filly.shapes` returns arrays for `create_mesh(**shape)`:
 
@@ -939,7 +1086,7 @@ clip of the model animates through `KHR_animation_pointer`, including texture tr
   shared material. Earlier edits of the copies are not restored.
 - Edits to properties that no clip animates persist on the copy.
 
-Clones follow the same rule, each with its own materials and copies.
+Models of one asset follow the same rule, each with its own materials and copies.
 
 Rule for material variants: `apply_variant()` puts the variant's material in each slot that the
 variant maps. If such a slot has a node-local material, the node shows the variant: a new copy
@@ -959,12 +1106,14 @@ Unsupported material parameters raise `AssetError`, for example `emissive` on an
 
 | Member | Behavior |
 | --- | --- |
-| `base_color_texture` | Get or set a `Texture`, a `HostTexture`, or `None`. The texture multiplies `base_color`. |
-| `emissive_texture` | Get or set a `Texture`, a `HostTexture`, or `None`. The texture multiplies `emissive`. Lit materials only. |
-| `set_texture_transform(slot, *, offset=(0, 0), scale=(1, 1), rotation_deg=0)` | Transform the UVs of the assigned texture in `slot`, `"base_color"` or `"emissive"`, as `KHR_texture_transform` does. Each call replaces the transform. |
+| `base_color_texture` | Get or set a `Texture`, an `ImportedTexture`, or `None`. The texture multiplies `base_color`. |
+| `emissive_texture` | Get or set a `Texture`, an `ImportedTexture`, or `None`. The texture multiplies `emissive`. Lit materials only. |
+| `base_color_texture_offset`, `base_color_texture_scale`, `base_color_texture_rotation_deg` | Get or set the `KHR_texture_transform` of the runtime base color texture: offset and scale in UV units, rotation in degrees. Defaults: `(0, 0)`, `(1, 1)`, `0`. Each property changes only its own value. `None` without a runtime texture in the slot, where setting raises `FillyError`. |
+| `emissive_texture_offset`, `emissive_texture_scale`, `emissive_texture_rotation_deg` | The same for the emissive texture. |
 
 The getters return the texture that was assigned at run time, or `None`; they do not return
-textures from the glTF file. `None` removes the assignment. Textures sample UV set 0; a mesh
+textures from the glTF file. `None` removes the assignment and resets the slot's transform. A
+texture that replaces another keeps the transform. Textures sample UV set 0; a mesh
 without `TEXCOORD_0` samples texel (0, 0) everywhere. Emissive values are output values: with
 `emissive = (1, 1, 1)`, an emissive texel of linear 0.25 adds 0.25 to the output, whatever the
 exposure.
@@ -975,8 +1124,8 @@ their own. A node-local material made from a textured shared material starts wit
 
 Every material has both slots, including diffuse-transmission, anisotropy, and iridescence
 materials and materials without glTF textures. An assignment changes parameters of a copy of the
-glTF instance: nothing is compiled, other glTF textures stay, and `set_texture_transform()`
-always works. Removing a texture starts again from a copy of the glTF instance, which has the
+glTF instance: nothing is compiled, other glTF textures stay, and the texture transform
+properties always work. Removing a texture starts again from a copy of the glTF instance, which has the
 glTF texture of that slot, and the factors carry over. Property animation of the glTF material
 also reaches the textured material, and `apply_variant()` keeps runtime textures on shared
 materials; on node-local materials that the variant maps, they are lost, as other edits are.
@@ -1046,15 +1195,15 @@ the `update()` call. Completion is the extra time until `finish()` returns after
 | 1920 x 1080 | 0.82 ms | 2.7 ms | 3.2 ms | 9.1 ms |
 
 The completion time overlaps with the host's own work unless the host waits. Prefer `uint8`
-for large per-frame stimuli. A drifting grating needs no upload at all: use
-`set_texture_transform()`.
+for large per-frame stimuli. A drifting grating needs no upload at all: set
+`base_color_texture_offset`.
 
 Textures support `==` and `hash()`. Closing the renderer closes its textures.
 
-## HostTexture
+## ImportedTexture
 
-`renderer.import_gl_input(texture_id, *, width, height, color_space, filter="linear", wrap="repeat")`
-returns a `HostTexture`: a host OpenGL texture that materials sample, for zero-copy video or
+`renderer.import_gl_texture(texture_id, *, width, height, color_space, filter="linear", wrap="repeat")`
+returns an `ImportedTexture`: a host OpenGL texture that materials sample, for zero-copy video or
 host-drawn patterns on a 3D surface. The texture must be a `GL_TEXTURE_2D` with `GL_RGBA8`
 storage in the shared context. For `color_space="srgb"`, Filament samples a `GL_SRGB8_ALPHA8`
 view of it, so shaders read linear light. A view needs immutable storage from `glTexStorage2D`;
@@ -1064,7 +1213,8 @@ samples the texture itself, and either storage works. Filament samples level 0 o
 The host writes it inside `write()`:
 
 ```python
-with host_texture.write():
+imported_texture = renderer.import_gl_texture(texture_id, width=256, height=256, color_space="srgb")
+with imported_texture.write():
     ...  # Draw into the texture in the host context.
 renderer.render(scene, target)  # Samples what the host drew.
 ```
@@ -1077,19 +1227,21 @@ renderer.render(scene, target)  # Samples what the host drew.
 | `close()` | Remove the texture from all materials and release the Filament side. The host texture is not deleted. |
 | `closed` | Report whether the texture or its renderer is closed. |
 
+Imported textures support `==` and `hash()`.
+
 The order is explicit in both directions and has no CPU wait for the GPU. Entering `write()`
 waits until Filament's driver thread has placed a fence after the last frame, as `acquire()`
 does, and queues a GPU wait on it in the host context, so the host does not overwrite pixels
 that a submitted frame still reads. It releases the GIL while it waits. Leaving `write()`
 places a host fence; the next `render()` of a scene whose models sample the texture queues a GPU
 wait on it before the frame. `render()` inside `write()` raises `InteropError`. A render adds one
-fence, shared by its target and by the host textures that the scene samples.
+fence, shared by its target and by the imported textures that the scene samples.
 `close()` fences the host's work if the host context is current, as `ImportedTarget.close()`
 does.
 
-## OffscreenTarget
+## RenderTarget
 
-`create_render_target()` returns an `OffscreenTarget`.
+`create_render_target()` returns a `RenderTarget`.
 
 | Member | Behavior |
 | --- | --- |
@@ -1102,7 +1254,7 @@ Readback waits for the GPU. It releases the GIL while it waits.
 
 ## ImportedTarget
 
-`import_gl_texture()` returns an `ImportedTarget`. This is the API for authors of host adapters:
+`import_gl_target()` returns an `ImportedTarget`. This is the API for authors of host adapters:
 the modules in `filly.integrations` are built on it. The host creates a `GL_TEXTURE_2D` with
 `GL_RGBA8` storage in the context given as `shared_context`. The host samples its own texture as
 plain RGBA8 values, which are sRGB-encoded with the default `encoding`.
@@ -1120,11 +1272,20 @@ The storage kind matters only for [`output_path = "direct"`](#output-path) with 
 
 | Member | Behavior |
 | --- | --- |
+| `ImportedTarget(imported)` | For subclasses, such as host adapters: initialize the new object from the `ImportedTarget` that `import_gl_target()` returned. Both objects refer to the same target. |
 | `width`, `height` | Size in pixels. Read-only. |
 | `acquire()` | Return a context manager that holds the texture for host sampling. `with target.acquire() as t` gives `t is target`. Nested calls only count depth. |
 | `acquired` | `True` inside `acquire()`. Read-only. |
 | `close()` | Release the Filament side. The host texture is not deleted. Repeated calls are valid. |
 | `closed` | Report whether the target or its renderer is closed. |
+
+`on_renderer_close` lets an adapter release the host objects around the texture, which the
+renderer does not know about. `Renderer.close()` calls the callback without arguments before it
+releases anything else, so the host context can still be made current, and newer targets come
+first. A target that closes first drops its callback. The renderer keeps a strong reference to
+the callback, so the callback must not refer to the target strongly: use `weakref`. If a
+callback raises, `Renderer.close()` still calls the other callbacks and releases every resource,
+then raises the first exception. The host integrations use the callback to close their targets.
 
 Use this sequence for every frame, with the original host context current:
 
@@ -1153,45 +1314,61 @@ its own work before it releases resources. Host work that still samples a shared
 fenced. Use this after a host window has closed.
 
 `render()`, the outermost `acquire()` enter and exit, native asset loading, environment
-filtering, `finish()`, `close()`, `Texture.update()`, texture assignment, mesh creation and
-updates, and entering `HostTexture.write()` release the GIL. Other Python threads can run during these
+filtering, `finish()`, `close()` of `Renderer`, `Scene`, `RenderTarget`, `ImportedTarget`, and
+`ImportedTexture`, `Texture.update()`, texture assignment, mesh creation and updates, and entering
+`ImportedTexture.write()` release the GIL. Other Python threads can run during these
 calls. Native asset loading includes the glTF checks and preparation. Normal rendering does not
 perform a full GPU completion wait.
 
 ## Host integrations
 
-Each module in `filly.integrations` has a `SharedTarget` class. It creates a host-owned
-texture with immutable RGBA8 storage, so both output paths work, imports it with `import_gl_texture()`, and is an
-`ImportedTarget`. The moderngl and zengl adapters wrap that texture as an external texture or
-image.
+Each module in `filly.integrations` has a `HostTarget` class and a `create_renderer()`
+function. `HostTarget` creates a host-owned texture with immutable RGBA8 storage, so both output
+paths work, imports it with `import_gl_target()`, and is an `ImportedTarget`.
+`create_renderer()` returns a `Renderer` that shares the window's OpenGL context.
 
-| Module | Constructor | Renderer factory |
-| --- | --- | --- |
-| `pyglet` | `SharedTarget(renderer, window, width, height)` | `create_renderer(window)` |
-| `moderngl` | `SharedTarget(renderer, ctx, width, height)` | `pyglet.create_renderer(window)` |
-| `zengl` | `SharedTarget(renderer, ctx, width, height, framebuffer=None)` | `pyglet.create_renderer(window)` |
-| `psychopy` | `SharedTarget(renderer, win, width, height)` | `create_renderer(win)` |
+| Module | Constructor | Default size | `texture` | Renderer factory |
+| --- | --- | --- | --- | --- |
+| `pyglet` | `HostTarget(renderer, window, *, width=None, height=None)` | `window.get_framebuffer_size()` | GL texture name (`int`) | `create_renderer(window)` |
+| `moderngl` | `HostTarget(renderer, ctx, *, width=None, height=None)` | `ctx.fbo.size` | `moderngl.Texture` | `create_renderer()` |
+| `zengl` | `HostTarget(renderer, ctx, *, width=None, height=None, framebuffer=None)` | size of `framebuffer[0]`; required for the window | `zengl.Image` | `create_renderer()` |
+| `psychopy` | `HostTarget(renderer, win, *, width=None, height=None)` | `win.frameBufferSize` | GL texture name (`int`) | `create_renderer(win)` |
+
+The pyglet and PsychoPy factories make the window's context current. moderngl and zengl cannot
+make a context current, so their factories share the context that is current and raise
+`InteropError` if none is. After `close()`, `texture` is `0` or `None`.
 
 | Member | Behavior |
 | --- | --- |
+| `texture` | The host texture. See the table above. Read-only by convention. |
 | `acquire()` | Make the host context current if no acquisition is open, then call `ImportedTarget.acquire()`. |
-| `draw(x=0, y=0, width=None, height=None)` | Draw the texture at window pixel (x, y) from the lower-left corner, inside `acquire()`. |
-| `close()` | Close the Filament target, then delete the host texture. Repeated calls are valid. |
-| `as_psychopy_texture(win=None, *, size=None, pos=(0, 0), units="pix")` | PsychoPy only. Return an ImageStim that samples the texture. |
+| `draw(*, viewport=None, blend=True)` | Draw the texture into `viewport`, `(x, y, width, height)` in window pixels from the lower-left corner. Outside `acquire()`, `draw()` acquires and releases the texture itself; inside one, it uses the open acquisition. The viewport defaults to the texture size at (0, 0). |
+| `close()` | Close the Filament target, then delete the host objects. Repeated calls are valid. |
+| `create_image_stim(*, size=None, pos=(0, 0), units="pix")` | PsychoPy only. Return a new ImageStim in the target's window that samples the texture. `size` is required unless `units` is `"pix"`; the default is the texture size in pixels. |
 
-`width` and `height` follow the rules for `import_gl_texture()`, with the same error messages.
+`draw()` composites the texture source-over for premultiplied color, which is what Filament
+writes. `blend=False` copies the texture, so the window gets Filament's premultiplied RGBA.
+The pyglet and moderngl adapters draw a quad in native code that restores the OpenGL state that
+it changes; the depth test, the stencil test, and face culling do not apply, and the scissor
+test does. The zengl adapter draws with a zengl pipeline for each mode. The PsychoPy adapter
+draws with an ImageStim: blended draws convert the color to straight alpha for ImageStim's
+blending and require the window's `blendMode="avg"`; copies disable blending for the draw.
+
+`width` and `height` follow the rules for `import_gl_target()`, with the same error messages.
 The adapter checks them before it creates the host texture.
 
-Close the target, then the renderer, then the window. If the window closes first, `close()`
-makes no host OpenGL calls and releases the Filament target; `Renderer.close()` then also
-succeeds. The host objects go away with the window's context. `SharedTarget` supports `with`
-and closes on exit.
+`renderer.close()` closes the renderer's host targets first, as `close()` on each would, while
+the window's context can still be made current. So only the window must close last: close the
+renderer, or each target, before the window. If the window closes first, `close()` makes no host
+OpenGL calls and releases the Filament target; `Renderer.close()` then also succeeds. The host
+objects go away with the window's context.
 
 A target that is garbage-collected without `close()` emits `ResourceWarning`. Collection runs at
 arbitrary points, often while another window's context is current. It therefore never makes
 another context current, and it deletes host objects only if the target's own context is
 current. Otherwise the host objects stay until their window closes. The same rule applies to the
-mask and shader of a PsychoPy stimulus from `as_psychopy_texture()`.
+mask of a PsychoPy stimulus from `create_image_stim()`. The stimuli of a window share one shader
+program.
 
 ## Sample model
 

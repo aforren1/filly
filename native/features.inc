@@ -7,7 +7,8 @@ auto light_instance(const std::shared_ptr<detail::Resource>& owner, uint32_t ent
         throw FillyError("Light is closed");
     auto& manager = owner->state->engine->getLightManager();
     auto instance = manager.getInstance(utils::Entity::import(entity));
-    if (!instance) throw FillyError("Light is no longer available");
+    // An imported light that close() removed keeps its entity and loses only the component.
+    if (!instance) throw FillyError("Light is closed");
     return instance;
 }
 void nonnegative(float value) {
@@ -18,10 +19,28 @@ void light_color(Vec3 value) {
     finite(value);
     for (float v : value) if (v < 0 || v > 1) throw std::invalid_argument("Color must be in [0, 1]");
 }
-void cone(float inner, float outer) {
-    finite(inner); finite(outer);
-    if (inner < 0 || outer <= 0 || inner > outer || outer >= 1.5707964f)
-        throw std::invalid_argument("Spot half-angles require 0 <= inner <= outer < pi/2 radians");
+// Validates half-angles in degrees and returns them in radians.
+std::array<float, 2> cone_radians(std::array<float, 2> degrees) {
+    finite(degrees);
+    const auto [inner, outer] = degrees;
+    if (inner < 0 || outer <= 0 || inner > outer || outer >= 90)
+        throw std::invalid_argument("Spot cone half-angles require 0 <= inner <= outer < 90 degrees");
+    constexpr float radians = float(3.141592653589793 / 180.0);
+    return {inner * radians, outer * radians};
+}
+bool positioned(f::LightManager& manager, f::LightManager::Instance i) { return !manager.isDirectional(i); }
+bool aimed(f::LightManager& manager, f::LightManager::Instance i) { return !manager.isPointLight(i); }
+// Where filly keeps a spot light's cone in degrees, so that it reads back as it was set:
+// LightData for scene lights, ModelData for imported ones.
+std::array<float, 2>& cone_storage(const std::shared_ptr<detail::Resource>& owner, uint32_t entity) {
+    if (auto light = detail::resource_cast<detail::LightData>(owner)) return light->cone_deg;
+    auto model = detail::resource_cast<detail::ModelData>(owner);
+    const auto found = std::find(model->lights.begin(), model->lights.end(), utils::Entity::import(entity));
+    return model->spot_cones[size_t(found - model->lights.begin())];
+}
+void shadow_bias(float value, const char* name) {
+    finite(value);
+    if (value < 0) throw std::invalid_argument(std::string(name) + " must be nonnegative");
 }
 }
 
@@ -70,60 +89,109 @@ Vec3 Light::color() const { auto i = light_instance(owner_, entity_); return vec
 void Light::set_color(Vec3 value) { auto i = light_instance(owner_, entity_); light_color(value); owner_->state->engine->getLightManager().setColor(i, vec(value)); }
 float Light::intensity() const { auto i = light_instance(owner_, entity_); return owner_->state->engine->getLightManager().getIntensity(i); }
 void Light::set_intensity(float value) { auto i = light_instance(owner_, entity_); nonnegative(value); owner_->state->engine->getLightManager().setIntensityCandela(i, value); }
-Vec3 Light::position() const { auto i = light_instance(owner_, entity_); return vec(owner_->state->engine->getLightManager().getPosition(i)); }
-void Light::set_position(Vec3 value) { auto i = light_instance(owner_, entity_); finite(value); owner_->state->engine->getLightManager().setPosition(i, vec(value)); }
-Vec3 Light::direction() const { auto i = light_instance(owner_, entity_); return vec(owner_->state->engine->getLightManager().getDirection(i)); }
-void Light::set_direction(Vec3 value) {
-    auto i = light_instance(owner_, entity_); finite(value);
-    if (length(vec(value)) < 1e-6f) throw std::invalid_argument("Direction must be nonzero");
-    owner_->state->engine->getLightManager().setDirection(i, normalize(vec(value)));
+std::optional<Vec3> Light::position() const {
+    auto i = light_instance(owner_, entity_); auto& manager = owner_->state->engine->getLightManager();
+    if (!positioned(manager, i)) return std::nullopt;
+    return vec(manager.getPosition(i));
 }
-float Light::range() const { auto i = light_instance(owner_, entity_); return owner_->state->engine->getLightManager().getFalloff(i); }
+void Light::set_position(Vec3 value) {
+    auto i = light_instance(owner_, entity_); auto& manager = owner_->state->engine->getLightManager();
+    if (!positioned(manager, i)) throw std::invalid_argument("Position applies only to point and spot lights");
+    finite(value);
+    manager.setPosition(i, vec(value));
+}
+std::optional<Vec3> Light::direction() const {
+    auto i = light_instance(owner_, entity_); auto& manager = owner_->state->engine->getLightManager();
+    if (!aimed(manager, i)) return std::nullopt;
+    return vec(manager.getDirection(i));
+}
+void Light::set_direction(Vec3 value) {
+    auto i = light_instance(owner_, entity_); auto& manager = owner_->state->engine->getLightManager();
+    if (!aimed(manager, i)) throw std::invalid_argument("Direction applies only to directional, sun, and spot lights");
+    finite(value);
+    if (length(vec(value)) < 1e-6f) throw std::invalid_argument("Direction must be nonzero");
+    manager.setDirection(i, normalize(vec(value)));
+}
+std::optional<float> Light::range() const {
+    auto i = light_instance(owner_, entity_); auto& manager = owner_->state->engine->getLightManager();
+    if (!positioned(manager, i)) return std::nullopt;
+    return manager.getFalloff(i);
+}
 void Light::set_range(float value) {
-    auto i = light_instance(owner_, entity_); finite(value);
-    const auto kind = type();
-    if (value <= 0 || (kind != "point" && kind != "spot")) throw std::invalid_argument("Range requires a point or spot light and a positive radius");
-    owner_->state->engine->getLightManager().setFalloff(i, value);
+    auto i = light_instance(owner_, entity_); auto& manager = owner_->state->engine->getLightManager();
+    if (!positioned(manager, i)) throw std::invalid_argument("Range applies only to point and spot lights");
+    finite(value);
+    if (value <= 0) throw std::invalid_argument("Range must be positive");
+    manager.setFalloff(i, value);
+}
+std::optional<std::array<float, 2>> Light::cone_deg() const {
+    auto i = light_instance(owner_, entity_);
+    if (!owner_->state->engine->getLightManager().isSpotLight(i)) return std::nullopt;
+    return cone_storage(owner_, entity_);
+}
+void Light::set_cone_deg(std::array<float, 2> value) {
+    auto i = light_instance(owner_, entity_); auto& manager = owner_->state->engine->getLightManager();
+    if (!manager.isSpotLight(i)) throw std::invalid_argument("Cone applies only to spot lights");
+    const auto radians = cone_radians(value);
+    // glTF keeps candela constant when the cone changes. gltfio imports spots as
+    // FOCUSED_SPOT, which would otherwise keep luminous power constant instead.
+    const float candela = manager.getIntensity(i);
+    manager.setSpotLightCone(i, radians[0], radians[1]);
+    manager.setIntensityCandela(i, candela);
+    cone_storage(owner_, entity_) = value;
 }
 bool Light::casts_shadows() const { auto i = light_instance(owner_, entity_); return owner_->state->engine->getLightManager().isShadowCaster(i); }
 void Light::set_casts_shadows(bool value) {
     auto i = light_instance(owner_, entity_);
     owner_->state->engine->getLightManager().setShadowCaster(i, value);
 }
-void Light::set_shadow_options(uint32_t map_size, float constant_bias, float normal_bias) {
+uint32_t Light::shadow_map_size() const {
     auto i = light_instance(owner_, entity_);
-    nonnegative(constant_bias); nonnegative(normal_bias);
-    if (map_size < 8 || map_size > 4096 || (map_size & (map_size-1)))
+    return owner_->state->engine->getLightManager().getShadowOptions(i).mapSize;
+}
+void Light::set_shadow_map_size(uint32_t value) {
+    auto i = light_instance(owner_, entity_);
+    if (value < 8 || value > 4096 || (value & (value - 1)))
         throw std::invalid_argument("Shadow map size must be a power of two in [8, 4096]");
     auto& manager = owner_->state->engine->getLightManager();
     auto options = manager.getShadowOptions(i);
-    options.mapSize = map_size;
-    options.constantBias = constant_bias;
-    options.normalBias = normal_bias;
+    options.mapSize = value;
     manager.setShadowOptions(i, options);
 }
-void Light::set_spot_cone(float inner, float outer) {
-    auto i = light_instance(owner_, entity_); cone(inner, outer);
-    if (type() != "spot") throw std::invalid_argument("Cone applies only to spot lights");
-    auto& manager = owner_->state->engine->getLightManager();
-    // glTF keeps candela constant when the cone changes. gltfio imports spots as
-    // FOCUSED_SPOT, which would otherwise keep luminous power constant instead.
-    const float candela = manager.getIntensity(i);
-    manager.setSpotLightCone(i, inner, outer);
-    manager.setIntensityCandela(i, candela);
+float Light::shadow_constant_bias() const {
+    auto i = light_instance(owner_, entity_);
+    return owner_->state->engine->getLightManager().getShadowOptions(i).constantBias;
 }
-Light Scene::add_sun_light(Vec3 direction, float intensity, Vec3 color, float angular_radius,
+void Light::set_shadow_constant_bias(float value) {
+    auto i = light_instance(owner_, entity_); shadow_bias(value, "Shadow constant bias");
+    auto& manager = owner_->state->engine->getLightManager();
+    auto options = manager.getShadowOptions(i);
+    options.constantBias = value;
+    manager.setShadowOptions(i, options);
+}
+float Light::shadow_normal_bias() const {
+    auto i = light_instance(owner_, entity_);
+    return owner_->state->engine->getLightManager().getShadowOptions(i).normalBias;
+}
+void Light::set_shadow_normal_bias(float value) {
+    auto i = light_instance(owner_, entity_); shadow_bias(value, "Shadow normal bias");
+    auto& manager = owner_->state->engine->getLightManager();
+    auto options = manager.getShadowOptions(i);
+    options.normalBias = value;
+    manager.setShadowOptions(i, options);
+}
+Light Scene::add_sun_light(Vec3 direction, float intensity, Vec3 color, float angular_radius_deg,
                            float halo_size, float halo_falloff) {
     data_->check(); finite(direction); nonnegative(intensity); light_color(color);
-    nonnegative(halo_size); nonnegative(halo_falloff); finite(angular_radius);
+    nonnegative(halo_size); nonnegative(halo_falloff); finite(angular_radius_deg);
     if (length(vec(direction)) < 1e-6f) throw std::invalid_argument("Direction must be nonzero");
     // Filament clamps the radius to this range; reject instead of rendering a different disc.
-    if (angular_radius < 0.25f || angular_radius > 20.0f)
-        throw std::invalid_argument("Sun angular radius must be in [0.25, 20] degrees");
+    if (angular_radius_deg < 0.25f || angular_radius_deg > 20.0f)
+        throw std::invalid_argument("Sun angular_radius_deg must be in [0.25, 20]");
     auto entity = utils::EntityManager::get().create();
     auto result = f::LightManager::Builder(f::LightManager::Type::SUN)
         .direction(normalize(vec(direction))).color(vec(color)).intensity(intensity)
-        .sunAngularRadius(angular_radius).sunHaloSize(halo_size).sunHaloFalloff(halo_falloff)
+        .sunAngularRadius(angular_radius_deg).sunHaloSize(halo_size).sunHaloFalloff(halo_falloff)
         .castShadows(false).build(*data_->state->engine, entity);
     if (result != f::LightManager::Builder::Success) { utils::EntityManager::get().destroy(entity); throw FillyError("Could not create sun light"); }
     return Light(detail::own_light(data_, entity), entity.getId());
@@ -138,16 +206,20 @@ Light Scene::add_point_light(Vec3 position, float intensity, Vec3 color, float r
     if (result != f::LightManager::Builder::Success) { utils::EntityManager::get().destroy(entity); throw FillyError("Could not create point light"); }
     return Light(detail::own_light(data_, entity), entity.getId());
 }
-Light Scene::add_spot_light(Vec3 position, Vec3 direction, float intensity, Vec3 color, float range, float inner, float outer) {
-    data_->check(); finite(position); finite(direction); nonnegative(intensity); light_color(color); finite(range); cone(inner, outer);
+Light Scene::add_spot_light(Vec3 position, Vec3 direction, float intensity, Vec3 color, float range,
+                            std::array<float, 2> cone_deg) {
+    data_->check(); finite(position); finite(direction); nonnegative(intensity); light_color(color); finite(range);
+    const auto cone = cone_radians(cone_deg);
     if (range <= 0 || length(vec(direction)) < 1e-6f) throw std::invalid_argument("Require positive range and nonzero direction");
     auto entity = utils::EntityManager::get().create();
     // SPOT keeps candela, not luminous power, when the cone changes, as imported glTF spots do.
     auto result = f::LightManager::Builder(f::LightManager::Type::SPOT)
         .position(vec(position)).direction(normalize(vec(direction))).intensityCandela(intensity)
-        .color(vec(color)).falloff(range).spotLightCone(inner, outer).build(*data_->state->engine, entity);
+        .color(vec(color)).falloff(range).spotLightCone(cone[0], cone[1]).build(*data_->state->engine, entity);
     if (result != f::LightManager::Builder::Success) { utils::EntityManager::get().destroy(entity); throw FillyError("Could not create spot light"); }
-    return Light(detail::own_light(data_, entity), entity.getId());
+    auto owner = detail::own_light(data_, entity);
+    detail::resource_cast<detail::LightData>(owner)->cone_deg = cone_deg;
+    return Light(owner, entity.getId());
 }
 bool Model::closed() const { data_->state->check_thread(); return !data_->asset || !data_->state->engine; }
 void Model::close() {
@@ -203,8 +275,12 @@ int64_t carrier(const std::vector<utils::Entity>& nodes, const auto& sources,
 }
 std::vector<Light> Model::lights() const {
     data_->check();
+    // Closed lights are left out, as a scene's closed lights leave the scene. model.light(key)
+    // still returns them, closed, because their node remains.
+    auto& manager = data_->state->engine->getLightManager();
     std::vector<Light> result;
-    for (const auto entity : data_->lights) result.emplace_back(data_, entity.getId());
+    for (const auto entity : data_->lights)
+        if (manager.getInstance(entity)) result.emplace_back(data_, entity.getId());
     return result;
 }
 Light Model::light(const std::string& name) const {
@@ -465,6 +541,9 @@ void Scene::set_output_path(const std::string& value) {
         if (data_->masked)
             throw std::invalid_argument("output_path 'direct' cannot render alphaMode MASK materials, "
                                         "and a model in the scene has one");
+        if (data_->refractive)
+            throw std::invalid_argument("output_path 'direct' cannot render screen-space refraction, "
+                                        "and a model in the scene has transmission or volume materials");
     }
     data_->direct = direct;
     detail::update_postprocessing(*data_);
@@ -494,11 +573,6 @@ void Scene::set_msaa(int value) {
 }
 bool Scene::shadows() const { data_->check(); return data_->shadows; }
 void Scene::set_shadows(bool value) { data_->check(); data_->view->setShadowingEnabled(value); data_->shadows = value; }
-bool Scene::refraction() const { data_->check(); return data_->refraction; }
-void Scene::set_refraction(bool value) {
-    data_->check(); detail::require_exact(*data_, value, "refraction");
-    data_->view->setScreenSpaceRefractionEnabled(value); data_->refraction = value;
-}
 bool Scene::transparent() const { data_->check(); return data_->transparent; }
 void Scene::set_transparent(bool value) {
     data_->check(); detail::require_exact(*data_, value, "transparent");
@@ -533,53 +607,108 @@ void Scene::set_bloom(bool value) {
     data_->bloom = value;
     detail::update_postprocessing(*data_);
 }
-void Scene::clear_environment() {
-    data_->check(); auto& engine = *data_->state->engine;
-    data_->scene->setIndirectLight(nullptr);
-    data_->scene->setSkybox(nullptr);
-    auto* previous_irradiance = data_->irradiance;
-    data_->irradiance = nullptr;
-    data_->pending_irradiance.reset();
+std::optional<Environment> Scene::environment() const {
+    data_->check();
+    if (!data_->environment) return std::nullopt;
+    return Environment(data_->environment);
+}
+void Scene::set_environment(const Environment* environment) {
+    data_->check();
+    if (!environment) {
+        if (!data_->environment) return;
+        detail::detach_environment(*data_);
+        detail::update_diffuse_environment(*data_);
+        return;
+    }
+    const auto& shared = environment->data_;
+    if (shared->state != data_->state) throw std::invalid_argument("Environment must belong to the same renderer");
+    shared->check();
+    if (shared == data_->environment) return;
+    auto& engine = *data_->state->engine;
+    f::IndirectLight::Builder light;
+    light.reflections(shared->reflections).intensity(data_->environment_intensity)
+        .rotation(m::mat3f::rotation(data_->environment_rotation_deg * 0.01745329252f, m::float3{0, 1, 0}));
+    if (shared->bands) light.irradiance(3, shared->bands->data());
+    else light.irradiance(shared->irradiance);
+    auto* indirect = light.build(engine);
+    auto* skybox = f::Skybox::Builder().environment(shared->skybox ? shared->skybox : shared->reflections)
+        .showSun(true).build(engine);
+    detail::detach_environment(*data_);
+    data_->environment = shared;
+    data_->environment_light = indirect;
+    data_->skybox = skybox;
+    data_->scene->setIndirectLight(indirect);
+    data_->scene->setSkybox(data_->environment_visible ? skybox : nullptr);
     detail::update_diffuse_environment(*data_);
-    if (data_->environment) engine.destroy(data_->environment);
-    if (data_->skybox) engine.destroy(data_->skybox);
-    if (data_->skybox_texture) engine.destroy(data_->skybox_texture);
-    if (data_->reflections) engine.destroy(data_->reflections);
-    if (previous_irradiance) engine.destroy(previous_irradiance);
-    data_->environment = nullptr; data_->reflections = data_->irradiance = nullptr;
-    data_->skybox = nullptr; data_->skybox_texture = nullptr;
 }
 bool Scene::environment_visible() const { data_->check(); return data_->environment_visible; }
 void Scene::set_environment_visible(bool value) {
     data_->check(); data_->environment_visible = value;
     data_->scene->setSkybox(value ? data_->skybox : nullptr);
 }
-float Scene::environment_rotation() const { data_->check(); return data_->environment_rotation; }
-void Scene::set_environment_rotation(float value) {
+float Scene::environment_rotation_deg() const { data_->check(); return data_->environment_rotation_deg; }
+void Scene::set_environment_rotation_deg(float value) {
     data_->check(); finite(value);
-    if (!data_->environment) throw FillyError("Load an environment first");
-    data_->environment->setRotation(m::mat3f::rotation(value * 0.01745329252f, m::float3{0,1,0}));
-    data_->environment_rotation = value;
+    data_->environment_rotation_deg = value;
+    if (data_->environment_light)
+        data_->environment_light->setRotation(m::mat3f::rotation(value * 0.01745329252f, m::float3{0, 1, 0}));
     detail::update_diffuse_environment(*data_);
 }
-float Scene::environment_intensity() const { data_->check(); return data_->environment ? data_->environment->getIntensity() : 0; }
+float Scene::environment_intensity() const { data_->check(); return data_->environment_intensity; }
 void Scene::set_environment_intensity(float value) {
     data_->check(); nonnegative(value);
-    if (!data_->environment) throw FillyError("Load an environment first");
-    data_->environment->setIntensity(value);
+    data_->environment_intensity = value;
+    if (data_->environment_light) data_->environment_light->setIntensity(value);
     detail::update_diffuse_environment(*data_);
 }
-void Scene::set_environment(const float* pixels, size_t count, uint32_t width, uint32_t height, float intensity, float rotation) {
-    data_->check(); nonnegative(intensity); finite(rotation);
+
+Environment::Environment(std::shared_ptr<detail::EnvironmentData> data) : data_(std::move(data)) {}
+bool Environment::same(const Environment& other) const { return data_ == other.data_; }
+uintptr_t Environment::key() const { return reinterpret_cast<uintptr_t>(data_.get()); }
+bool Environment::closed() const { data_->state->check_thread(); return !data_->reflections || !data_->state->engine; }
+void Environment::close() {
+    data_->state->check_thread();
+    if (!data_->reflections || !data_->state->engine) return;
+    data_->release();
+    data_->state->engine->flush();
+}
+
+namespace {
+f::Texture* uniform_cube(f::Engine& engine, Vec3 radiance) {
+    auto* texture = f::Texture::Builder().width(1).height(1).levels(1)
+        .sampler(f::Texture::Sampler::SAMPLER_CUBEMAP).format(f::Texture::InternalFormat::R11F_G11F_B10F)
+        .usage(f::Texture::Usage::SAMPLEABLE | f::Texture::Usage::UPLOADABLE).build(engine);
+    // Six faces of one RGB float pixel each, in face order.
+    auto* upload = new std::vector<float>();
+    for (int face = 0; face < 6; ++face) upload->insert(upload->end(), radiance.begin(), radiance.end());
+    texture->setImage(engine, 0, 0, 0, 0, 1, 1, 6, f::Texture::PixelBufferDescriptor(
+        upload->data(), upload->size() * sizeof(float), f::Texture::Format::RGB, f::Texture::Type::FLOAT,
+        [](void*, size_t, void* p) { delete static_cast<std::vector<float>*>(p); }, upload));
+    return texture;
+}
+}
+Environment Renderer::create_environment(const float* pixels, size_t count, uint32_t width, uint32_t height) {
+    state_->check();
     if (height < 2 || height > 4096 || width != height * 2 || count != size_t(width) * height * 3)
         throw std::invalid_argument("Environment must be a 2:1 RGB panorama, height 2..4096");
     for (size_t i = 0; i < count; ++i) nonnegative(pixels[i]);
-    auto& engine = *data_->state->engine;
+    auto& engine = *state_->engine;
+    auto data = state_->track(std::make_shared<detail::EnvironmentData>(state_));
     bool uniform = true;
     for (size_t i = 3; i < count && uniform; ++i) uniform = pixels[i] == pixels[i % 3];
     if (uniform) {
-        set_uniform_environment({pixels[0], pixels[1], pixels[2]}, intensity, rotation);
-        return;
+        // A constant panorama needs no prefiltering: its cubemap, its prefiltered reflections,
+        // and its irradiance are all the same constant. The prefilter path computes weighted
+        // averages of the constant and stores them in R11F_G11F_B10F, which reproduces the stored
+        // constant; 1 x 1 cubemaps of the same format, uploaded the same way as the panorama, hold
+        // the same value. This saves the prefilter's shader compilation (about 260 ms in Chrome,
+        // 80 ms on the desktop, once per renderer) and its GPU work (about 50 ms on the desktop).
+        const Vec3 radiance{pixels[0], pixels[1], pixels[2]};
+        data->skybox = uniform_cube(engine, radiance);
+        data->reflections = uniform_cube(engine, radiance);
+        data->irradiance = uniform_cube(engine, radiance);
+        detail::flush_and_wait(engine);
+        return Environment(data);
     }
     auto* source = f::Texture::Builder().width(width).height(height).levels(0xff)
         .sampler(f::Texture::Sampler::SAMPLER_2D).format(f::Texture::InternalFormat::R11F_G11F_B10F)
@@ -591,58 +720,16 @@ void Scene::set_environment(const float* pixels, size_t count, uint32_t width, u
         f::Texture::Format::RGB, f::Texture::Type::FLOAT,
         [](void*, size_t, void* p) { delete static_cast<std::vector<float>*>(p); }, upload));
     source->generateMipmaps(engine);
-    auto& prefilter = data_->state->prefilter;
+    auto& prefilter = state_->prefilter;
     if (!prefilter) prefilter = std::make_unique<detail::State::Prefilter>(engine);
-    auto* cube = prefilter->to_cube()(source);
-    auto* reflections = prefilter->specular()(cube);
-    auto* irradiance = prefilter->irradiance()(cube);
-    auto* environment = f::IndirectLight::Builder().reflections(reflections).irradiance(irradiance)
-        .intensity(intensity).rotation(m::mat3f::rotation(rotation * 0.01745329252f, m::float3{0,1,0})).build(engine);
-    auto* skybox = f::Skybox::Builder().environment(cube).showSun(true).build(engine);
-    clear_environment();
-    data_->environment = environment; data_->reflections = reflections; data_->irradiance = irradiance;
-    data_->skybox = skybox; data_->skybox_texture = cube;
-    data_->scene->setIndirectLight(environment);
-    data_->scene->setSkybox(data_->environment_visible ? skybox : nullptr);
-    data_->environment_rotation = rotation;
-    detail::update_diffuse_environment(*data_);
+    // The unfiltered cubemap stays as the skybox, so visibility and rotation changes do not
+    // filter again.
+    data->skybox = prefilter->to_cube()(source);
+    data->reflections = prefilter->specular()(data->skybox);
+    data->irradiance = prefilter->irradiance()(data->skybox);
     engine.destroy(source);
     detail::flush_and_wait(engine);
-}
-// A constant panorama needs no prefiltering: its cubemap, its prefiltered reflections, and its
-// irradiance are all the same constant. The prefilter path computes weighted averages of the
-// constant and stores them in R11F_G11F_B10F, which reproduces the stored constant; 1 x 1
-// cubemaps of the same format, uploaded the same way as the panorama, hold the same value. This
-// saves the prefilter's shader compilation (about 260 ms in Chrome, 80 ms on the desktop, once
-// per renderer) and its GPU work (about 50 ms on the desktop for each environment).
-void Scene::set_uniform_environment(Vec3 radiance, float intensity, float rotation) {
-    auto& engine = *data_->state->engine;
-    auto cube = [&] {
-        auto* texture = f::Texture::Builder().width(1).height(1).levels(1)
-            .sampler(f::Texture::Sampler::SAMPLER_CUBEMAP).format(f::Texture::InternalFormat::R11F_G11F_B10F)
-            .usage(f::Texture::Usage::SAMPLEABLE | f::Texture::Usage::UPLOADABLE).build(engine);
-        // Six faces of one RGB float pixel each, in face order.
-        auto* upload = new std::vector<float>();
-        for (int face = 0; face < 6; ++face) upload->insert(upload->end(), radiance.begin(), radiance.end());
-        texture->setImage(engine, 0, 0, 0, 0, 1, 1, 6, f::Texture::PixelBufferDescriptor(
-            upload->data(), upload->size() * sizeof(float), f::Texture::Format::RGB, f::Texture::Type::FLOAT,
-            [](void*, size_t, void* p) { delete static_cast<std::vector<float>*>(p); }, upload));
-        return texture;
-    };
-    auto* sky = cube();
-    auto* reflections = cube();
-    auto* irradiance = cube();
-    auto* environment = f::IndirectLight::Builder().reflections(reflections).irradiance(irradiance)
-        .intensity(intensity).rotation(m::mat3f::rotation(rotation * 0.01745329252f, m::float3{0,1,0})).build(engine);
-    auto* skybox = f::Skybox::Builder().environment(sky).showSun(true).build(engine);
-    clear_environment();
-    data_->environment = environment; data_->reflections = reflections; data_->irradiance = irradiance;
-    data_->skybox = skybox; data_->skybox_texture = sky;
-    data_->scene->setIndirectLight(environment);
-    data_->scene->setSkybox(data_->environment_visible ? skybox : nullptr);
-    data_->environment_rotation = rotation;
-    detail::update_diffuse_environment(*data_);
-    detail::flush_and_wait(engine);
+    return Environment(data);
 }
 namespace {
 std::vector<uint8_t> read_file(const std::string& path, const char* what) {
@@ -719,55 +806,44 @@ f::Texture* ktx_texture(f::Engine& engine, std::unique_ptr<image::Ktx1Bundle> bu
     return texture;
 }
 }
-void Scene::load_environment_ktx(const std::string& ibl_path, const std::string& skybox_path,
-                                 float intensity, float rotation) {
-    data_->check(); nonnegative(intensity); finite(rotation);
-    auto& engine = *data_->state->engine;
+Environment Renderer::load_environment_ktx(const std::string& ibl_path, const std::string& skybox_path) {
+    state_->check();
+    auto& engine = *state_->engine;
     auto ibl = read_ktx_cubemap(ibl_path, "IBL");
-    m::float3 bands[9];
+    std::array<m::float3, 9> bands;
     // cmgen stores 3-band irradiance coefficients, already scaled for IndirectLight.
-    if (!ibl->getSphericalHarmonics(bands))
+    if (!ibl->getSphericalHarmonics(bands.data()))
         throw AssetError("IBL KTX has no 'sh' metadata; create it with cmgen --format=ktx: " + ibl_path);
     for (const auto& band : bands) finite(std::array<float, 3>{band.x, band.y, band.z});
     std::unique_ptr<image::Ktx1Bundle> sky;
     if (!skybox_path.empty()) sky = read_ktx_cubemap(skybox_path, "Skybox");
     // Only the custom diffuse-transmission material reads an irradiance cubemap, so its level 0
     // waits on the CPU until a material needs it (see update_diffuse_environment()).
-    std::unique_ptr<detail::SceneData::PendingIrradiance> pending;
+    std::unique_ptr<detail::EnvironmentData::PendingIrradiance> pending;
     const auto& info = ibl->getInfo();
     const auto format = ktxreader::Ktx1Reader::toTextureFormat(info);
     if (f::Texture::isTextureFormatMipmappable(engine, format)) {
         uint8_t* faces = nullptr;
         uint32_t face_size = 0;
         ibl->getBlob({0, 0, 0}, &faces, &face_size);
-        pending = std::make_unique<detail::SceneData::PendingIrradiance>();
+        pending = std::make_unique<detail::EnvironmentData::PendingIrradiance>();
         pending->faces.assign(faces, faces + size_t(face_size) * 6);
         pending->size = info.pixelWidth;
         pending->format = format;
         pending->pixels = ktxreader::Ktx1Reader::toPixelDataFormat(info);
         pending->type = ktxreader::Ktx1Reader::toPixelDataType(info);
     }
-    f::Texture* reflections = ktx_texture(engine, std::move(ibl), ibl_path);
-    f::Texture* sky_texture = nullptr;
-    if (sky) {
-        try { sky_texture = ktx_texture(engine, std::move(sky), skybox_path); }
-        catch (...) { engine.destroy(reflections); throw; }
-    }
-    auto* environment = f::IndirectLight::Builder().reflections(reflections).irradiance(3, bands)
-        .intensity(intensity).rotation(m::mat3f::rotation(rotation * 0.01745329252f, m::float3{0,1,0})).build(engine);
-    // Without a skybox file, level 0 of the IBL is the unfiltered environment at IBL resolution.
-    auto* skybox = f::Skybox::Builder().environment(sky_texture ? sky_texture : reflections).showSun(true).build(engine);
-    clear_environment();
-    data_->environment = environment; data_->reflections = reflections; data_->pending_irradiance = std::move(pending);
-    data_->skybox = skybox; data_->skybox_texture = sky_texture;
-    data_->scene->setIndirectLight(environment);
-    data_->scene->setSkybox(data_->environment_visible ? skybox : nullptr);
-    data_->environment_rotation = rotation;
-    detail::update_diffuse_environment(*data_);
+    auto data = state_->track(std::make_shared<detail::EnvironmentData>(state_));
+    // The data destroys what was created so far if a later step throws.
+    data->reflections = ktx_texture(engine, std::move(ibl), ibl_path);
+    if (sky) data->skybox = ktx_texture(engine, std::move(sky), skybox_path);
+    data->bands = bands;
+    data->pending_irradiance = std::move(pending);
     detail::flush_and_wait(engine);
+    return Environment(data);
 }
-void Scene::load_environment(const std::string& path, float intensity, float rotation) {
-    data_->check();
+Environment Renderer::load_environment(const std::string& path) {
+    state_->check();
     std::ifstream stream(std::filesystem::u8path(path), std::ios::binary | std::ios::ate);
     if (!stream) throw AssetError("Could not open environment: " + path);
     const auto size = stream.tellg();
@@ -779,12 +855,12 @@ void Scene::load_environment(const std::string& path, float intensity, float rot
     if (!decoded) throw AssetError("Could not decode environment (use Radiance HDR, PNG, or JPEG)");
     std::unique_ptr<float, decltype(&stbi_image_free)> owner(decoded, stbi_image_free);
     if (height < 2 || height > 4096 || width != 2*height) throw AssetError("Environment must be a 2:1 panorama with height 2..4096");
-    set_environment(decoded, size_t(width) * height * 3, width, height, intensity, rotation);
+    return create_environment(decoded, size_t(width) * height * 3, uint32_t(width), uint32_t(height));
 }
 float Camera::focus_distance() const { data_->check(); return data_->camera->getFocusDistance(); }
 void Camera::set_focus_distance(float value) {
     data_->check(); finite(value);
-    if (value <= 0) throw std::invalid_argument("Focus distance must be positive");
+    if (value < 0) throw std::invalid_argument("Focus distance must be nonnegative");
     data_->camera->setFocusDistance(value);
 }
 float Camera::aperture() const { data_->check(); return data_->aperture; }
@@ -805,11 +881,23 @@ void Scene::set_fog(bool value) {
         data_->view->setFogOptions(off);
     }
 }
-void Scene::set_fog_options(Vec3 color, float density, float start) {
-    data_->check(); light_color(color); nonnegative(density); nonnegative(start);
-    data_->fog_color = color;
-    data_->fog_density = density;
-    data_->fog_start = start;
+// The render applies fog (see apply_fog()); a NaN in fog_applied makes it send the options again.
+Vec3 Scene::fog_color() const { data_->check(); return data_->fog_color; }
+void Scene::set_fog_color(Vec3 value) {
+    data_->check(); light_color(value);
+    data_->fog_color = value;
+    data_->fog_applied = {NAN, NAN, NAN};
+}
+float Scene::fog_density() const { data_->check(); return data_->fog_density; }
+void Scene::set_fog_density(float value) {
+    data_->check(); nonnegative(value);
+    data_->fog_density = value;
+    data_->fog_applied = {NAN, NAN, NAN};
+}
+float Scene::fog_start() const { data_->check(); return data_->fog_start; }
+void Scene::set_fog_start(float value) {
+    data_->check(); nonnegative(value);
+    data_->fog_start = value;
     data_->fog_applied = {NAN, NAN, NAN};
 }
 bool Scene::depth_of_field() const { data_->check(); return data_->depth_of_field; }
@@ -833,15 +921,37 @@ void Scene::set_vignette(bool value) {
     data_->vignette = value;
     detail::update_postprocessing(*data_);
 }
-void Scene::set_vignette_options(float midpoint, float roundness, float feather, Vec3 color) {
-    data_->check(); unit_interval(midpoint); unit_interval(roundness); light_color(color); finite(feather);
+// The view keeps the vignette options, which start at Filament's defaults.
+namespace {
+template <class Change> void change_vignette(detail::SceneData& data, Change change) {
+    auto options = data.view->getVignetteOptions();
+    change(options);
+    data.view->setVignetteOptions(options);
+}
+}
+float Scene::vignette_midpoint() const { data_->check(); return data_->view->getVignetteOptions().midPoint; }
+void Scene::set_vignette_midpoint(float value) {
+    data_->check(); unit_interval(value);
+    change_vignette(*data_, [&](f::VignetteOptions& options) { options.midPoint = value; });
+}
+float Scene::vignette_roundness() const { data_->check(); return data_->view->getVignetteOptions().roundness; }
+void Scene::set_vignette_roundness(float value) {
+    data_->check(); unit_interval(value);
+    change_vignette(*data_, [&](f::VignetteOptions& options) { options.roundness = value; });
+}
+float Scene::vignette_feather() const { data_->check(); return data_->view->getVignetteOptions().feather; }
+void Scene::set_vignette_feather(float value) {
+    data_->check(); finite(value);
     // Filament clamps feather to [0.05, 1]; reject values it would change.
-    if (feather < 0.05f || feather > 1) throw std::invalid_argument("Vignette feather must be in [0.05, 1]");
-    f::VignetteOptions options;
-    options.midPoint = midpoint;
-    options.roundness = roundness;
-    options.feather = feather;
-    options.color = {color[0], color[1], color[2], 1};
-    options.enabled = data_->vignette;
-    data_->view->setVignetteOptions(options);
+    if (value < 0.05f || value > 1) throw std::invalid_argument("Vignette feather must be in [0.05, 1]");
+    change_vignette(*data_, [&](f::VignetteOptions& options) { options.feather = value; });
+}
+Vec3 Scene::vignette_color() const {
+    data_->check();
+    const auto color = data_->view->getVignetteOptions().color;
+    return {color.r, color.g, color.b};
+}
+void Scene::set_vignette_color(Vec3 value) {
+    data_->check(); light_color(value);
+    change_vignette(*data_, [&](f::VignetteOptions& options) { options.color = {value[0], value[1], value[2], 1}; });
 }

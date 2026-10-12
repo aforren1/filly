@@ -79,12 +79,12 @@ def worker(asset, shared):
         options = {"shared_context":filly.current_gl_context()} if shared else {}
         with filly.Renderer(**options) as renderer:
             scene = renderer.create_scene()
-            camera = scene.create_camera()
+            camera = renderer.create_camera()
             camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
             camera.position = (0,0,3)
             camera.look_at((0,0,0))
             scene.camera = camera
-            target = (renderer.import_gl_texture(texture.value, width=32, height=32) if shared
+            target = (renderer.import_gl_target(texture.value, width=32, height=32) if shared
                       else renderer.create_render_target(width=32, height=32))
 
             def center():

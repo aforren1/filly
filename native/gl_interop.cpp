@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <string_view>
+#include <type_traits>
 
 namespace filly {
 uintptr_t current_gl_context() {
@@ -101,6 +102,187 @@ uint32_t create_host_texture(int64_t width, int64_t height) {
 void delete_host_texture(uint32_t texture) {
     const GLuint name = texture;
     if (name && current_gl_context()) glDeleteTextures(1, &name);
+}
+
+namespace detail {
+namespace {
+// GL 2.0 to 3.3 entry points of the host quad. opengl32.dll exports only GL 1.1.
+struct QuadGl {
+    unsigned (APIENTRY* create_shader)(unsigned);
+    void (APIENTRY* shader_source)(unsigned, int, const char* const*, const int*);
+    void (APIENTRY* compile_shader)(unsigned);
+    void (APIENTRY* get_shader)(unsigned, unsigned, int*);
+    void (APIENTRY* shader_log)(unsigned, int, int*, char*);
+    void (APIENTRY* delete_shader)(unsigned);
+    unsigned (APIENTRY* create_program)();
+    void (APIENTRY* attach_shader)(unsigned, unsigned);
+    void (APIENTRY* link_program)(unsigned);
+    void (APIENTRY* get_program)(unsigned, unsigned, int*);
+    void (APIENTRY* program_log)(unsigned, int, int*, char*);
+    void (APIENTRY* delete_program)(unsigned);
+    void (APIENTRY* use_program)(unsigned);
+    void (APIENTRY* gen_vertex_arrays)(int, unsigned*);
+    void (APIENTRY* bind_vertex_array)(unsigned);
+    void (APIENTRY* delete_vertex_arrays)(int, const unsigned*);
+    void (APIENTRY* active_texture)(unsigned);
+    void (APIENTRY* bind_sampler)(unsigned, unsigned);
+    void (APIENTRY* blend_func)(unsigned, unsigned, unsigned, unsigned);
+    void (APIENTRY* blend_equation)(unsigned, unsigned);
+};
+const QuadGl& quad_gl() {
+    static const QuadGl gl = [] {
+        QuadGl value;
+        auto load = [](auto& slot, const char* name) { slot = procedure<std::decay_t<decltype(slot)>>(name); };
+        load(value.create_shader, "glCreateShader");
+        load(value.shader_source, "glShaderSource");
+        load(value.compile_shader, "glCompileShader");
+        load(value.get_shader, "glGetShaderiv");
+        load(value.shader_log, "glGetShaderInfoLog");
+        load(value.delete_shader, "glDeleteShader");
+        load(value.create_program, "glCreateProgram");
+        load(value.attach_shader, "glAttachShader");
+        load(value.link_program, "glLinkProgram");
+        load(value.get_program, "glGetProgramiv");
+        load(value.program_log, "glGetProgramInfoLog");
+        load(value.delete_program, "glDeleteProgram");
+        load(value.use_program, "glUseProgram");
+        load(value.gen_vertex_arrays, "glGenVertexArrays");
+        load(value.bind_vertex_array, "glBindVertexArray");
+        load(value.delete_vertex_arrays, "glDeleteVertexArrays");
+        load(value.active_texture, "glActiveTexture");
+        load(value.bind_sampler, "glBindSampler");
+        load(value.blend_func, "glBlendFuncSeparate");
+        load(value.blend_equation, "glBlendEquationSeparate");
+        return value;
+    }();
+    return gl;
+}
+constexpr unsigned VERTEX_SHADER = 0x8B31, FRAGMENT_SHADER = 0x8B30, COMPILE_STATUS = 0x8B81,
+                   LINK_STATUS = 0x8B82, CURRENT_PROGRAM = 0x8B8D, VERTEX_ARRAY_BINDING = 0x85B5,
+                   ACTIVE_TEXTURE = 0x84E0, TEXTURE0 = 0x84C0, SAMPLER_BINDING = 0x8919,
+                   BLEND_SRC_RGB = 0x80C9, BLEND_DST_RGB = 0x80C8, BLEND_SRC_ALPHA = 0x80CB,
+                   BLEND_DST_ALPHA = 0x80CA, BLEND_EQUATION_RGB = 0x8009, BLEND_EQUATION_ALPHA = 0x883D,
+                   FUNC_ADD = 0x8006;
+// The quad covers the viewport; the texture's row 0 is its bottom row, as in OpenGL.
+constexpr const char* QUAD_VERTEX = R"(#version 330 core
+out vec2 uv;
+void main() {
+    uv = vec2(gl_VertexID & 1, gl_VertexID >> 1);
+    gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+constexpr const char* QUAD_FRAGMENT = R"(#version 330 core
+uniform sampler2D image;
+in vec2 uv;
+layout(location = 0) out vec4 color;
+void main() {
+    color = texture(image, uv);
+}
+)";
+unsigned compile(const QuadGl& gl, unsigned stage, const char* source) {
+    const unsigned shader = gl.create_shader(stage);
+    gl.shader_source(shader, 1, &source, nullptr);
+    gl.compile_shader(shader);
+    int status = 0;
+    gl.get_shader(shader, COMPILE_STATUS, &status);
+    if (!status) {
+        char log[1024] = {};
+        gl.shader_log(shader, sizeof(log), nullptr, log);
+        gl.delete_shader(shader);
+        throw InteropError(std::string("Could not compile the host quad shader: ") + log);
+    }
+    return shader;
+}
+}
+}
+
+HostQuad create_host_quad() {
+    if (!current_gl_context()) throw InteropError("Make the host OpenGL context current first");
+    const auto& gl = detail::quad_gl();
+    const unsigned vertex = detail::compile(gl, detail::VERTEX_SHADER, detail::QUAD_VERTEX);
+    unsigned fragment = 0;
+    try { fragment = detail::compile(gl, detail::FRAGMENT_SHADER, detail::QUAD_FRAGMENT); }
+    catch (...) { gl.delete_shader(vertex); throw; }
+    HostQuad quad;
+    quad.program = gl.create_program();
+    gl.attach_shader(quad.program, vertex);
+    gl.attach_shader(quad.program, fragment);
+    gl.link_program(quad.program);
+    // The program keeps the attached shaders until it is deleted.
+    gl.delete_shader(vertex);
+    gl.delete_shader(fragment);
+    int status = 0;
+    gl.get_program(quad.program, detail::LINK_STATUS, &status);
+    if (!status) {
+        char log[1024] = {};
+        gl.program_log(quad.program, sizeof(log), nullptr, log);
+        gl.delete_program(quad.program);
+        throw InteropError(std::string("Could not link the host quad program: ") + log);
+    }
+    // Core profiles draw only with a vertex array bound; the quad needs no attributes.
+    gl.gen_vertex_arrays(1, &quad.vertex_array);
+    return quad;
+}
+
+void draw_host_quad(const HostQuad& quad, uint32_t texture, int64_t x, int64_t y, int64_t width,
+                    int64_t height, bool blend) {
+    if (!quad.program || !quad.vertex_array) throw InteropError("The host quad is deleted");
+    const auto& gl = detail::quad_gl();
+    GLint program = 0, vertex_array = 0, active = 0, bound = 0, sampler = 0, viewport[4] = {};
+    GLint functions[4] = {}, equations[2] = {};
+    glGetIntegerv(detail::CURRENT_PROGRAM, &program);
+    glGetIntegerv(detail::VERTEX_ARRAY_BINDING, &vertex_array);
+    glGetIntegerv(detail::ACTIVE_TEXTURE, &active);
+    gl.active_texture(detail::TEXTURE0);
+    glGetIntegerv(TEXTURE_BINDING_2D, &bound);
+    glGetIntegerv(detail::SAMPLER_BINDING, &sampler);
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    const GLenum switches[] = {GL_BLEND, GL_DEPTH_TEST, GL_STENCIL_TEST, GL_CULL_FACE};
+    GLboolean enabled[4];
+    for (int i = 0; i < 4; ++i) enabled[i] = glIsEnabled(switches[i]);
+    if (blend) {
+        const GLenum names[] = {detail::BLEND_SRC_RGB, detail::BLEND_DST_RGB, detail::BLEND_SRC_ALPHA,
+                                detail::BLEND_DST_ALPHA};
+        for (int i = 0; i < 4; ++i) glGetIntegerv(names[i], &functions[i]);
+        glGetIntegerv(detail::BLEND_EQUATION_RGB, &equations[0]);
+        glGetIntegerv(detail::BLEND_EQUATION_ALPHA, &equations[1]);
+        glEnable(GL_BLEND);
+        // Filament writes premultiplied color: source-over is ONE, ONE_MINUS_SRC_ALPHA.
+        gl.blend_func(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        gl.blend_equation(detail::FUNC_ADD, detail::FUNC_ADD);
+    } else {
+        glDisable(GL_BLEND);
+    }
+    for (int i = 1; i < 4; ++i) glDisable(switches[i]);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    // A host sampler on unit 0 would override the texture's own filtering and wrapping.
+    gl.bind_sampler(0, 0);
+    glViewport(GLint(x), GLint(y), GLsizei(width), GLsizei(height));
+    gl.use_program(quad.program);
+    gl.bind_vertex_array(quad.vertex_array);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    gl.bind_vertex_array(vertex_array);
+    gl.use_program(program);
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    gl.bind_sampler(0, sampler);
+    glBindTexture(GL_TEXTURE_2D, bound);
+    gl.active_texture(active);
+    for (int i = 0; i < 4; ++i) {
+        if (enabled[i]) glEnable(switches[i]);
+        else glDisable(switches[i]);
+    }
+    if (blend) {
+        gl.blend_func(functions[0], functions[1], functions[2], functions[3]);
+        gl.blend_equation(equations[0], equations[1]);
+    }
+}
+
+void delete_host_quad(const HostQuad& quad) {
+    if (!current_gl_context()) return;
+    const auto& gl = detail::quad_gl();
+    if (quad.vertex_array) gl.delete_vertex_arrays(1, &quad.vertex_array);
+    if (quad.program) gl.delete_program(quad.program);
 }
 
 namespace detail {

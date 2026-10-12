@@ -50,7 +50,8 @@ The diffuse material preserves glTF UV orientation. A regression test uses verti
 base-color and thickness textures.
 
 `TrafficCone` was tiny because the old audit fitted its large ground plane and ignored its
-authored camera. The audit and PsychoPy demo now select an unambiguous imported camera by default.
+authored camera. By default, the audit selects the first imported camera with a unique node name (else the
+first imported camera), and the PsychoPy demo selects the first imported camera.
 Authored-light scenes no longer receive an extra environment light by default. Both cones are
 visible. Their retroreflective bands use ordinary specular reflection. Point-light shadows are
 available through explicit scene and light settings. The audit leaves shadows disabled. See the
@@ -198,7 +199,7 @@ To check only selected assets:
 uv run --no-sync python tools/check_sample_assets.py --models MosquitoInAmber CompareDispersion DiffuseTransmissionTeacup
 ```
 
-A selected run replaces that mode's report with the selected results. Use a separate `--output`
+A selected run replaces `report-archive.json` with the selected results. Use a separate `--output`
 directory to retain an earlier report. `--download-only` fetches sources without creating a renderer.
 Asset licenses remain those of their upstream authors. The gallery links each source and does not
 relicense the generated images or source models.

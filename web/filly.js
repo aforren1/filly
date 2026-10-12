@@ -435,28 +435,94 @@ export class Renderer extends Handle
 	}
 
 	/**
+	 * A camera that any scene of this renderer can use. It has a perspective projection (fovYDeg
+	 * 30, near 0.1, far 100) that follows the render target, so frame() alone aims it.
+	 */
+	createCamera()
+	{
+		return new Camera(this._context, this._call("createCamera"));
+	}
+
+	/**
+	 * Load a GLB or a glTF document with embedded resources as an Asset that any scene of this
+	 * renderer can add(). Its loadWarnings lists features that load but render differently.
+	 */
+	loadAsset(bytes, { strict = false } = {})
+	{
+		const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+		const result = this._call("loadAssetBytes", data, strict);
+		return loaded(Asset, this._context, result.asset, result.warnings);
+	}
+
+	/** loadAsset() for a glTF document and its external files: files maps relative URIs to bytes. */
+	loadAssetFiles(main, files, { strict = false } = {})
+	{
+		return withFiles(this._context, files, (dir) =>
+		{
+			const result = this._call("loadAssetPath", `${dir}/${main}`, strict);
+			return loaded(Asset, this._context, result.asset, result.warnings);
+		});
+	}
+
+	/**
+	 * Fetch and load a .glb, or a .gltf with the buffers and images it references, as an Asset.
+	 * Its fetchedBytes is the number of bytes fetched.
+	 */
+	async loadAssetUrl(url, options = {})
+	{
+		const { bytes, main, files, size } = await fetchDocument(url);
+		const asset = bytes ? this.loadAsset(bytes, options) : this.loadAssetFiles(main, files, options);
+		asset.fetchedBytes = size;
+		return asset;
+	}
+
+	/**
+	 * An Environment from a 2:1 panorama of linear RGB float pixels, rows from the top. Loading
+	 * filters it once; scenes that use it share the result.
+	 */
+	createEnvironment(pixels, width, height)
+	{
+		return new Environment(this._context, this._call("createEnvironment", pixels, width, height));
+	}
+
+	/** An Environment from a 2:1 panorama file: Radiance HDR, PNG, or JPEG bytes. */
+	loadEnvironment(bytes)
+	{
+		return new Environment(this._context, withFiles(this._context, { environment: bytes }, (dir) =>
+			this._call("loadEnvironmentPath", `${dir}/environment`)));
+	}
+
+	/** An Environment from Filament's cmgen: the IBL KTX bytes and optionally the skybox KTX bytes. */
+	loadEnvironmentKtx(ibl, skybox = null)
+	{
+		const files = skybox ? { "ibl.ktx": ibl, "skybox.ktx": skybox } : { "ibl.ktx": ibl };
+		return new Environment(this._context, withFiles(this._context, files, (dir) =>
+			this._call("loadEnvironmentKtxPath", `${dir}/ibl.ktx`, skybox ? `${dir}/skybox.ktx` : "")));
+	}
+
+	/**
 	 * Render into a texture that the page owns. It must be a TEXTURE_2D with RGBA8 storage of
 	 * the given size; WebGL2 cannot check this.
 	 */
-	importTexture(texture, width, height, { depth = true } = {})
+	importTarget(texture, width, height, { depth = true } = {})
 	{
 		const name = this._context.textureName(texture);
-		return new Target(this._context, this._call("importGlTexture", name, width, height, depth), texture);
+		return new ImportedTarget(this._context, this._call("importGlTarget", name, width, height, depth), texture);
 	}
 
 	/** A Filament-owned target whose pixels read() returns. */
 	createRenderTarget(width, height, { depth = true } = {})
 	{
-		return new OffscreenTarget(this._context, this._call("createRenderTarget", width, height, depth));
+		return new RenderTarget(this._context, this._call("createRenderTarget", width, height, depth));
 	}
 
 	/**
-	 * Render one frame into a Target or an OffscreenTarget. options: camera, viewport
+	 * Render one frame into an ImportedTarget or a RenderTarget. options: camera, viewport
 	 * [x, y, width, height] from the lower left, clear.
 	 */
 	render(scene, target, { camera = null, viewport = null, clear = true } = {})
 	{
-		const method = target instanceof OffscreenTarget ? "renderOffscreen" : "render";
+		const method = target instanceof RenderTarget ? "renderOffscreen" : "render";
 		this._call(method, scene._native, target._native, camera ? camera._native : null, viewport, clear);
 	}
 
@@ -475,10 +541,10 @@ export class Renderer extends Handle
 	 * A texture of the page that materials sample. For colorSpace "srgb", the page must allocate
 	 * it with SRGB8_ALPHA8 storage; for "linear", with RGBA8 storage.
 	 */
-	importInput(texture, width, height, { colorSpace, filter = "linear", wrap = "repeat" })
+	importTexture(texture, width, height, { colorSpace, filter = "linear", wrap = "repeat" })
 	{
 		const name = this._context.textureName(texture);
-		return new HostTexture(this._context, this._call("importGlInput", name, width, height, colorSpace, filter, wrap));
+		return new ImportedTexture(this._context, this._call("importGlTexture", name, width, height, colorSpace, filter, wrap));
 	}
 
 	/**
@@ -558,13 +624,93 @@ export class Renderer extends Handle
 let fileCounter = 0;
 const GLB_MAGIC = 0x46546C67;
 
+// Runs fn with the files in the module's file system, under a folder that fn receives. The core
+// reads glTF resources and environment files from there.
+function withFiles(context, files, fn)
+{
+	const FS = context.module.FS;
+	const dir = `/filly-files-${++fileCounter}`;
+	const written = [];
+	try
+	{
+		for (const [name, data] of Object.entries(files))
+		{
+			const path = `${dir}/${name}`;
+			FS.mkdirTree(path.slice(0, path.lastIndexOf("/")));
+			// canOwn: the file uses the caller's bytes instead of a copy. Nothing writes to the
+			// file, and it is removed before this returns.
+			FS.writeFile(path, data instanceof Uint8Array ? data : new Uint8Array(data), { canOwn: true });
+			written.push(path);
+		}
+		return fn(dir);
+	}
+	finally
+	{
+		for (const path of written)
+		{
+			FS.unlink(path);
+		}
+	}
+}
+
+async function fetchBytes(url)
+{
+	const response = await fetch(url);
+	if (!response.ok)
+	{
+		throw new AssetError(`Could not fetch ${url}: ${response.status} ${response.statusText}`);
+	}
+	return new Uint8Array(await response.arrayBuffer());
+}
+
+// Fetches a .glb, or a .gltf with the buffers and images that it references: { bytes } for a GLB
+// or { main, files } for a glTF document, and size, the number of bytes fetched.
+async function fetchDocument(url)
+{
+	const base = new URL(url, document.baseURI);
+	const bytes = await fetchBytes(base);
+	// The content decides, not the URL, which can lack an extension or carry a query.
+	if (bytes.length >= 4 && new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true) === GLB_MAGIC)
+	{
+		return { bytes, size: bytes.length };
+	}
+	let gltf;
+	try
+	{
+		gltf = JSON.parse(new TextDecoder().decode(bytes));
+	}
+	catch
+	{
+		throw new AssetError(`${base.href} is neither a GLB file nor a glTF document`);
+	}
+	const uris = [...(gltf.buffers ?? []), ...(gltf.images ?? [])]
+		.map((item) => item.uri).filter((uri) => uri && !uri.startsWith("data:"));
+	const main = "model.gltf";
+	const files = { [main]: bytes };
+	let size = bytes.length;
+	await Promise.all(uris.map(async (uri) =>
+	{
+		const file = await fetchBytes(new URL(uri, base));
+		files[decodeURIComponent(uri)] = file;
+		size += file.length;
+	}));
+	return { main, files, size };
+}
+
+// Wraps a native load result, { model } or { asset } with warnings, and reports the warnings.
+function loaded(Type, context, native, warnings)
+{
+	const result = new Type(context, native);
+	result.loadWarnings = warnings;
+	for (const warning of warnings)
+	{
+		console.warn(`filly: ${warning}`);
+	}
+	return result;
+}
+
 export class Scene extends Handle
 {
-	createCamera()
-	{
-		return new Camera(this._context, this._call("createCamera"));
-	}
-
 	get camera()
 	{
 		return new Camera(this._context, this._get("camera"));
@@ -576,100 +722,43 @@ export class Scene extends Handle
 	}
 
 	/**
-	 * Load a GLB or a glTF document with embedded resources. Returns a Model; its loadWarnings
-	 * lists features that load but render differently.
+	 * Load a GLB or a glTF document with embedded resources and add it to this scene, as
+	 * renderer.loadAsset() and add() do, without keeping the asset. Returns a Model; its
+	 * loadWarnings lists features that load but render differently.
 	 */
-	load(bytes, { strict = false, clonable = false } = {})
+	load(bytes, { strict = false } = {})
 	{
 		const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-		return this._model(this._call("loadBytes", data, strict, clonable));
+		const result = this._call("loadBytes", data, strict);
+		return loaded(Model, this._context, result.model, result.warnings);
 	}
 
 	/** Load a glTF document and its external files: files maps relative URIs to bytes. */
-	loadFiles(main, files, { strict = false, clonable = false } = {})
+	loadFiles(main, files, { strict = false } = {})
 	{
-		return this._withFiles(files, (dir) =>
-			this._model(this._call("loadPath", `${dir}/${main}`, strict, clonable)));
+		return withFiles(this._context, files, (dir) =>
+		{
+			const result = this._call("loadPath", `${dir}/${main}`, strict);
+			return loaded(Model, this._context, result.model, result.warnings);
+		});
 	}
 
 	/**
-	 * Fetch and load a .glb, or a .gltf with the buffers and images it references. `clonable` can
-	 * also be a function of the number of bytes fetched, which decides it before the load, as a
-	 * model cache with a size limit needs. The model's fetchedBytes is that number.
+	 * Fetch and load a .glb, or a .gltf with the buffers and images it references. The model's
+	 * fetchedBytes is the number of bytes fetched.
 	 */
-	async loadUrl(url, { clonable = false, ...options } = {})
+	async loadUrl(url, options = {})
 	{
-		const base = new URL(url, document.baseURI);
-		const bytes = await fetchBytes(base);
-		const keep = (size) => (typeof clonable === "function" ? Boolean(clonable(size)) : clonable);
-		// The content decides, not the URL, which can lack an extension or carry a query.
-		if (bytes.length >= 4 && new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true) === GLB_MAGIC)
-		{
-			const model = this.load(bytes, { ...options, clonable: keep(bytes.length) });
-			model.fetchedBytes = bytes.length;
-			return model;
-		}
-		let gltf;
-		try
-		{
-			gltf = JSON.parse(new TextDecoder().decode(bytes));
-		}
-		catch
-		{
-			throw new AssetError(`${base.href} is neither a GLB file nor a glTF document`);
-		}
-		const uris = [...(gltf.buffers ?? []), ...(gltf.images ?? [])]
-			.map((item) => item.uri).filter((uri) => uri && !uri.startsWith("data:"));
-		const main = "model.gltf";
-		const files = { [main]: bytes };
-		let size = bytes.length;
-		await Promise.all(uris.map(async (uri) =>
-		{
-			const file = await fetchBytes(new URL(uri, base));
-			files[decodeURIComponent(uri)] = file;
-			size += file.length;
-		}));
-		const model = this.loadFiles(main, files, { ...options, clonable: keep(size) });
+		const { bytes, main, files, size } = await fetchDocument(url);
+		const model = bytes ? this.load(bytes, options) : this.loadFiles(main, files, options);
 		model.fetchedBytes = size;
 		return model;
 	}
 
-	_model(result)
+	/** A new Model of an Asset from renderer.loadAsset(). */
+	add(asset)
 	{
-		const model = new Model(this._context, result.model);
-		model.loadWarnings = result.warnings;
-		for (const warning of result.warnings)
-		{
-			console.warn(`filly: ${warning}`);
-		}
-		return model;
-	}
-
-	_withFiles(files, fn)
-	{
-		const FS = this._context.module.FS;
-		const dir = `/filly-files-${++fileCounter}`;
-		const written = [];
-		try
-		{
-			for (const [name, data] of Object.entries(files))
-			{
-				const path = `${dir}/${name}`;
-				FS.mkdirTree(path.slice(0, path.lastIndexOf("/")));
-				// canOwn: the file uses the caller's bytes instead of a copy. Nothing writes to the
-				// file, and it is removed before this returns.
-				FS.writeFile(path, data instanceof Uint8Array ? data : new Uint8Array(data), { canOwn: true });
-				written.push(path);
-			}
-			return fn(dir);
-		}
-		finally
-		{
-			for (const path of written)
-			{
-				FS.unlink(path);
-			}
-		}
+		return new Model(this._context, this._call("add", asset._native));
 	}
 
 	/**
@@ -683,16 +772,6 @@ export class Scene extends Handle
 		return new Model(this._context, this._call("createMesh", options));
 	}
 
-	setFogOptions({ color = [1, 1, 1], density = 0.1, start = 0 } = {})
-	{
-		this._call("setFogOptions", color, density, start);
-	}
-
-	setVignetteOptions({ midpoint = 0.5, roundness = 0.5, feather = 0.5, color = [0, 0, 0] } = {})
-	{
-		this._call("setVignetteOptions", midpoint, roundness, feather, color);
-	}
-
 	addDirectionalLight({ direction, intensity = 50000, color = [1, 1, 1] })
 	{
 		return new Light(this._context, this._call("addDirectionalLight", direction, intensity, color));
@@ -704,41 +783,29 @@ export class Scene extends Handle
 			this._call("addSunLight", direction, intensity, color, angularRadiusDeg, haloSize, haloFalloff));
 	}
 
-	addPointLight({ position, intensity = 100, color = [1, 1, 1], range = 10 })
+	/** intensity in candela: 50000 lights a surface 1 m away as the default directional light does. */
+	addPointLight({ position, intensity = 50000, color = [1, 1, 1], range = 10 })
 	{
 		return new Light(this._context, this._call("addPointLight", position, intensity, color, range));
 	}
 
-	addSpotLight({ position, direction, intensity = 100, color = [1, 1, 1], range = 10, inner = 0.3, outer = 0.6 })
+	/** coneDeg: [inner, outer] half-angles in degrees. */
+	addSpotLight({ position, direction, intensity = 50000, color = [1, 1, 1], range = 10, coneDeg = [15, 30] })
 	{
 		return new Light(this._context,
-			this._call("addSpotLight", position, direction, intensity, color, range, inner, outer));
+			this._call("addSpotLight", position, direction, intensity, color, range, coneDeg));
 	}
 
-	/** A 2:1 panorama of linear RGB float pixels, rows from the top. */
-	setEnvironment(pixels, width, height, { intensity = 30000, rotationDeg = 0 } = {})
+	/** The Environment that lights the scene, or null. */
+	get environment()
 	{
-		this._call("setEnvironment", pixels, width, height, intensity, rotationDeg);
+		const native = this._get("environment");
+		return native ? new Environment(this._context, native) : null;
 	}
 
-	/** A 2:1 panorama file: Radiance HDR, PNG, or JPEG bytes. */
-	loadEnvironment(bytes, { intensity = 30000, rotationDeg = 0 } = {})
+	set environment(environment)
 	{
-		this._withFiles({ environment: bytes }, (dir) =>
-			this._call("loadEnvironmentPath", `${dir}/environment`, intensity, rotationDeg));
-	}
-
-	/** A cubemap from Filament's cmgen: the IBL KTX bytes and optionally the skybox KTX bytes. */
-	loadEnvironmentKtx(ibl, skybox = null, { intensity = 30000, rotationDeg = 0 } = {})
-	{
-		const files = skybox ? { "ibl.ktx": ibl, "skybox.ktx": skybox } : { "ibl.ktx": ibl };
-		this._withFiles(files, (dir) => this._call("loadEnvironmentKtxPath", `${dir}/ibl.ktx`,
-			skybox ? `${dir}/skybox.ktx` : "", intensity, rotationDeg));
-	}
-
-	clearEnvironment()
-	{
-		this._call("clearEnvironment");
+		this._call("setEnvironment", environment ? environment._native : null);
 	}
 
 	close()
@@ -752,10 +819,14 @@ export class Scene extends Handle
 	}
 }
 
-// Scene options with a getter and a setter of the same name in the bindings.
-for (const name of ["encoding", "outputPath", "toneMapping", "antialiasing", "msaa", "shadows", "refraction",
-	"transparent", "dithering", "ssao", "bloom", "fog", "depthOfField", "vignette", "background",
-	"environmentIntensity", "environmentVisible", "environmentRotation"])
+// Scene options with a getter and a setter of the same name in the bindings. Effect parameters
+// keep their values while the effect is off. environmentIntensity (lux), environmentRotationDeg,
+// and environmentVisible apply to whichever environment the scene uses, and keep their values
+// without one.
+for (const name of ["encoding", "outputPath", "toneMapping", "antialiasing", "msaa", "shadows",
+	"transparent", "dithering", "ssao", "bloom", "fog", "fogColor", "fogDensity", "fogStart", "depthOfField",
+	"vignette", "vignetteMidpoint", "vignetteRoundness", "vignetteFeather", "vignetteColor", "background",
+	"environmentIntensity", "environmentVisible", "environmentRotationDeg"])
 {
 	defineProperty(Scene, name);
 }
@@ -769,22 +840,72 @@ function defineProperty(cls, name)
 	});
 }
 
-async function fetchBytes(url)
+/**
+ * A glTF asset that the renderer keeps, so that any of its scenes can add() new models of it.
+ * close() releases the source data that add() reads; models that exist keep the GPU data.
+ */
+export class Asset extends Handle
 {
-	const response = await fetch(url);
-	if (!response.ok)
+	/**
+	 * Memory that the asset holds, shared with its models: { gpuTextureBytes, gpuGeometryBytes,
+	 * gpuBytes, cpuBytes, instanceGpuBytes, instanceCpuBytes, models }. See Asset.memory in
+	 * docs/reference/api.md. The CPU part lives in the WebAssembly heap, which never shrinks:
+	 * freed memory is reused, but the page keeps its high-water mark.
+	 */
+	get memory()
 	{
-		throw new AssetError(`Could not fetch ${url}: ${response.status} ${response.statusText}`);
+		return this._get("memory");
 	}
-	return new Uint8Array(await response.arrayBuffer());
+
+	close()
+	{
+		this._call("close");
+	}
+
+	get closed()
+	{
+		return this._get("closed");
+	}
+}
+
+/**
+ * Image-based lighting that any scene of the renderer can use (scene.environment). close()
+ * removes it from the scenes that use it.
+ */
+export class Environment extends Handle
+{
+	close()
+	{
+		this._call("close");
+	}
+
+	get closed()
+	{
+		return this._get("closed");
+	}
 }
 
 export class Camera extends Handle
 {
-	/** fovY in degrees. aspect 0 follows the render target. */
-	setPerspective({ fovY, aspect = 0, near, far })
+	/** Scenes that use the camera lose it. Imported cameras close with their model. */
+	close()
 	{
-		this._call("setPerspective", fovY, aspect, near, far);
+		this._call("close");
+	}
+
+	get closed()
+	{
+		return this._get("closed");
+	}
+
+	/**
+	 * fovYDeg is the vertical field of view in degrees. aspect 0 follows the render target. near
+	 * and far are optional: a plane that is given stays until the next projection call, and
+	 * frame() sets the others.
+	 */
+	setPerspective({ fovYDeg, aspect = 0, near, far })
+	{
+		this._call("setPerspective", fovYDeg, aspect, near, far);
 	}
 
 	setLensProjection({ focalLength, aspect = 0, near, far })
@@ -810,7 +931,10 @@ export class Camera extends Handle
 		this._call("lookAt", target, up);
 	}
 
-	/** Aim at a Model, a Node, or a [min, max] box and move to fill part of the view. Returns the distance. */
+	/**
+	 * Aim at a Model, a Node, or a [min, max] box and move to fill part of the view. Returns the
+	 * distance. Without options.aspect, render() frames again for a target of another aspect.
+	 */
 	frame(target, options = {})
 	{
 		if (target instanceof Model)
@@ -824,7 +948,7 @@ export class Camera extends Handle
 		return this._call("frameBox", target, options);
 	}
 
-	/** The glTF node of an imported camera; null for a camera that a scene created. */
+	/** The glTF node of an imported camera; null for a camera from renderer.createCamera(). */
 	get node()
 	{
 		return this._get("hasNode") ? new Node(this._context, this._get("node")) : null;
@@ -873,22 +997,7 @@ export class Model extends Handle
 		return this._get("nodes").map((node) => new Node(this._context, node));
 	}
 
-	/**
-	 * Another instance of an asset loaded with clonable, or of a generated mesh, in this model's
-	 * scene or in `scene`, another scene of the same renderer.
-	 */
-	clone({ scene = null } = {})
-	{
-		return new Model(this._context, scene ? this._call("cloneInto", scene._native) : this._call("clone"));
-	}
-
-	/**
-	 * Memory that the model's asset holds, shared with its clones and its prototype and freed when
-	 * the last of them closes: { gpuTextureBytes, gpuGeometryBytes, gpuBytes, cpuBytes,
-	 * cloneGpuBytes, cloneCpuBytes, models }. See Model.memory in docs/reference/api.md. The CPU
-	 * part lives in the WebAssembly heap, which never shrinks: freed memory is reused, but the
-	 * page keeps its high-water mark.
-	 */
+	/** The memory of the model's asset, shared with the asset's other models; see Asset.memory. */
 	get memory()
 	{
 		return this._get("memory");
@@ -947,6 +1056,7 @@ export class Model extends Handle
 		this._call(typeof key === "number" ? "applyVariantByIndex" : "applyVariantByName", key);
 	}
 
+	/** The model's open lights. Closed lights are left out; light(key) still returns them, closed. */
 	get lights()
 	{
 		return this._get("lights").map((light) => new Light(this._context, light));
@@ -983,7 +1093,7 @@ for (const name of ["transform", "position", "visible"])
 	defineProperty(Model, name);
 }
 // Rotation and scale apply to the model's root node, as in the Python API.
-for (const name of ["scale", "quaternion", "rotationEulerRad", "rotationEulerDeg"])
+for (const name of ["scale", "quaternion", "rotationEulerDeg"])
 {
 	defineProperty(Model, name);
 }
@@ -1038,21 +1148,12 @@ export class Node extends Handle
 		return this._get("bounds");
 	}
 }
-for (const name of ["transform", "position", "scale", "quaternion", "rotationEulerRad", "rotationEulerDeg"])
+for (const name of ["transform", "position", "scale", "quaternion", "rotationEulerDeg"])
 {
 	defineProperty(Node, name);
 }
 
 const TEXTURE_SLOTS = { baseColor: 0, emissive: 1 };
-
-function textureSlot(slot)
-{
-	if (!(slot in TEXTURE_SLOTS))
-	{
-		throw new RangeError(`slot must be "baseColor" or "emissive", got ${JSON.stringify(slot)}`);
-	}
-	return TEXTURE_SLOTS[slot];
-}
 
 export class Material extends Handle
 {
@@ -1063,7 +1164,7 @@ export class Material extends Handle
 		{
 			return null;
 		}
-		return native instanceof this._context.module.HostTexture ? new HostTexture(this._context, native)
+		return native instanceof this._context.module.ImportedTexture ? new ImportedTexture(this._context, native)
 			: new Texture(this._context, native);
 	}
 
@@ -1073,9 +1174,9 @@ export class Material extends Handle
 		{
 			this._call("clearTexture", slot);
 		}
-		else if (texture instanceof HostTexture)
+		else if (texture instanceof ImportedTexture)
 		{
-			this._call("setHostTexture", slot, texture._native);
+			this._call("setImportedTexture", slot, texture._native);
 		}
 		else if (texture instanceof Texture)
 		{
@@ -1083,11 +1184,11 @@ export class Material extends Handle
 		}
 		else
 		{
-			throw new TypeError("Texture slots take a Texture, a HostTexture, or null");
+			throw new TypeError("Texture slots take a Texture, an ImportedTexture, or null");
 		}
 	}
 
-	/** A Texture, a HostTexture, or null. */
+	/** A Texture, an ImportedTexture, or null. */
 	get baseColorTexture()
 	{
 		return this._texture(0);
@@ -1108,15 +1209,35 @@ export class Material extends Handle
 		this._setTexture(1, texture);
 	}
 
-	/** KHR_texture_transform of a slot ("baseColor" or "emissive"): offset and scale in UV units. */
-	setTextureTransform(slot, { offset = [0, 0], scale = [1, 1], rotationDeg = 0 } = {})
+	// One component of a slot's KHR_texture_transform; null without a texture in the slot.
+	_uv(slot, key)
 	{
-		this._call("setTextureTransform", textureSlot(slot), offset, scale, rotationDeg * Math.PI / 180);
+		const transform = this._get("textureTransform", slot);
+		return transform ? transform[key] : null;
+	}
+
+	_setUv(slot, key, value)
+	{
+		const transform = this._get("textureTransform", slot) ?? { offset: [0, 0], scale: [1, 1], rotationDeg: 0 };
+		transform[key] = value;
+		this._call("setTextureTransform", slot, transform.offset, transform.scale, transform.rotationDeg);
 	}
 }
 for (const name of ["baseColor", "metallic", "roughness", "emissive"])
 {
 	defineProperty(Material, name);
+}
+// baseColorTextureOffset, baseColorTextureScale, baseColorTextureRotationDeg, and the same for
+// emissive: offset and scale in UV units, rotation in degrees.
+for (const [prefix, slot] of Object.entries(TEXTURE_SLOTS))
+{
+	for (const [suffix, key] of [["Offset", "offset"], ["Scale", "scale"], ["RotationDeg", "rotationDeg"]])
+	{
+		Object.defineProperty(Material.prototype, `${prefix}Texture${suffix}`, {
+			get() { return this._uv(slot, key); },
+			set(value) { this._setUv(slot, key, value); },
+		});
+	}
 }
 
 export class Light extends Handle
@@ -1124,16 +1245,6 @@ export class Light extends Handle
 	get type()
 	{
 		return this._get("type");
-	}
-
-	setShadowOptions({ mapSize = 1024, constantBias = 0.001, normalBias = 1.0 } = {})
-	{
-		this._call("setShadowOptions", mapSize, constantBias, normalBias);
-	}
-
-	setSpotCone(inner, outer)
-	{
-		this._call("setSpotCone", inner, outer);
 	}
 
 	/** The glTF node that places an imported light; null for a light that a scene created. */
@@ -1152,13 +1263,16 @@ export class Light extends Handle
 		return this._get("closed");
 	}
 }
-for (const name of ["color", "intensity", "position", "direction", "range", "castsShadows"])
+// A property that the light type lacks reads as null, and setting it throws: position and range
+// of directional and sun lights, direction of point lights, coneDeg of all but spot lights.
+for (const name of ["color", "intensity", "position", "direction", "range", "coneDeg", "castsShadows",
+	"shadowMapSize", "shadowConstantBias", "shadowNormalBias"])
 {
 	defineProperty(Light, name);
 }
 
 /** A page-owned texture that filly renders into. The page samples it after handBack(). */
-export class Target extends Handle
+export class ImportedTarget extends Handle
 {
 	constructor(context, native, texture)
 	{
@@ -1177,7 +1291,7 @@ export class Target extends Handle
 	}
 
 	/**
-	 * Read the texture: RGBA bytes, rows from the top, as OffscreenTarget.read() in Python. It
+	 * Read the texture: RGBA bytes, rows from the top, as RenderTarget.read() in Python. It
 	 * waits for the GPU, so use it for tests and screenshots, not in a frame loop.
 	 */
 	read()
@@ -1223,7 +1337,7 @@ export class Target extends Handle
 }
 
 /** A Filament-owned color target. */
-export class OffscreenTarget extends Handle
+export class RenderTarget extends Handle
 {
 	get width()
 	{
@@ -1327,7 +1441,7 @@ export class Texture extends Handle
  * A texture of the page that materials sample. The page writes it between beginWrite() and
  * endWrite(), or in write(fn). WebGL keeps the order of the page's writes and filly's reads.
  */
-export class HostTexture extends Handle
+export class ImportedTexture extends Handle
 {
 	get width()
 	{

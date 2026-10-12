@@ -5,7 +5,7 @@
 
 MATRIX.json is a list of configurations:
 
-    [{"name": "helmet-1080-rt", "python": "C:/tmp/prof/w-rt/v/Scripts/python.exe",
+    [{"name": "helmet-1080-a", "python": "C:/tmp/prof/w-a/v/Scripts/python.exe",
       "args": ["helmet", "--frame-info"], "env": {"SHIM_MCCOMPAT": "0x800000001"}}, ...]
 
 Each round runs every configuration once, in a fresh process, in an order rotated by one

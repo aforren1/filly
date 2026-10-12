@@ -76,9 +76,8 @@ def render_in_subprocess(asset, strict=False):
         warnings.simplefilter("ignore")
         with filly.Renderer() as renderer:
             scene = renderer.create_scene()
-            scene.refraction = True
             scene.tone_mapping = "aces_legacy"
-            camera = scene.create_camera()
+            camera = renderer.create_camera()
             camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
             camera.position = (0, 0, 3)
             camera.look_at((0, 0, 0))
@@ -113,7 +112,7 @@ def test_extension_combinations_render(extensions):
     assert render_in_subprocess(textured_asset(0, extensions)) == "rendered"
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
@@ -153,7 +152,6 @@ def test_archive_drops_the_least_important_extension_textures(extensions, capaci
               f"it renders without its {dropped}"
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        scene.refraction = True
         with pytest.warns(filly.AssetCompatibilityWarning, match=message):
             scene.load(asset)
         with pytest.raises(filly.AssetError, match="renders without its"):

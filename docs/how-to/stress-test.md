@@ -4,7 +4,7 @@ Install the [PsychoPy dependencies](psychopy.md) and build the renderer first.
 Run a short check from the project directory:
 
 ```powershell
-uv run --no-sync python examples/psychopy_stress.py --cycles 4 --frames 120 --warmup 30 --transparent
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_stress.py --cycles 4 --frames 120 --warmup 30 --transparent
 ```
 
 The default asset is the wooden horse in `examples/assets`, which the screenshot example also
@@ -15,7 +15,7 @@ The transparent option shows the grating through the Filament image.
 For a longer run, use a new output directory:
 
 ```powershell
-uv run --no-sync python examples/psychopy_stress.py --cycles 100 --frames 600 --warmup 60 --copies 4 --transparent --output .deps/stress-long
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_stress.py --cycles 100 --frames 600 --warmup 60 --copies 4 --transparent --output .deps/stress-long
 ```
 
 Alternate your own assets by supplying multiple paths. The first animation clip plays at
@@ -25,13 +25,13 @@ authored material animation, so the option does not change what animates. The de
 node-local material, on the first mesh node.
 
 ```powershell
-uv run --no-sync python examples/psychopy_stress.py C:/models/watch.glb C:/models/plant.glb --copies 0 --cycles 30 --frames 600
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_stress.py C:/models/watch.glb C:/models/plant.glb --copies 0 --cycles 30 --frames 600
 ```
 
 To test a 120 Hz display, select that mode in Windows, then run:
 
 ```powershell
-uv run --no-sync python examples/psychopy_stress.py --fullscreen --screen 0 --width 1920 --height 1080 --refresh-hz 120 --cycles 30 --frames 1200
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_stress.py --fullscreen --screen 0 --width 1920 --height 1080 --refresh-hz 120 --cycles 30 --frames 1200
 ```
 
 `--refresh-hz` sets the analysis budget and animation sampling rate. It does not change the display
@@ -62,7 +62,7 @@ An interval of at least 1.5 frame periods counts as late. Estimated missed refre
 `max(0, floor(interval / period + 0.5) - 1)`. This estimate is `null` when calibration differs
 from the requested rate by more than 5%. For example, a 60 Hz display does not produce valid
 120 Hz missed-refresh estimates. Late intervals still describe overruns of the requested budget.
-These timestamps do not measure physical display latency. Isolated GPU time remains `null`.
+These timestamps do not measure physical display latency. GPU time is not measured.
 
 Loading, warmup, cleanup, memory sampling, and inter-trial gaps are excluded from frame timing.
 The load duration includes node-local materials and camera setup. Cleanup includes model close,

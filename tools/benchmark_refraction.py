@@ -25,18 +25,18 @@ def main():
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         scene.background = (0.15, 0.15, 0.15, 1)
-        scene.refraction = True
         scene.antialiasing = "fxaa"
         scene.tone_mapping = "aces_legacy"
         model = scene.load(args.asset)
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.exposure = 15
         scene.camera = camera
         scene.add_directional_light(direction=(-1, -1, -2), intensity=100000)
         panorama = np.full((32, 64, 3), 0.4, dtype=np.float32)
         panorama[4:15, 6:14] = (3, 2.8, 2.5)
         panorama[6:20, 42:50] = (1.5, 1.8, 2.2)
-        scene.set_environment(panorama, intensity=30000)
+        scene.environment = renderer.create_environment(panorama)
+        scene.environment_intensity = 30000
         target = renderer.create_render_target(width=args.size, height=args.size)
         report = {"asset": str(args.asset), "size": args.size, "frames": args.frames,
                   "warmup": args.warmup, "runs": {}}
@@ -46,13 +46,13 @@ def main():
             # is as high as the perspective view at the sphere's center.
             tan_half = np.tan(np.deg2rad(45 / 2))
             if projection == "orthographic":
-                camera.set_orthographic(height=1, near=1, far=2)
+                camera.set_orthographic(height=1)
                 fill = 1 / (3 * tan_half)
             else:
-                camera.set_perspective(fov_y=45, aspect=1, near=1, far=2)
+                camera.set_perspective(fov_y_deg=45)
                 fill = np.tan(np.arcsin(1 / 3)) / tan_half
             try:
-                camera.frame(model, fill=fill, direction=(0, 0, -1), aspect=1)
+                camera.frame(model, fill=fill, direction=(0, 0, -1))
             except ValueError:
                 parser.error("Asset must have finite nonzero bounds")
             for _ in range(args.warmup):

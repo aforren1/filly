@@ -60,7 +60,7 @@ def test_trs_conventions_and_validation(scene, triangle_glb):
     expected = np.array([[0, -3, 0, 1], [2, 0, 0, 2], [0, 0, 4, 3], [0, 0, 0, 1]])
     np.testing.assert_allclose(model.transform, expected, atol=1e-6)
     np.testing.assert_allclose(model.scale, [2, 3, 4], atol=1e-6)
-    np.testing.assert_allclose(model.rotation_euler_rad, [0, 0, np.pi / 2], atol=1e-6)
+    np.testing.assert_allclose(model.rotation_euler_deg, [0, 0, 90], atol=1e-4)
     model.quaternion = (0, 0, 0, 2)
     np.testing.assert_allclose(model.quaternion, [0, 0, 0, 1], atol=1e-6)
     model.rotation_euler_deg = (20, 30, 40)
@@ -78,7 +78,7 @@ def test_trs_conventions_and_validation(scene, triangle_glb):
 
 def test_closed_target_rejects_use(renderer, scene):
     target = renderer.create_render_target(width=8, height=8)
-    assert isinstance(target, filly.OffscreenTarget) and not target.closed
+    assert isinstance(target, filly.RenderTarget) and not target.closed
     assert not hasattr(target, "acquire")
     target.close()
     target.close()

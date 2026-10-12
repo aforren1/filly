@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -38,6 +39,9 @@ struct State;
 struct SceneData;
 struct CameraData;
 struct ModelData;
+struct AssetData;
+struct AssetRef;
+struct EnvironmentData;
 struct TargetData;
 struct TextureData;
 struct ReadbackData;
@@ -57,22 +61,22 @@ struct AnimationInfo {
     std::vector<AnimatedProperty> material_properties;
 };
 
-// Memory that a model's asset holds, which the model shares with its clones and its prototype.
-// It is freed when the last of them closes. GPU sizes follow each texture's internal format and
-// mip levels and each buffer's layout as gltfio uploads it; drivers add their own overhead.
-struct ModelMemory {
+// Memory that an asset holds, which its Asset handle and every model made from it share. It is
+// freed when the last of them closes. GPU sizes follow each texture's internal format and mip
+// levels and each buffer's layout as gltfio uploads it; drivers add their own overhead.
+struct AssetMemory {
     uint64_t gpu_texture_bytes = 0;
     // Vertex, index, and morph target buffers.
     uint64_t gpu_geometry_bytes = 0;
-    // The source data that clone() needs (the document, its buffers, and filly's tables for
-    // custom materials and property animation) if the asset is clonable, and the instances'
+    // The source data that Scene::add() needs (the document, its buffers, and filly's tables for
+    // custom materials and property animation) while the Asset is open, and the instances'
     // animators. Generated meshes also keep their vertex arrays and staging buffers.
     uint64_t cpu_bytes = 0;
     // Bytes that each instance adds: on the GPU its bone and morph target buffers, on the CPU its
     // animator's copy of the clips. gltfio keeps them until the asset goes, also after the
     // instance's model closes; cpu_bytes and gpu_geometry_bytes include them for every
     // instance created so far.
-    uint64_t clone_gpu_bytes = 0, clone_cpu_bytes = 0;
+    uint64_t instance_gpu_bytes = 0, instance_cpu_bytes = 0;
     // Live models that share the asset.
     size_t models = 0;
 };
@@ -122,19 +126,36 @@ public:
     void set_color(Vec3 value);
     float intensity() const;
     void set_intensity(float value);
-    Vec3 position() const;
+    // Each property that a light type lacks reads as empty, and setting it throws: position for
+    // directional and sun lights, direction for point lights, range for directional and sun
+    // lights, and the cone for every light but spots.
+    std::optional<Vec3> position() const;
     void set_position(Vec3 value);
-    Vec3 direction() const;
+    std::optional<Vec3> direction() const;
     void set_direction(Vec3 value);
-    float range() const;
+    std::optional<float> range() const;
     void set_range(float value);
+    // Inner and outer half-angles in degrees, as they were set or authored. Filament keeps only
+    // values derived from them, which do not give the inner angle back exactly.
+    std::optional<std::array<float, 2>> cone_deg() const;
+    void set_cone_deg(std::array<float, 2> value);
     bool casts_shadows() const;
     void set_casts_shadows(bool value);
-    void set_shadow_options(uint32_t map_size, float constant_bias, float normal_bias);
-    void set_spot_cone(float inner, float outer);
+    uint32_t shadow_map_size() const;
+    void set_shadow_map_size(uint32_t value);
+    float shadow_constant_bias() const;
+    void set_shadow_constant_bias(float value);
+    float shadow_normal_bias() const;
+    void set_shadow_normal_bias(float value);
 private:
     std::shared_ptr<detail::Resource> owner_;
     uint32_t entity_;
+};
+
+// KHR_texture_transform of a runtime texture: offset and scale in UV units, rotation in degrees.
+struct UvTransform {
+    std::array<float, 2> offset = {0, 0}, scale = {1, 1};
+    float rotation_deg = 0;
 };
 
 class Material {
@@ -151,9 +172,10 @@ public:
     // Slot 0 is base color and slot 1 is emissive. A null texture removes the assignment.
     std::shared_ptr<detail::TextureData> texture(int slot) const;
     void set_texture(int slot, std::shared_ptr<detail::TextureData> texture);
-    // Offset and scale in UV units, rotation in radians, as KHR_texture_transform.
-    void set_texture_transform(int slot, std::array<float, 2> offset, std::array<float, 2> scale,
-                               float rotation);
+    // Empty for a slot without a runtime texture, where setting it throws. Assigning a texture
+    // keeps the transform; removing it resets the transform.
+    std::optional<UvTransform> texture_transform(int slot) const;
+    void set_texture_transform(int slot, const UvTransform& value);
     // For tests: the name of the Filament material behind this handle, and whether it refracts
     // in screen space.
     std::pair<std::string, bool> shader() const;
@@ -180,8 +202,6 @@ public:
     void set_scale(Vec3 value);
     Vec4 quaternion() const;
     void set_quaternion(Vec4 value);
-    Vec3 rotation_euler_rad() const;
-    void set_rotation_euler_rad(Vec3 value);
     Vec3 rotation_euler_deg() const;
     void set_rotation_euler_deg(Vec3 value);
     Material material(size_t slot) const;
@@ -206,16 +226,22 @@ struct FrameOptions {
     std::optional<double> near, far, aspect;
 };
 
+// A new camera has a perspective projection with these values that follows the target aspect.
+constexpr double default_fov_y_deg = 30, default_near = 0.1, default_far = 100;
+
 class Camera {
 public:
     explicit Camera(std::shared_ptr<detail::CameraData> data);
-    // An aspect of zero selects the render target's aspect, applied at render time.
-    void set_perspective(double fov_y, double aspect, double near, double far);
-    void set_lens_projection(double focal_length, double aspect, double near, double far);
+    // fov_y_deg is the vertical field of view in degrees. An aspect of zero selects the render
+    // target's aspect, applied at render time. A plane that is given, here or to frame(), stays
+    // until the next projection call; frame() sets the others.
+    void set_perspective(double fov_y_deg, double aspect, std::optional<double> near, std::optional<double> far);
+    void set_lens_projection(double focal_length, double aspect, std::optional<double> near,
+                             std::optional<double> far);
     void set_orthographic(double left, double right, double bottom, double top,
-                          double near, double far);
+                          std::optional<double> near, std::optional<double> far);
     void set_orthographic_height(double height, double center_x, double center_y,
-                                 double near, double far);
+                                 std::optional<double> near, std::optional<double> far);
     Vec3 position() const;
     void set_position(Vec3 value);
     void look_at(Vec3 target, Vec3 up);
@@ -225,21 +251,27 @@ public:
     Matrix projection() const;
     float exposure() const;
     void set_exposure(float ev100);
-    // Depth-of-field inputs. The aperture is an f-number and does not change exposure.
+    // Depth-of-field inputs. The aperture is an f-number and does not change exposure. Filament
+    // focuses no closer than the near plane, so the default focus distance of 0 focuses there.
     float focus_distance() const;
     void set_focus_distance(float value);
     float aperture() const;
     void set_aperture(float value);
     // Aims at the target's center and sets the distance and clipping planes so that it fills
-    // `fill` of the view. Returns the distance from the camera to that center.
+    // `fill` of the view. Returns the distance from the camera to that center. Without
+    // options.aspect, a camera that follows the target aspect is framed again at render time
+    // for a target of another aspect, until its pose or projection changes.
     double frame(const Model& target, const FrameOptions& options);
     double frame(const Node& target, const FrameOptions& options);
     double frame(const std::array<Vec3, 2>& box, const FrameOptions& options);
     bool same(const Camera& other) const;
     uintptr_t key() const;
-    // The glTF node of an imported camera; false for cameras that a scene created.
+    // The glTF node of an imported camera; false for cameras from Renderer::create_camera().
     bool has_node() const;
     Node node() const;
+    // Scenes that use the camera lose it. Imported cameras close with their model.
+    void close();
+    bool closed() const;
 private:
     std::shared_ptr<detail::CameraData> data_;
     friend class Scene;
@@ -251,10 +283,8 @@ public:
     explicit Model(std::shared_ptr<detail::ModelData> data);
     void close();
     bool closed() const;
-    // Another instance of the asset in `scene`, which must belong to the same renderer; null
-    // selects this model's scene.
-    Model clone(const class Scene* scene = nullptr);
-    ModelMemory memory() const;
+    // The memory of the model's asset, which it shares with the other models of that asset.
+    AssetMemory memory() const;
     std::array<Vec3, 2> bounds() const;
     Matrix transform() const;
     void set_transform(const Matrix& value);
@@ -296,30 +326,59 @@ private:
     friend class Camera;
 };
 
+// A glTF asset that the renderer keeps for Scene::add(): its GPU textures and geometry and the
+// source data that each new instance reads. Any scene of the renderer can add it. close()
+// releases the source data; models already made from it keep the GPU data until the last of
+// them closes.
+class Asset {
+public:
+    explicit Asset(std::shared_ptr<detail::AssetRef> data);
+    AssetMemory memory() const;
+    void close();
+    bool closed() const;
+private:
+    std::shared_ptr<detail::AssetRef> data_;
+    friend class Scene;
+};
+
+// Image-based lighting that any scene of the renderer can use: prefiltered reflections, diffuse
+// lighting, and a skybox cubemap. Scenes share these textures; each scene has its own
+// intensity and rotation. close() removes it from the scenes that use it.
+class Environment {
+public:
+    explicit Environment(std::shared_ptr<detail::EnvironmentData> data);
+    void close();
+    bool closed() const;
+    bool same(const Environment& other) const;
+    uintptr_t key() const;
+private:
+    std::shared_ptr<detail::EnvironmentData> data_;
+    friend class Scene;
+};
+
 class Scene {
 public:
     explicit Scene(std::shared_ptr<detail::SceneData> data);
     void close();
     bool closed() const;
-    Camera create_camera();
     Camera camera() const;
     void set_camera(const Camera& camera);
-    // Loads a glTF or GLB file (UTF-8 path) or document bytes, which must then embed every
-    // resource. Messages about features that load but render differently are appended to
-    // warnings; with strict, the first one throws AssetError instead, as do unsupported
-    // required extensions. clonable keeps the source data that Model::clone() needs.
-    Model load(const std::string& path, bool strict, bool clonable, std::vector<std::string>& warnings);
-    // Copies the bytes.
-    Model load(const uint8_t* bytes, size_t size, bool strict, bool clonable, std::vector<std::string>& warnings);
+    // Renderer::load_asset() and add() in one step. The asset releases its source data after
+    // this one instance, as no handle can add it again.
+    Model load(const std::string& path, bool strict, std::vector<std::string>& warnings);
+    Model load(const uint8_t* bytes, size_t size, bool strict, std::vector<std::string>& warnings);
+    // A new instance of the asset, which must belong to the same renderer and be open.
+    Model add(const Asset& asset);
     // A model with one node and one glTF material whose geometry is the caller's arrays.
     // arrays.indices and arrays.triangles are required.
     Model create_mesh(const MeshArrays& arrays, const MeshMaterial& material);
     Light add_directional_light(Vec3 direction, float intensity, Vec3 color);
-    Light add_sun_light(Vec3 direction, float intensity, Vec3 color, float angular_radius,
+    Light add_sun_light(Vec3 direction, float intensity, Vec3 color, float angular_radius_deg,
                         float halo_size, float halo_falloff);
     Light add_point_light(Vec3 position, float intensity, Vec3 color, float range);
+    // cone_deg: inner and outer half-angles in degrees.
     Light add_spot_light(Vec3 position, Vec3 direction, float intensity, Vec3 color,
-                         float range, float inner, float outer);
+                         float range, std::array<float, 2> cone_deg);
     std::string encoding() const;
     void set_encoding(const std::string& value);
     // "exact" (the default) or "direct". Direct output skips filly's encode pass, so it rejects
@@ -334,8 +393,6 @@ public:
     void set_msaa(int value);
     bool shadows() const;
     void set_shadows(bool value);
-    bool refraction() const;
-    void set_refraction(bool value);
     bool transparent() const;
     void set_transparent(bool value);
     bool dithering() const;
@@ -344,34 +401,43 @@ public:
     void set_ssao(bool value);
     bool bloom() const;
     void set_bloom(bool value);
+    // Effect parameters keep their values while the effect is off.
     bool fog() const;
     void set_fog(bool value);
-    // Fog color is the linear output color of fully fogged pixels; density is per scene unit.
-    void set_fog_options(Vec3 color, float density, float start);
+    // The linear output color of fully fogged pixels.
+    Vec3 fog_color() const;
+    void set_fog_color(Vec3 value);
+    // Per scene unit.
+    float fog_density() const;
+    void set_fog_density(float value);
+    float fog_start() const;
+    void set_fog_start(float value);
     bool depth_of_field() const;
     void set_depth_of_field(bool value);
     bool vignette() const;
     void set_vignette(bool value);
-    void set_vignette_options(float midpoint, float roundness, float feather, Vec3 color);
-    // pixels: width * height * 3 values (count), rows from the top. They are copied.
-    void set_environment(const float* pixels, size_t count, uint32_t width, uint32_t height,
-                         float intensity, float rotation);
-    void load_environment(const std::string& path, float intensity, float rotation);
-    void load_environment_ktx(const std::string& ibl_path, const std::string& skybox_path,
-                              float intensity, float rotation);
-    void clear_environment();
+    float vignette_midpoint() const;
+    void set_vignette_midpoint(float value);
+    float vignette_roundness() const;
+    void set_vignette_roundness(float value);
+    float vignette_feather() const;
+    void set_vignette_feather(float value);
+    Vec3 vignette_color() const;
+    void set_vignette_color(Vec3 value);
+    // Empty without an environment. Null removes it.
+    std::optional<Environment> environment() const;
+    void set_environment(const Environment* environment);
+    // Scene settings that apply to whichever environment the scene uses, and keep their values
+    // without one. The intensity is in lux; the rotation is in degrees about +Y.
     float environment_intensity() const;
     void set_environment_intensity(float value);
+    float environment_rotation_deg() const;
+    void set_environment_rotation_deg(float value);
     bool environment_visible() const;
     void set_environment_visible(bool value);
-    float environment_rotation() const;
-    void set_environment_rotation(float value);
     Vec4 background() const;
     void set_background(Vec4 color);
 private:
-    Model load_document(std::vector<uint8_t> bytes, const std::string& path, bool strict, bool clonable,
-                        std::vector<std::string>& warnings);
-    void set_uniform_environment(Vec3 radiance, float intensity, float rotation);
     std::shared_ptr<detail::SceneData> data_;
     friend class Renderer;
     friend class Model;
@@ -419,9 +485,9 @@ private:
 
 // A host-owned OpenGL texture that Filament samples. The host writes it between begin_write()
 // and end_write(); Filament waits for those writes, and the host waits for Filament's reads.
-class HostTexture {
+class ImportedTexture {
 public:
-    explicit HostTexture(std::shared_ptr<detail::TextureData> data);
+    explicit ImportedTexture(std::shared_ptr<detail::TextureData> data);
     uint32_t width() const;
     uint32_t height() const;
     std::string color_space() const;
@@ -430,7 +496,7 @@ public:
     bool writing() const;
     void close();
     bool closed() const;
-    bool same(const HostTexture& other) const;
+    bool same(const ImportedTexture& other) const;
     uintptr_t key() const;
     std::shared_ptr<detail::TextureData> data() const { return data_; }
 private:
@@ -444,7 +510,7 @@ struct PixelBuffer {
     size_t size = 0;
 };
 
-// A readback that OffscreenTarget::begin_read() started. WebGL completes GPU readbacks only
+// A readback that RenderTarget::begin_read() started. WebGL completes GPU readbacks only
 // after control returns to the browser, so the web build polls ready() on later turns of its
 // event loop; on the desktop the first ready() completes it.
 class Readback {
@@ -456,7 +522,7 @@ public:
     std::vector<uint8_t> take();
 private:
     std::shared_ptr<detail::ReadbackData> data_;
-    friend class OffscreenTarget;
+    friend class RenderTarget;
 };
 
 // Shader compilation that Renderer::prepare() started. Compilation runs in the background:
@@ -473,9 +539,9 @@ private:
 };
 
 // A Filament-owned color texture that supports readback.
-class OffscreenTarget {
+class RenderTarget {
 public:
-    explicit OffscreenTarget(std::shared_ptr<detail::TargetData> data);
+    explicit RenderTarget(std::shared_ptr<detail::TargetData> data);
     uint32_t width() const;
     uint32_t height() const;
     PixelBuffer read() const;
@@ -508,20 +574,40 @@ class Renderer {
 public:
     explicit Renderer(uintptr_t shared_context = 0);
     Scene create_scene();
-    OffscreenTarget create_render_target(int64_t width, int64_t height,
-                                         const std::string& format, bool depth);
-    ImportedTarget import_gl_texture(uint32_t texture, int64_t width, int64_t height,
-                                     const std::string& format, bool depth);
-    void render(const Scene& scene, const OffscreenTarget& target, const RenderOptions& options = {});
+    // Cameras belong to the renderer, as in Filament, so any of its scenes can use one. A camera
+    // lives until close(), the renderer's close, or the last reference to it goes.
+    Camera create_camera();
+    // Loads a glTF or GLB file (UTF-8 path) or document bytes, which must then embed every
+    // resource. Messages about features that load but render differently are appended to
+    // warnings; with strict, the first one throws AssetError instead, as do unsupported
+    // required extensions. The bytes are copied.
+    Asset load_asset(const std::string& path, bool strict, std::vector<std::string>& warnings);
+    Asset load_asset(const uint8_t* bytes, size_t size, bool strict, std::vector<std::string>& warnings);
+    // Environments, which any scene of the renderer can use. A 2:1 panorama: a Radiance HDR, PNG,
+    // or JPEG file, or width * height * 3 linear RGB values (count), rows from the top, which are
+    // copied. Loading filters it for reflections and diffuse lighting and waits for the GPU.
+    Environment load_environment(const std::string& path);
+    Environment create_environment(const float* pixels, size_t count, uint32_t width, uint32_t height);
+    // Prefiltered cubemaps from cmgen; an empty skybox_path uses the sharpest IBL level.
+    Environment load_environment_ktx(const std::string& ibl_path, const std::string& skybox_path);
+    RenderTarget create_render_target(int64_t width, int64_t height,
+                                      const std::string& format, bool depth);
+    // on_renderer_close lets a host integration release the host objects around the texture,
+    // which the renderer does not know: close() calls it before it releases anything else,
+    // while the host context can still be current. It is dropped when the target closes first.
+    ImportedTarget import_gl_target(uint32_t texture, int64_t width, int64_t height,
+                                    const std::string& format, bool depth,
+                                    std::function<void()> on_renderer_close = {});
+    void render(const Scene& scene, const RenderTarget& target, const RenderOptions& options = {});
     void render(const Scene& scene, const ImportedTarget& target, const RenderOptions& options = {});
     // channels is 1, 3, or 4. Float textures hold linear values. pixels as for Texture::update().
     Texture create_texture(int64_t width, int64_t height, int channels, bool is_float,
                            const std::string& color_space, bool mipmaps,
                            const std::string& filter, const std::string& wrap,
                            const void* pixels, size_t bytes);
-    HostTexture import_gl_input(uint32_t texture, int64_t width, int64_t height,
-                                const std::string& color_space, const std::string& filter,
-                                const std::string& wrap);
+    ImportedTexture import_gl_texture(uint32_t texture, int64_t width, int64_t height,
+                                      const std::string& color_space, const std::string& filter,
+                                      const std::string& wrap);
     void finish();
     // Starts compiling the GPU programs that rendering this scene needs, for its current models,
     // settings, and output path, without waiting. A render after ready() returns true does not
@@ -531,6 +617,8 @@ public:
     // Filament set the state it needs again instead of trusting its cache. On the desktop,
     // Filament has its own context, and this does nothing.
     void reset_gl_state();
+    // Calls the on_renderer_close callbacks of open imported targets, newest first, then releases
+    // every resource. The first exception from a callback is rethrown after the renderer closed.
     void close();
     bool closed() const;
     uintptr_t shared_context() const;
@@ -542,13 +630,26 @@ private:
     std::shared_ptr<detail::State> state_;
 };
 
-// Whether a material's texture is a HostTexture rather than a Texture.
-bool is_host_texture(const std::shared_ptr<detail::TextureData>& data);
+// Whether a material's texture is an ImportedTexture rather than a Texture.
+bool is_imported_texture(const std::shared_ptr<detail::TextureData>& data);
 
 uintptr_t current_gl_context();
 // For host adapters: an immutable GL_RGBA8 texture in the current context, which
-// import_gl_texture() accepts, and its deletion. Pending host errors are discarded first.
+// import_gl_target() accepts, and its deletion. Pending host errors are discarded first.
 uint32_t create_host_texture(int64_t width, int64_t height);
 void delete_host_texture(uint32_t texture);
+// For host adapters: a program and a vertex array in the current context that draw a texture as a
+// quad. Vertex arrays are per context, so the quad works only in the context that created it.
+struct HostQuad {
+    uint32_t program = 0, vertex_array = 0;
+};
+HostQuad create_host_quad();
+// Draws `texture` into the bound draw framebuffer at window pixels (x, y, width, height), from the
+// lower-left corner. With blend, it composites premultiplied source-over; otherwise it copies.
+// Depth, stencil, and face culling do not apply; the scissor test does. The GL state that the
+// draw changes is restored, so hosts that cache GL state stay correct.
+void draw_host_quad(const HostQuad& quad, uint32_t texture, int64_t x, int64_t y, int64_t width,
+                    int64_t height, bool blend);
+void delete_host_quad(const HostQuad& quad);
 
 }

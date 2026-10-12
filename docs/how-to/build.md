@@ -9,7 +9,7 @@
 - uv and Python 3.12 for the development environment.
 - Space for the Filament SDK. The compressed archive is about 813 MiB.
 
-The extension requires Python 3.10 or later. Python 3.11, 3.12, and 3.14 have been tested.
+The extension requires Python 3.10 or later. Python 3.10, 3.11, 3.12, and 3.14 have been tested.
 The SDK download tool requires Python 3.12 or later. For PsychoPy, use the [Python 3.11 setup](psychopy.md) to avoid building
 the input-hook dependency from source.
 
@@ -49,7 +49,7 @@ The tool lists the imported DLLs. It exits with status 1 if a DLL is not in its 
 
 The Filament SDK is built without WebP, so the build adds libwebp 1.5.0 for `EXT_texture_webp`.
 CMake `FetchContent` downloads the release archive from `storage.googleapis.com/downloads.webmproject.org`
-at the first configure and checks its SHA-256 hash (`7d6fab70...c2a5c92c`, in `CMakeLists.txt`).
+at the first configure and checks its SHA-256 hash (`7d6fab70...c2a5c92c`, in `native/libwebp.cmake`).
 The archive is signed with the WebP release key `6B0E 6B70 976D E303 EDF2 F601 F9C3 D6BD B823 2B5D`.
 Only the static decoder library (`webpdecoder`) is built, with the same MSVC runtime (`/MT`) as the
 extension on Windows and position-independent code on Linux. Its tools are not built or
@@ -179,10 +179,47 @@ The web build compiles filly's core with Emscripten for WebGL2 into `filly-core.
 [the web build](../explanation/web.md) for the design and [use filly in a web
 page](web.md) for the API.
 
-Requirements: Linux x86_64 with glibc 2.38 or later (Ubuntu 24.04; WSL works), `curl`, `git`,
-`python3`, and `ninja`. No native compiler is needed: the host tools come from Filament's Linux
-release archive. The scripts download a pinned CMake (3.31.6) and Emscripten (emsdk 5.0.4, the
-version that Filament 1.77.1 uses), and check the archives' SHA-256 hashes.
+Two scripts do the build. `tools/build_filament_web.sh` builds the Filament WebAssembly SDK
+once. `tools/build_filly_web.sh` builds filly's module with that SDK. They download a pinned
+CMake (3.31.6) and Emscripten (emsdk 5.0.4, the version that Filament 1.77.1 uses), and check
+the archives' SHA-256 hashes. No native compiler is necessary: the host tools come from
+Filament's Linux release archive. These tools need glibc 2.38 or later.
+
+### Build on Windows with a container
+
+Use this procedure on Windows. It needs `wslc`, the WSL container command. It was tested with
+WSL 3.0.1. Reserve 5 GB of disk space for the image and the volume. From the project directory
+in PowerShell, run:
+
+```powershell
+tools\build_web_container.ps1
+```
+
+The script does these steps:
+
+1. It builds the `filly-web-build` image from `tools/web/Dockerfile` (Ubuntu 24.04).
+2. It creates the `filly-web` volume, if it does not exist. The volume holds the work folder: the
+   SDK, emsdk, CMake, the host tools, and filly's build tree.
+3. If the volume has no SDK, it runs `tools/build_filament_web.sh`. On the test laptop
+   (16 jobs), this took 9 minutes, including the downloads. Later runs use the SDK in the
+   volume.
+4. It runs `tools/build_filly_web.sh` and writes the output to `build\web`. A full build took
+   1 minute.
+
+To write the output to a different folder, use `-OutDir`, for example
+`tools\build_web_container.ps1 -OutDir C:\tmp\filly-web`. The container mounts the project
+read-only. To change the number of jobs or to build with SIMD, set `JOBS` or `FILLY_WEB_SIMD`
+in the environment before you run the script. The script passes them to the container.
+
+To build the SDK again, for example after a change to its version pin, remove the volume
+(`wslc volume remove filly-web`) and run the script again.
+
+From Git Bash, run `powershell -File tools/build_web_container.ps1`.
+
+### Build on Linux
+
+Requirements: Linux x86_64 with glibc 2.38 or later (for example, Ubuntu 24.04), `curl`, `git`,
+`python3`, `xz-utils`, and `ninja`.
 
 1. Build the Filament WebAssembly SDK once. It took less than 10 minutes on the test laptop
    (8 cores):
@@ -203,9 +240,8 @@ version that Filament 1.77.1 uses), and check the archives' SHA-256 hashes.
    `build/web` then holds `filly.js`, `filly-core.js`, `filly-core.wasm`, and `licenses/`.
    Copy all of them together.
 
-From Windows, run both scripts in WSL, for example
-`wsl -d Ubuntu-24.04 -- bash tools/build_filly_web.sh build/web`. The build tree stays in
-`~/filly-web/filly-build`, on the Linux file system.
+The build tree is in `~/filly-web/filly-build`. Keep the work folder on the Linux file system:
+in WSL, a build in `/mnt/c` is slow.
 
 For a debugging build, configure `web/` yourself with
 `-DFILLY_WEB_EXTRA_FLAGS="-fsanitize=address -g"`.

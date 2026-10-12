@@ -1014,6 +1014,8 @@ void prepare_nodes(const cgltf_data* data, PreparedAsset& tables) {
         if (node.light) {
             source.light = cgltf_light_index(data, node.light);
             source.automatic_range = node.light->type != cgltf_light_type_directional && !(node.light->range > 0);
+            if (node.light->type == cgltf_light_type_spot)
+                source.spot_cone = {node.light->spot_inner_cone_angle, node.light->spot_outer_cone_angle};
         }
         size_t targets = 0;
         if (node.mesh)
@@ -1491,6 +1493,7 @@ void plan_archive_materials(const cgltf_data* data, PreparedAsset& tables, const
         }
         if (!lit) continue;
         const bool refraction = plan.entry >= E::RefractionThin && plan.entry <= E::RefractionSolidAnisotropy;
+        tables.refractive = tables.refractive || refraction;
         const bool lobes = plan.entry != E::LitCore;
         struct Use { R role; const cgltf_texture_view* view; bool enabled; bool srgb; const char* label; };
         const auto same = [](const cgltf_texture_view& a, const cgltf_texture_view& b) { return a.texture && a.texture == b.texture; };
@@ -1650,8 +1653,6 @@ Prepared prepare_asset(std::vector<uint8_t> bytes, const std::string& path, cons
     for (const auto& name : used)
         if (!supported.contains(name) && !ignored.contains(name))
             issue("Unsupported glTF extension: " + name, required.contains(name));
-    if (used.contains("KHR_materials_transmission") && !options.refraction)
-        issue("Asset uses glass transmission. Set scene.refraction = True before loading it.");
     for (size_t i = 0; i < data->materials_count; ++i) {
         const auto& m = data->materials[i];
         if (m.has_dispersion && (!m.has_volume || m.unlit || m.has_pbr_specular_glossiness))

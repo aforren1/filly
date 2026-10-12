@@ -1,4 +1,4 @@
-// Included inside the facade namespace after resources.inc: Model::memory().
+// Included inside the facade namespace after resources.inc: Model::memory() and Asset::memory().
 namespace {
 // Bytes per pixel of uncompressed formats, or 0 for block-compressed ones.
 uint64_t pixel_bytes(f::Texture::InternalFormat format) {
@@ -60,17 +60,14 @@ uint64_t table_bytes(const detail::PreparedAsset& tables) {
         for (const auto& track : clip.tracks) total += (track.times.size() + track.values.size()) * sizeof(float);
     return total;
 }
-}
-
-ModelMemory Model::memory() const {
-    data_->check();
-    const auto& shared = *data_->shared;
+AssetMemory asset_memory(const std::shared_ptr<detail::AssetData>& owner) {
+    const auto& shared = *owner;
     const auto& tables = *shared.prepared;
-    ModelMemory result;
+    AssetMemory result;
     for (const auto* texture : shared.loaded_textures) result.gpu_texture_bytes += texture_bytes(*texture);
     for (const auto* texture : shared.textures) result.gpu_texture_bytes += texture_bytes(*texture);
     result.gpu_geometry_bytes = tables.geometry_bytes + tables.instance_geometry_bytes * shared.instances;
-    if (shared.clonable) result.cpu_bytes = shared.source_bytes + table_bytes(tables);
+    if (shared.has_source) result.cpu_bytes = shared.source_bytes + table_bytes(tables);
     result.cpu_bytes += tables.instance_cpu_bytes * shared.instances;
     if (const auto* mesh = shared.mesh.get()) {
         const uint64_t n = mesh->vertex_count;
@@ -80,9 +77,19 @@ ModelMemory Model::memory() const {
         for (const auto* ring : {&mesh->position_upload, &mesh->tangent_upload, &mesh->uv_upload, &mesh->color_upload})
             for (const auto& slot : ring->slots) if (slot.bytes) result.cpu_bytes += ring->size;
     }
-    result.clone_gpu_bytes = tables.instance_geometry_bytes;
-    result.clone_cpu_bytes = tables.instance_cpu_bytes;
-    // Only models hold the asset, so its owners are the live models that share it.
-    result.models = size_t(data_->shared.use_count());
+    result.instance_gpu_bytes = tables.instance_geometry_bytes;
+    result.instance_cpu_bytes = tables.instance_cpu_bytes;
+    // Only models and an open Asset handle hold the asset.
+    result.models = size_t(owner.use_count()) - (shared.open ? 1 : 0);
     return result;
+}
+}
+
+AssetMemory Model::memory() const {
+    data_->check();
+    return asset_memory(data_->shared);
+}
+AssetMemory Asset::memory() const {
+    data_->check();
+    return asset_memory(data_->asset);
 }

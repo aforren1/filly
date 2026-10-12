@@ -102,10 +102,10 @@ def fit_camera(camera, model, width, height, focal_length):
     narrower = min(half, math.atan(math.tan(half) * width / height))
     fill = math.tan(math.asin(math.sin(narrower) / 1.05)) / math.tan(narrower)
     # The same call gltf_viewer makes, so both sides share one projection matrix.
-    camera.set_lens_projection(focal_length_mm=focal_length, aspect=width / height, near=1, far=2)
+    camera.set_lens_projection(focal_length_mm=focal_length, aspect=width / height)
     direction = -np.asarray(VIEW_DIRECTION) / np.linalg.norm(VIEW_DIRECTION)
     try:
-        distance = camera.frame(model, fill=fill, direction=direction, aspect=width / height)
+        distance = camera.frame(model, fill=fill, direction=direction)
     except ValueError as error:
         raise ValueError("Asset has no finite nonzero bounds") from error
     bounds = np.asarray(model.bounds, dtype=float)
@@ -118,7 +118,7 @@ def fit_camera(camera, model, width, height, focal_length):
     # orientation differs in the last float bits and moved edge pixels by up to 54 levels.
     camera.look_at(target, up=(0, 1, 0))
     return {"eye": eye.tolist(), "target": target.tolist(), "up": [0.0, 1.0, 0.0],
-            "fov_y": math.degrees(2 * half), "focal_length_mm": focal_length, "near": near, "far": far}
+            "fov_y_deg": math.degrees(2 * half), "focal_length_mm": focal_length, "near": near, "far": far}
 
 
 def render_filly(args):
@@ -132,7 +132,6 @@ def render_filly(args):
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         scene.background = (0, 0, 0, 1)
-        scene.refraction = True
         scene.shadows = False
         scene.antialiasing = args.antialiasing
         scene.msaa = args.msaa
@@ -140,9 +139,10 @@ def render_filly(args):
         scene.tone_mapping = "aces_legacy"
         scene.encoding = "srgb"
         model = scene.load(args.worker)
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera_setup = fit_camera(camera, model, args.width, args.height, args.focal_length)
-        scene.load_environment(str(args.environment), intensity=IBL_INTENSITY, rotation_deg=0)
+        scene.environment = renderer.load_environment(str(args.environment))
+        scene.environment_intensity = IBL_INTENSITY
         scene.environment_visible = args.skybox
         if args.sun:
             # Same SUN light as the viewer; the default disc and halo match its settings.

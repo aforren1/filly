@@ -3,8 +3,7 @@
 import moderngl
 
 import filly
-from filly.integrations.moderngl import SharedTarget
-from filly.integrations.pyglet import create_renderer
+from filly.integrations.moderngl import HostTarget, create_renderer
 from pyglet_shared import open_window, parse_args, run
 
 
@@ -12,11 +11,11 @@ def main():
     args = parse_args(__doc__)
     filly.set_log_level("warning")
     window = open_window(args, "filly + moderngl")
-    renderer = create_renderer(window)
-    # moderngl attaches to the current context; it does not create one.
+    # moderngl attaches to the current context, which open_window() made current; it does not
+    # create one.
     ctx = moderngl.create_context()
-    width, height = window.get_framebuffer_size()
-    target = SharedTarget(renderer, ctx, width, height)
+    renderer = create_renderer()
+    target = HostTarget(renderer, ctx)
 
     def draw():
         ctx.clear(0.02, 0.03, 0.05)

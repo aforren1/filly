@@ -1,14 +1,11 @@
-"""Shared-texture integration for zengl attached to a pyglet window's context.
-
-Create the renderer with ``filly.integrations.pyglet.create_renderer(window)``.
-"""
+"""Shared-texture integration for zengl attached to a window's OpenGL context."""
 
 import zengl
 
 from .._native import _create_host_texture, _delete_host_texture
-from ._host import HostTarget
+from ._host import HostTargetBase, shared_renderer
 
-__all__ = ["SharedTarget"]
+__all__ = ["HostTarget", "create_renderer"]
 
 _VERTEX = """
 #version 330 core
@@ -34,20 +31,36 @@ _PREMULTIPLIED = {"enable": True, "src_color": "one", "dst_color": "one_minus_sr
                   "src_alpha": "one", "dst_alpha": "one_minus_src_alpha"}
 
 
-class SharedTarget(HostTarget):
+def create_renderer():
+    """Create a Filament engine sharing the current OpenGL context, which zengl attaches to.
+
+    zengl cannot make a context current; the window library does that.
+    """
+    return shared_renderer("The window library")
+
+
+class HostTarget(HostTargetBase):
     """A zengl RGBA8 image that Filament renders into.
 
-    ``draw()`` draws the image with premultiplied source-over blending.
-    ``framebuffer`` is a list of zengl images to draw into, or ``None`` for
-    the window. zengl fixes it when the pipeline is created.
+    ``texture`` is a ``zengl.Image``, None after close. ``framebuffer`` is a list of zengl
+    images to draw into, or ``None`` for the window. zengl fixes it when the pipeline is
+    created. The size defaults to the size of the first framebuffer image. With
+    ``framebuffer=None``, ``width`` and ``height`` are required: zengl does not report the
+    window's size.
     """
 
-    texture = _pipeline = None
+    texture = None
+    _pipelines = None
 
-    def __init__(self, renderer, ctx, width, height, framebuffer=None):
+    def __init__(self, renderer, ctx, *, width=None, height=None, framebuffer=None):
         self._ctx = ctx
         self._framebuffer = framebuffer
         super().__init__(renderer, width, height)
+
+    def _default_size(self):
+        if not self._framebuffer:
+            return super()._default_size()
+        return self._framebuffer[0].size
 
     def _create_host_texture(self, width, height):
         # zengl allocates mutable storage, which cannot have the sRGB view that Filament renders
@@ -58,23 +71,33 @@ class SharedTarget(HostTarget):
         except BaseException:
             _delete_host_texture(name)
             raise
-        self._pipeline = self._ctx.pipeline(
-            vertex_shader=_VERTEX, fragment_shader=_FRAGMENT,
-            layout=[{"name": "image", "binding": 0}],
-            resources=[{"type": "sampler", "binding": 0, "image": self.texture,
-                        "min_filter": "linear", "mag_filter": "linear",
-                        "wrap_x": "clamp_to_edge", "wrap_y": "clamp_to_edge"}],
-            blend=_PREMULTIPLIED, framebuffer=self._framebuffer,
-            topology="triangle_strip", vertex_count=4, viewport=(0, 0, width, height))
+        # zengl fixes the blend state in the pipeline: one pipeline for each draw mode.
+        self._pipelines = {}
+        self._pipeline(True)
         # zengl 2 does not expose the texture name as an attribute.
         return zengl.inspect(self.texture)["texture"]
 
-    def _draw(self, x, y, width, height):
-        self._pipeline.viewport = (x, y, width, height)
-        self._pipeline.render()
+    def _pipeline(self, blend):
+        pipeline = self._pipelines.get(blend)
+        if pipeline is None:
+            width, height = self.texture.size
+            pipeline = self._pipelines[blend] = self._ctx.pipeline(
+                vertex_shader=_VERTEX, fragment_shader=_FRAGMENT,
+                layout=[{"name": "image", "binding": 0}],
+                resources=[{"type": "sampler", "binding": 0, "image": self.texture,
+                            "min_filter": "linear", "mag_filter": "linear",
+                            "wrap_x": "clamp_to_edge", "wrap_y": "clamp_to_edge"}],
+                blend=_PREMULTIPLIED if blend else None, framebuffer=self._framebuffer,
+                topology="triangle_strip", vertex_count=4, viewport=(0, 0, width, height))
+        return pipeline
+
+    def _draw(self, x, y, width, height, blend):
+        pipeline = self._pipeline(blend)
+        pipeline.viewport = (x, y, width, height)
+        pipeline.render()
 
     def _release_host_resources(self, host_open):
-        for resource in (self._pipeline, self.texture):
+        for resource in [*(self._pipelines or {}).values(), self.texture]:
             if host_open and resource is not None:
                 self._ctx.release(resource)
-        self._pipeline = self.texture = None
+        self._pipelines, self.texture = None, None

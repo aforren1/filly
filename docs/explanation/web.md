@@ -134,10 +134,10 @@ Firefox has no `KHR_parallel_shader_compile`. Filament then compiles at the firs
 
 ## Differences from the desktop module
 
-- `gl_platform` is `"webgl"`. There is no offscreen renderer: every renderer uses the page's
+- `renderer.glPlatform` is `"webgl"`. There is no offscreen renderer: every renderer uses the page's
   context.
 - WebGL2 always encodes writes to sRGB attachments and has no sRGB texture views. Offscreen
-  targets store RGBA8, and `output_path = "direct"` needs `encoding = "linear"`. The default exact
+  targets store RGBA8, and `outputPath = "direct"` needs `encoding = "linear"`. The default exact
   path is unaffected.
 - WebGL2 cannot report a texture's size or format, and it has no texture views. An imported
   target must have RGBA8 storage of the given size. A page texture that materials sample as sRGB
@@ -145,11 +145,12 @@ Firefox has no `KHR_parallel_shader_compile`. Filament then compiles at the firs
   instead.
 - WebGL2 has no texture swizzle, so single-channel runtime textures raise `RangeError`. Use 3 or
   4 channels.
-- WebGL signals GPU fences only after control returns to the browser, so `OffscreenTarget.read()`
-  is asynchronous: it starts the readback (`OffscreenTarget::begin_read()` in the core) and polls
-  it on later turns of the event loop. `Target.read()` of a page-owned texture reads with
+- WebGL signals GPU fences only after control returns to the browser, so `RenderTarget.read()`
+  is asynchronous: it starts the readback (`RenderTarget::begin_read()` in the core) and polls
+  it on later turns of the event loop. `ImportedTarget.read()` of a page-owned texture reads with
   `readPixels` in JavaScript and waits for the GPU; it is for tests.
-- Host textures need no fences: `beginWrite()` and `endWrite()` keep only the bookkeeping.
+- Imported textures (`ImportedTexture`) need no fences: `beginWrite()` and `endWrite()` (or
+  `write(fn)`) keep only the bookkeeping.
 - Files load from memory: `loadUrl()` fetches a `.glb`, or a `.gltf` and the buffers and images
   it names, and writes them to Emscripten's in-memory file system for the load.
 

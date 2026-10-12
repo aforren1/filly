@@ -14,7 +14,7 @@ import numpy as np
 import pyglet
 
 import filly
-from filly.integrations.pyglet import SharedTarget, create_renderer
+from filly.integrations.pyglet import HostTarget, create_renderer
 
 
 def parse_args():
@@ -35,8 +35,8 @@ def main():
     window = pyglet.window.Window(args.width, args.height, caption="filly stereo", vsync=not args.no_vsync)
     window.switch_to()
     renderer = create_renderer(window)
-    width, height = window.get_framebuffer_size()
-    target = SharedTarget(renderer, window, width, height)
+    target = HostTarget(renderer, window)
+    width, height = target.width, target.height
 
     scene = renderer.create_scene()
     scene.background = (0.05, 0.05, 0.05, 1)
@@ -52,9 +52,8 @@ def main():
     half = width // 2
     eyes = []
     for side in (-1, 1):
-        camera = scene.create_camera()
-        # The aspect follows each half's viewport.
-        camera.set_perspective(fov_y=30, near=0.05, far=10)
+        camera = renderer.create_camera()
+        # The default projection follows each half's viewport.
         camera.position = (side * args.iod / 2, 0, args.distance)
         camera.look_at((side * args.iod / 2, 0, 0))
         eyes.append(camera)
@@ -85,7 +84,7 @@ def main():
         pyglet.app.run()
     finally:
         window.switch_to()
-        target.close()
+        # Closes the target too.
         renderer.close()
         window.close()
     measured = np.array(timings[min(30, len(timings) // 2):])

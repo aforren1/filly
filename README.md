@@ -30,10 +30,8 @@ with filly.Renderer() as renderer:
     horse = scene.load("examples/assets/wooden_playground_horse.glb")
     horse.apply_animation(0, 1.25) # a pose from its spring animation
 
-    camera = scene.create_camera()
-    camera.set_perspective(fov_y=30, near=0.1, far=100)
-    camera.frame(horse, direction=(-1, -0.3, -1), aspect=800 / 600)
-    scene.camera = camera
+    scene.camera = renderer.create_camera()
+    scene.camera.frame(horse, direction=(-1, -0.3, -1))
     scene.add_directional_light(direction=(-1, -1, -2), intensity=100_000)
 
     target = renderer.create_render_target(width=800, height=600)
@@ -47,20 +45,18 @@ filly renders into a texture that PsychoPy draws directly, with no copy through 
 
 ```python
 from psychopy import core, visual
-from filly.integrations.psychopy import SharedTarget, create_renderer
+from filly.integrations.psychopy import HostTarget, create_renderer
 
 win = visual.Window((1024, 768), units="pix")
 renderer = create_renderer(win) # shares the window's OpenGL context
 scene = renderer.create_scene()
 horse = scene.load("examples/assets/wooden_playground_horse.glb")
-camera = scene.create_camera()
-camera.set_perspective(fov_y=30, near=0.1, far=100)
-camera.frame(horse, aspect=1)
-scene.camera = camera
+scene.camera = renderer.create_camera()
+scene.camera.frame(horse)
 scene.add_directional_light(direction=(-1, -1, -2), intensity=100_000)
 
-target = SharedTarget(renderer, win, 512, 512)
-stim = target.as_psychopy_texture() # an ImageStim
+target = HostTarget(renderer, win, width=512, height=512)
+stim = target.create_image_stim()
 clock = core.Clock()
 while clock.getTime() < 3:
     horse.apply_animation(0, clock.getTime())
@@ -68,12 +64,11 @@ while clock.getTime() < 3:
     stim.draw()
     win.flip()
 
-target.close()
 renderer.close()
 win.close()
 ```
 
-Close the target, then the renderer, then the window. The same pattern works with a
+Close the renderer before the window. The same pattern works with a
 [pyglet, moderngl, or zengl window](docs/how-to/gl-hosts.md).
 
 ## Features
@@ -99,8 +94,9 @@ See the `examples/` folder.
 | Example | Shows |
 | --- | --- |
 | `screenshot.py` | The animation above (`--gif`), or a still image, rendered offscreen. |
-| `psychopy_shared.py` | A model in a PsychoPy window. Pass your own GLB path. |
-| `pyglet_shared.py`, `moderngl_shared.py`, `zengl_shared.py` | The same in other OpenGL hosts. |
+| `psychopy_shared.py` | A model in a PsychoPy window with all the bells and whistles. Pass your own GLB path. |
+| `psychopy_stress.py` | Repeated PsychoPy trials, with frame timing and memory reports. See [measure timing](docs/how-to/stress-test.md). |
+| `pyglet_shared.py`, `moderngl_shared.py`, `zengl_shared.py` | The same (minus the bells and whistles) in other OpenGL hosts. |
 | `drifting_grating.py` | A texture updated every frame on a tilted plane. |
 | `stereo.py` | Two cameras side by side in one window. |
 | `shapes.py` | Generated and deforming meshes. |

@@ -11,9 +11,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <type_traits>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -81,15 +83,16 @@ std::string fs_path(nb::handle path) {
 }
 
 // Loads with the GIL released for the whole native load, including preparation. Messages
-// become AssetCompatibilityWarning; if the warning filter turns one into an error, the model
+// become AssetCompatibilityWarning; if the warning filter turns one into an error, the result
 // is closed, as the load would not have happened when preparation raised the warning itself.
-Model load(Scene& scene, nb::handle source, bool strict, bool clonable) {
+// `load` takes (path, strict, warnings) or (bytes, size, strict, warnings).
+template <class Result, class Load> Result load_source(nb::handle source, bool strict, Load load) {
     std::vector<std::string> warnings;
-    std::optional<Model> model;
+    std::optional<Result> result;
     auto warn = [&] {
         for (const auto& message : warnings) {
             if (PyErr_WarnEx(compatibility_warning, message.c_str(), 1) == 0) continue;
-            if (model) model->close();
+            if (result) result->close();
             throw nb::python_error();
         }
     };
@@ -99,11 +102,11 @@ Model load(Scene& scene, nb::handle source, bool strict, bool clonable) {
             const auto blob = nb::borrow<nb::bytes>(source);
             const auto* first = reinterpret_cast<const uint8_t*>(blob.c_str());
             nb::gil_scoped_release release;
-            model = scene.load(first, blob.size(), strict, clonable, warnings);
+            result = load(first, blob.size(), strict, warnings);
         } else {
             const auto path = fs_path(source);
             nb::gil_scoped_release release;
-            model = scene.load(path, strict, clonable, warnings);
+            result = load(path, strict, warnings);
         }
     } catch (...) {
         // Warnings raised before the error still reach the caller, as they did from Python.
@@ -111,7 +114,7 @@ Model load(Scene& scene, nb::handle source, bool strict, bool clonable) {
         throw;
     }
     warn();
-    return *model;
+    return *result;
 }
 
 nb::dict shape_dict(ShapeArrays&& shape) {
@@ -134,8 +137,8 @@ nb::dict shape_dict(ShapeArrays&& shape) {
 struct Acquisition {
     nb::object target;
 };
-// Context manager returned by HostTexture.write().
-struct HostWrite {
+// Context manager returned by ImportedTexture.write().
+struct TextureWrite {
     nb::object texture;
 };
 
@@ -172,19 +175,60 @@ MeshArrays mesh_arrays(size_t vertices, const std::optional<Vertices3>& position
 
 nb::object wrap_texture(std::shared_ptr<detail::TextureData> data) {
     if (!data) return nb::none();
-    return is_host_texture(data) ? nb::cast(HostTexture(data)) : nb::cast(Texture(data));
+    return is_imported_texture(data) ? nb::cast(ImportedTexture(data)) : nb::cast(Texture(data));
 }
 std::shared_ptr<detail::TextureData> unwrap_texture(nb::handle value) {
     if (value.is_none()) return nullptr;
     if (nb::isinstance<Texture>(value)) return nb::cast<const Texture&>(value).data();
-    if (nb::isinstance<HostTexture>(value)) return nb::cast<const HostTexture&>(value).data();
-    throw nb::type_error("Texture slots take a Texture, a HostTexture, or None");
+    if (nb::isinstance<ImportedTexture>(value)) return nb::cast<const ImportedTexture&>(value).data();
+    throw nb::type_error("Texture slots take a Texture, an ImportedTexture, or None");
 }
-int texture_slot(const std::string& slot) {
-    if (slot == "base_color") return 0;
-    if (slot == "emissive") return 1;
-    throw std::invalid_argument("slot must be 'base_color' or 'emissive', got '" + slot + "'");
+// One component of a texture slot's transform, as a property: None without a runtime texture.
+template <int Slot, class T> auto uv_get(T UvTransform::* member) {
+    return [member](const Material& self) -> std::optional<T> {
+        const auto value = self.texture_transform(Slot);
+        if (!value) return std::nullopt;
+        return (*value).*member;
+    };
 }
+template <int Slot, class T> auto uv_set(T UvTransform::* member) {
+    return [member](Material& self, T component) {
+        auto value = self.texture_transform(Slot).value_or(UvTransform{});
+        value.*member = component;
+        self.set_texture_transform(Slot, value);
+    };
+}
+// `with` support for every type that has close(). __enter__ returns the caller's object, so that a
+// subclass instance stays one, and __exit__ calls its close(), which a subclass can extend.
+template <class T> void closable(nb::class_<T>& type, const char* closed_message) {
+    type.def("__enter__", [closed_message](nb::object self) {
+        const auto& value = nb::cast<const T&>(self);
+        if constexpr (std::is_same_v<T, Camera>) {
+            // Fails here rather than at the end of the block, where close() would raise.
+            if (value.has_node()) throw FillyError("Imported cameras close with their model");
+        }
+        if (value.closed()) throw FillyError(closed_message);
+        return self;
+    }).def("__exit__", [](nb::handle self, nb::handle, nb::handle, nb::handle) {
+        self.attr("close")();
+    }, nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none());
+}
+
+// Renderer::close() calls the callback without the GIL, so the GIL is taken for the call and for
+// the release of the last reference.
+std::function<void()> python_callback(nb::handle function) {
+    if (!PyCallable_Check(function.ptr())) throw nb::type_error("on_renderer_close must be callable or None");
+    std::shared_ptr<PyObject> owner(nb::borrow(function).release().ptr(), [](PyObject* object) {
+        if (!Py_IsInitialized()) return;
+        nb::gil_scoped_acquire gil;
+        Py_DECREF(object);
+    });
+    return [owner] {
+        nb::gil_scoped_acquire gil;
+        nb::handle(owner.get())();
+    };
+}
+
 RenderOptions render_options(const std::optional<Camera>& camera, nb::handle viewport, bool clear) {
     RenderOptions options;
     if (camera) options.camera = &*camera;
@@ -217,6 +261,17 @@ NB_MODULE(_native, module) {
         return create_host_texture(pixel_size(width, "width"), pixel_size(height, "height"));
     }, "width"_a, "height"_a);
     module.def("_delete_host_texture", &delete_host_texture, "texture"_a);
+    module.def("_create_host_quad", [] {
+        const auto quad = create_host_quad();
+        return std::make_pair(quad.program, quad.vertex_array);
+    });
+    module.def("_draw_host_quad", [](std::pair<uint32_t, uint32_t> quad, uint32_t texture, int64_t x, int64_t y,
+                                     int64_t width, int64_t height, bool blend) {
+        draw_host_quad({quad.first, quad.second}, texture, x, y, width, height, blend);
+    }, "quad"_a, "texture"_a, "x"_a, "y"_a, "width"_a, "height"_a, "blend"_a);
+    module.def("_delete_host_quad", [](std::pair<uint32_t, uint32_t> quad) {
+        delete_host_quad({quad.first, quad.second});
+    }, "quad"_a);
     nb::exception<FillyError> error(module, "FillyError");
     nb::exception<BackendError>(module, "BackendError", error.ptr());
     nb::exception<AssetError>(module, "AssetError", error.ptr());
@@ -265,12 +320,14 @@ NB_MODULE(_native, module) {
         .def_ro("material_copies", &Stats::material_copies)
         .def_ro("frames_rendered", &Stats::frames_rendered);
 
-    nb::class_<OffscreenTarget>(module, "OffscreenTarget")
-        .def("close", &OffscreenTarget::close, nb::call_guard<nb::gil_scoped_release>())
-        .def_prop_ro("closed", &OffscreenTarget::closed)
-        .def_prop_ro("width", &OffscreenTarget::width)
-        .def_prop_ro("height", &OffscreenTarget::height)
-        .def("read", [](const OffscreenTarget& self) {
+    nb::class_<RenderTarget> render_target(module, "RenderTarget");
+    closable(render_target, "Render target is closed");
+    render_target
+        .def("close", &RenderTarget::close, nb::call_guard<nb::gil_scoped_release>())
+        .def_prop_ro("closed", &RenderTarget::closed)
+        .def_prop_ro("width", &RenderTarget::width)
+        .def_prop_ro("height", &RenderTarget::height)
+        .def("read", [](const RenderTarget& self) {
             const size_t width = self.width(), height = self.height();
             PixelBuffer pixels;
             {
@@ -298,7 +355,9 @@ NB_MODULE(_native, module) {
             target.release();
         }, nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none());
 
-    nb::class_<Texture>(module, "Texture")
+    nb::class_<Texture> texture_type(module, "Texture");
+    closable(texture_type, "Texture is closed");
+    texture_type
         .def_prop_ro("width", &Texture::width)
         .def_prop_ro("height", &Texture::height)
         .def_prop_ro("channels", &Texture::channels)
@@ -323,37 +382,41 @@ NB_MODULE(_native, module) {
         })
         .def("__hash__", [](const Texture& self) { return self.key(); });
 
-    nb::class_<HostWrite>(module, "_HostWrite")
-        .def("__enter__", [](HostWrite& self) {
-            auto& texture = nb::cast<HostTexture&>(self.texture);
+    nb::class_<TextureWrite>(module, "_TextureWrite")
+        .def("__enter__", [](TextureWrite& self) {
+            auto& texture = nb::cast<ImportedTexture&>(self.texture);
             {
                 nb::gil_scoped_release release;
                 texture.begin_write();
             }
             return self.texture;
         })
-        .def("__exit__", [](HostWrite& self, nb::handle, nb::handle, nb::handle) {
-            nb::cast<HostTexture&>(self.texture).end_write();
+        .def("__exit__", [](TextureWrite& self, nb::handle, nb::handle, nb::handle) {
+            nb::cast<ImportedTexture&>(self.texture).end_write();
         }, nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none());
 
-    nb::class_<HostTexture>(module, "HostTexture")
-        .def_prop_ro("width", &HostTexture::width)
-        .def_prop_ro("height", &HostTexture::height)
-        .def_prop_ro("color_space", &HostTexture::color_space)
+    nb::class_<ImportedTexture> imported_texture(module, "ImportedTexture");
+    closable(imported_texture, "Texture is closed");
+    imported_texture
+        .def_prop_ro("width", &ImportedTexture::width)
+        .def_prop_ro("height", &ImportedTexture::height)
+        .def_prop_ro("color_space", &ImportedTexture::color_space)
         .def("write", [](nb::object self) {
-            nb::cast<HostTexture&>(self);
-            return HostWrite{self};
+            nb::cast<ImportedTexture&>(self);
+            return TextureWrite{self};
         })
-        .def_prop_ro("writing", &HostTexture::writing)
-        .def("close", &HostTexture::close, nb::call_guard<nb::gil_scoped_release>())
-        .def_prop_ro("closed", &HostTexture::closed)
-        .def("__eq__", [](const HostTexture& self, nb::handle other) {
-            return nb::isinstance<HostTexture>(other) && self.same(nb::cast<const HostTexture&>(other));
+        .def_prop_ro("writing", &ImportedTexture::writing)
+        .def("close", &ImportedTexture::close, nb::call_guard<nb::gil_scoped_release>())
+        .def_prop_ro("closed", &ImportedTexture::closed)
+        .def("__eq__", [](const ImportedTexture& self, nb::handle other) {
+            return nb::isinstance<ImportedTexture>(other) && self.same(nb::cast<const ImportedTexture&>(other));
         })
-        .def("__hash__", [](const HostTexture& self) { return self.key(); });
+        .def("__hash__", [](const ImportedTexture& self) { return self.key(); });
 
-    nb::class_<ImportedTarget>(module, "ImportedTarget")
-        // Host adapters subclass this type and initialize it from import_gl_texture().
+    nb::class_<ImportedTarget> imported(module, "ImportedTarget");
+    closable(imported, "Render target is closed");
+    imported
+        // Host adapters subclass this type and initialize it from import_gl_target().
         .def(nb::init<const ImportedTarget&>())
         .def("acquire", [](nb::object self) {
             nb::cast<ImportedTarget&>(self);
@@ -370,20 +433,47 @@ NB_MODULE(_native, module) {
              "Let the backend make progress, then report whether every program is compiled.")
         .def_prop_ro("pending", &Preparation::pending);
 
-    nb::class_<Renderer>(module, "Renderer")
+    nb::class_<Renderer> renderer_type(module, "Renderer");
+    closable(renderer_type, "Renderer is closed");
+    renderer_type
         .def("__init__", [](Renderer* self, nb::object context) {
             uintptr_t handle = context.is_none() ? 0 : nb::cast<uintptr_t>(context);
             if (!context.is_none() && !handle) throw InteropError("shared_context cannot be zero; use None for offscreen rendering");
             new (self) Renderer(handle);
         }, nb::kw_only(), nb::arg("shared_context").none() = nb::none())
         .def("create_scene", &Renderer::create_scene)
+        .def("create_camera", &Renderer::create_camera)
+        .def("load_asset", [](Renderer& self, nb::handle source, bool strict) {
+            return load_source<Asset>(source, strict, [&](auto&&... args) { return self.load_asset(args...); });
+        }, "source"_a, nb::kw_only(), "strict"_a = false)
+        .def("load_environment", [](Renderer& self, nb::object path) {
+            const auto filename = fs_path(path);
+            nb::gil_scoped_release release;
+            return self.load_environment(filename);
+        }, "path"_a)
+        .def("load_environment_ktx", [](Renderer& self, nb::object ibl, nb::object skybox) {
+            const auto ibl_path = fs_path(ibl);
+            const auto skybox_path = skybox.is_none() ? std::string() : fs_path(skybox);
+            nb::gil_scoped_release release;
+            return self.load_environment_ktx(ibl_path, skybox_path);
+        }, "ibl_path"_a, "skybox_path"_a.none() = nb::none())
+        .def("create_environment", [](Renderer& self, nb::ndarray<nb::numpy, const float, nb::shape<-1, -1, 3>, nb::c_contig> pixels) {
+            const auto height = pixels.shape(0), width = pixels.shape(1);
+            if (height < 2 || height > 4096 || width != 2 * height)
+                throw std::invalid_argument("Environment must be a 2:1 RGB panorama with height 2..4096");
+            nb::gil_scoped_release release;
+            return self.create_environment(pixels.data(), pixels.size(), uint32_t(width), uint32_t(height));
+        }, "pixels"_a)
         .def("create_render_target", [](Renderer& self, nb::handle width, nb::handle height, const std::string& format, bool depth) {
             return self.create_render_target(pixel_size(width, "width"), pixel_size(height, "height"), format, depth);
         }, nb::kw_only(), "width"_a, "height"_a, "format"_a = "rgba8", "depth"_a = true)
-        .def("import_gl_texture", [](Renderer& self, uint32_t texture, nb::handle width, nb::handle height, const std::string& format, bool depth) {
-            return self.import_gl_texture(texture, pixel_size(width, "width"), pixel_size(height, "height"), format, depth);
-        }, "texture_id"_a, nb::kw_only(), "width"_a, "height"_a, "format"_a = "rgba8", "depth"_a = true)
-        .def("render", [](Renderer& self, const Scene& scene, const OffscreenTarget& target, std::optional<Camera> camera,
+        .def("import_gl_target", [](Renderer& self, uint32_t texture, nb::handle width, nb::handle height, const std::string& format,
+                                    bool depth, nb::handle on_renderer_close) {
+            return self.import_gl_target(texture, pixel_size(width, "width"), pixel_size(height, "height"), format, depth,
+                                         on_renderer_close.is_none() ? nullptr : python_callback(on_renderer_close));
+        }, "texture_id"_a, nb::kw_only(), "width"_a, "height"_a, "format"_a = "rgba8", "depth"_a = true,
+           "on_renderer_close"_a.none() = nb::none())
+        .def("render", [](Renderer& self, const Scene& scene, const RenderTarget& target, std::optional<Camera> camera,
                           nb::handle viewport, bool clear) {
             const auto options = render_options(camera, viewport, clear);
             nb::gil_scoped_release release;
@@ -403,10 +493,10 @@ NB_MODULE(_native, module) {
             return self.create_texture(int64_t(pixels.shape(1)), int64_t(pixels.shape(0)), channels, is_float,
                                        color_space, mipmaps, filter, wrap, pixels.data(), pixel_bytes(pixels));
         }, "pixels"_a, nb::kw_only(), "color_space"_a, "mipmaps"_a = false, "filter"_a = "linear", "wrap"_a = "repeat")
-        .def("import_gl_input", [](Renderer& self, uint32_t texture, nb::handle width, nb::handle height,
-                                   const std::string& color_space, const std::string& filter, const std::string& wrap) {
-            return self.import_gl_input(texture, pixel_size(width, "width"), pixel_size(height, "height"),
-                                        color_space, filter, wrap);
+        .def("import_gl_texture", [](Renderer& self, uint32_t texture, nb::handle width, nb::handle height,
+                                     const std::string& color_space, const std::string& filter, const std::string& wrap) {
+            return self.import_gl_texture(texture, pixel_size(width, "width"), pixel_size(height, "height"),
+                                          color_space, filter, wrap);
         }, "texture_id"_a, nb::kw_only(), "width"_a, "height"_a, "color_space"_a, "filter"_a = "linear",
            "wrap"_a = "repeat")
         .def("prepare", &Renderer::prepare, "scene"_a)
@@ -415,32 +505,29 @@ NB_MODULE(_native, module) {
         .def_prop_ro("closed", &Renderer::closed)
         .def_prop_ro("shared_context", &Renderer::shared_context)
         .def_prop_ro("gl_platform", &Renderer::gl_platform)
-        .def_prop_ro("stats", &Renderer::stats)
-        .def("__enter__", [](Renderer& self) -> Renderer& {
-            if (self.closed()) throw FillyError("Renderer is closed");
-            return self;
-        }, nb::rv_policy::reference_internal)
-        .def("__exit__", [](Renderer& self, nb::handle, nb::handle, nb::handle) {
-            nb::gil_scoped_release release;
-            self.close();
-        }, nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none());
+        .def_prop_ro("stats", &Renderer::stats);
 
-    nb::class_<Scene>(module, "Scene")
+    nb::class_<Scene> scene_type(module, "Scene");
+    closable(scene_type, "Scene is closed");
+    scene_type
         .def("close", &Scene::close, nb::call_guard<nb::gil_scoped_release>())
         .def_prop_ro("closed", &Scene::closed)
-        .def("create_camera", &Scene::create_camera)
         .def_prop_rw("camera", &Scene::camera, &Scene::set_camera)
-        .def("load", &load, "source"_a, nb::kw_only(), "strict"_a = false, "clonable"_a = false)
+        .def("load", [](Scene& self, nb::handle source, bool strict) {
+            return load_source<Model>(source, strict, [&](auto&&... args) { return self.load(args...); });
+        }, "source"_a, nb::kw_only(), "strict"_a = false)
+        .def("add", &Scene::add, "asset"_a)
         .def("add_directional_light", &Scene::add_directional_light, nb::kw_only(),
              "direction"_a, "intensity"_a = 50000.0f, "color"_a = Vec3{1, 1, 1})
         .def("add_sun_light", &Scene::add_sun_light, nb::kw_only(),
              "direction"_a, "intensity"_a = 100000.0f, "color"_a = Vec3{1, 1, 1},
              "angular_radius_deg"_a = 0.545f, "halo_size"_a = 10.0f, "halo_falloff"_a = 80.0f)
+        // 50000 cd lights a surface 1 m away as brightly as the default directional light does.
         .def("add_point_light", &Scene::add_point_light, nb::kw_only(), "position"_a,
-             "intensity"_a = 100.0f, "color"_a = Vec3{1,1,1}, "range"_a = 10.0f)
+             "intensity"_a = 50000.0f, "color"_a = Vec3{1,1,1}, "range"_a = 10.0f)
         .def("add_spot_light", &Scene::add_spot_light, nb::kw_only(), "position"_a, "direction"_a,
-             "intensity"_a = 100.0f, "color"_a = Vec3{1,1,1}, "range"_a = 10.0f,
-             "inner"_a = 0.3f, "outer"_a = 0.6f)
+             "intensity"_a = 50000.0f, "color"_a = Vec3{1,1,1}, "range"_a = 10.0f,
+             "cone_deg"_a = std::array<float, 2>{15, 30})
         .def_prop_rw("encoding", &Scene::encoding, &Scene::set_encoding)
         .def_prop_rw("output_path", &Scene::output_path, &Scene::set_output_path)
         .def_prop_rw("tone_mapping", &Scene::tone_mapping, &Scene::set_tone_mapping)
@@ -450,18 +537,20 @@ NB_MODULE(_native, module) {
             self.set_msaa(nb::cast<int>(nb::int_(value)));
         })
         .def_prop_rw("shadows", &Scene::shadows, &Scene::set_shadows)
-        .def_prop_rw("refraction", &Scene::refraction, &Scene::set_refraction)
         .def_prop_rw("transparent", &Scene::transparent, &Scene::set_transparent)
         .def_prop_rw("dithering", &Scene::dithering, &Scene::set_dithering)
         .def_prop_rw("ssao", &Scene::ssao, &Scene::set_ssao)
         .def_prop_rw("bloom", &Scene::bloom, &Scene::set_bloom)
         .def_prop_rw("fog", &Scene::fog, &Scene::set_fog)
-        .def("set_fog_options", &Scene::set_fog_options, nb::kw_only(), "color"_a = Vec3{1, 1, 1},
-             "density"_a = 0.1f, "start"_a = 0.0f)
+        .def_prop_rw("fog_color", &Scene::fog_color, &Scene::set_fog_color)
+        .def_prop_rw("fog_density", &Scene::fog_density, &Scene::set_fog_density)
+        .def_prop_rw("fog_start", &Scene::fog_start, &Scene::set_fog_start)
         .def_prop_rw("depth_of_field", &Scene::depth_of_field, &Scene::set_depth_of_field)
         .def_prop_rw("vignette", &Scene::vignette, &Scene::set_vignette)
-        .def("set_vignette_options", &Scene::set_vignette_options, nb::kw_only(), "midpoint"_a = 0.5f,
-             "roundness"_a = 0.5f, "feather"_a = 0.5f, "color"_a = Vec3{0, 0, 0})
+        .def_prop_rw("vignette_midpoint", &Scene::vignette_midpoint, &Scene::set_vignette_midpoint)
+        .def_prop_rw("vignette_roundness", &Scene::vignette_roundness, &Scene::set_vignette_roundness)
+        .def_prop_rw("vignette_feather", &Scene::vignette_feather, &Scene::set_vignette_feather)
+        .def_prop_rw("vignette_color", &Scene::vignette_color, &Scene::set_vignette_color)
         .def("create_mesh", [](Scene& self, Vertices3 positions, Triangles indices, std::optional<Vertices3> normals,
                                std::optional<Vertices2> uvs, std::optional<Vertices4> colors, Vec4 base_color,
                                float metallic, float roughness, Vec3 emissive, bool unlit, bool double_sided,
@@ -476,28 +565,17 @@ NB_MODULE(_native, module) {
            "colors"_a.none() = nb::none(), "base_color"_a = Vec4{1, 1, 1, 1}, "metallic"_a = 0.0f,
            "roughness"_a = 1.0f, "emissive"_a = Vec3{0, 0, 0}, "unlit"_a = false, "double_sided"_a = false,
            "alpha_mode"_a = "opaque")
-        .def("load_environment", [](Scene& self, nb::object path, float intensity, float rotation) {
-            const auto filename = fs_path(path);
-            nb::gil_scoped_release release; self.load_environment(filename, intensity, rotation);
-        }, "path"_a, nb::kw_only(), "intensity"_a = 30000.0f, "rotation_deg"_a = 0.0f)
-        .def("load_environment_ktx", [](Scene& self, nb::object ibl, nb::object skybox, float intensity, float rotation) {
-            const auto ibl_path = fs_path(ibl);
-            const auto skybox_path = skybox.is_none() ? std::string() : fs_path(skybox);
-            nb::gil_scoped_release release; self.load_environment_ktx(ibl_path, skybox_path, intensity, rotation);
-        }, "ibl_path"_a, "skybox_path"_a.none() = nb::none(), nb::kw_only(), "intensity"_a = 30000.0f, "rotation_deg"_a = 0.0f)
-        .def("set_environment", [](Scene& self, nb::ndarray<nb::numpy, const float, nb::shape<-1,-1,3>, nb::c_contig> pixels, float intensity, float rotation) {
-            const auto height = pixels.shape(0), width = pixels.shape(1);
-            if (height < 2 || height > 4096 || width != 2*height) throw std::invalid_argument("Environment must be a 2:1 RGB panorama with height 2..4096");
-            nb::gil_scoped_release release;
-            self.set_environment(pixels.data(), pixels.size(), uint32_t(width), uint32_t(height), intensity, rotation);
-        }, "pixels"_a, nb::kw_only(), "intensity"_a = 30000.0f, "rotation_deg"_a = 0.0f)
-        .def("clear_environment", &Scene::clear_environment)
+        .def_prop_rw("environment", &Scene::environment,
+            [](Scene& self, std::optional<Environment> value) { self.set_environment(value ? &*value : nullptr); },
+            nb::for_setter(nb::arg("value").none()))
         .def_prop_rw("environment_intensity", &Scene::environment_intensity, &Scene::set_environment_intensity)
+        .def_prop_rw("environment_rotation_deg", &Scene::environment_rotation_deg, &Scene::set_environment_rotation_deg)
         .def_prop_rw("environment_visible", &Scene::environment_visible, &Scene::set_environment_visible)
-        .def_prop_rw("environment_rotation", &Scene::environment_rotation, &Scene::set_environment_rotation)
         .def_prop_rw("background", &Scene::background, &Scene::set_background);
 
-    nb::class_<Light>(module, "Light")
+    nb::class_<Light> light_type(module, "Light");
+    closable(light_type, "Light is closed");
+    light_type
         .def("close", &Light::close)
         .def_prop_ro("closed", &Light::closed)
         .def_prop_ro("type", &Light::type)
@@ -506,10 +584,16 @@ NB_MODULE(_native, module) {
         .def_prop_rw("position", &Light::position, &Light::set_position)
         .def_prop_rw("direction", &Light::direction, &Light::set_direction)
         .def_prop_rw("range", &Light::range, &Light::set_range)
+        .def_prop_rw("cone_deg", &Light::cone_deg, &Light::set_cone_deg)
         .def_prop_rw("casts_shadows", &Light::casts_shadows, &Light::set_casts_shadows)
-        .def("set_shadow_options", &Light::set_shadow_options, nb::kw_only(),
-             "map_size"_a = 1024, "constant_bias"_a = 0.001f, "normal_bias"_a = 1.0f)
-        .def("set_spot_cone", &Light::set_spot_cone, "inner"_a, "outer"_a)
+        .def_prop_rw("shadow_map_size", &Light::shadow_map_size, [](Light& self, nb::handle value) {
+            if (PyBool_Check(value.ptr()) || !PyIndex_Check(value.ptr())) throw nb::type_error("shadow_map_size must be an integer");
+            const auto size = nb::cast<int64_t>(nb::int_(value));
+            // Out-of-range values reach the native check, which names the valid range.
+            self.set_shadow_map_size(size < 0 || size > 0xFFFFFFFFll ? 0 : uint32_t(size));
+        })
+        .def_prop_rw("shadow_constant_bias", &Light::shadow_constant_bias, &Light::set_shadow_constant_bias)
+        .def_prop_rw("shadow_normal_bias", &Light::shadow_normal_bias, &Light::set_shadow_normal_bias)
         .def_prop_ro("node", [](const Light& self) -> nb::object {
             return self.has_node() ? nb::cast(self.node()) : nb::none();
         })
@@ -527,35 +611,58 @@ NB_MODULE(_native, module) {
             return result;
         });
 
-    nb::class_<ModelMemory>(module, "ModelMemory")
-        .def_ro("gpu_texture_bytes", &ModelMemory::gpu_texture_bytes)
-        .def_ro("gpu_geometry_bytes", &ModelMemory::gpu_geometry_bytes)
-        .def_prop_ro("gpu_bytes", [](const ModelMemory& self) { return self.gpu_texture_bytes + self.gpu_geometry_bytes; })
-        .def_ro("cpu_bytes", &ModelMemory::cpu_bytes)
-        .def_ro("clone_gpu_bytes", &ModelMemory::clone_gpu_bytes)
-        .def_ro("clone_cpu_bytes", &ModelMemory::clone_cpu_bytes)
-        .def_ro("models", &ModelMemory::models)
-        .def("__repr__", [](const ModelMemory& self) {
-            return "ModelMemory(gpu_texture_bytes=" + std::to_string(self.gpu_texture_bytes) + ", gpu_geometry_bytes="
+    nb::class_<AssetMemory>(module, "AssetMemory")
+        .def_ro("gpu_texture_bytes", &AssetMemory::gpu_texture_bytes)
+        .def_ro("gpu_geometry_bytes", &AssetMemory::gpu_geometry_bytes)
+        .def_prop_ro("gpu_bytes", [](const AssetMemory& self) { return self.gpu_texture_bytes + self.gpu_geometry_bytes; })
+        .def_ro("cpu_bytes", &AssetMemory::cpu_bytes)
+        .def_ro("instance_gpu_bytes", &AssetMemory::instance_gpu_bytes)
+        .def_ro("instance_cpu_bytes", &AssetMemory::instance_cpu_bytes)
+        .def_ro("models", &AssetMemory::models)
+        .def("__repr__", [](const AssetMemory& self) {
+            return "AssetMemory(gpu_texture_bytes=" + std::to_string(self.gpu_texture_bytes) + ", gpu_geometry_bytes="
                 + std::to_string(self.gpu_geometry_bytes) + ", cpu_bytes=" + std::to_string(self.cpu_bytes)
-                + ", clone_gpu_bytes=" + std::to_string(self.clone_gpu_bytes) + ", clone_cpu_bytes="
-                + std::to_string(self.clone_cpu_bytes) + ", models=" + std::to_string(self.models) + ")";
+                + ", instance_gpu_bytes=" + std::to_string(self.instance_gpu_bytes) + ", instance_cpu_bytes="
+                + std::to_string(self.instance_cpu_bytes) + ", models=" + std::to_string(self.models) + ")";
         });
 
-    nb::class_<Camera>(module, "Camera")
+    nb::class_<Asset> asset_type(module, "Asset");
+    closable(asset_type, "Asset is closed");
+    asset_type
+        .def_prop_ro("memory", &Asset::memory)
+        .def("close", &Asset::close)
+        .def_prop_ro("closed", &Asset::closed);
+
+    nb::class_<Environment> environment_type(module, "Environment");
+    closable(environment_type, "Environment is closed");
+    environment_type
+        .def("close", &Environment::close)
+        .def_prop_ro("closed", &Environment::closed)
+        .def("__eq__", [](const Environment& self, nb::handle other) {
+            return nb::isinstance<Environment>(other) && self.same(nb::cast<const Environment&>(other));
+        })
+        .def("__hash__", [](const Environment& self) { return self.key(); });
+
+    nb::class_<Camera> camera_type(module, "Camera");
+    closable(camera_type, "Camera is closed");
+    camera_type
         .def_prop_rw("exposure", &Camera::exposure, &Camera::set_exposure)
         .def_prop_rw("focus_distance", &Camera::focus_distance, &Camera::set_focus_distance)
         .def_prop_rw("aperture", &Camera::aperture, &Camera::set_aperture)
-        .def("set_perspective", [](Camera& self, double fov_y, std::optional<double> aspect, double near, double far) {
-            self.set_perspective(fov_y, aspect_value(aspect), near, far);
-        }, nb::kw_only(), "fov_y"_a, "aspect"_a.none() = nb::none(), "near"_a, "far"_a)
-        .def("set_lens_projection", [](Camera& self, double focal, std::optional<double> aspect, double near, double far) {
+        .def("set_perspective", [](Camera& self, double fov_y_deg, std::optional<double> aspect, std::optional<double> near,
+                                   std::optional<double> far) {
+            self.set_perspective(fov_y_deg, aspect_value(aspect), near, far);
+        }, nb::kw_only(), "fov_y_deg"_a, "aspect"_a.none() = nb::none(), "near"_a.none() = nb::none(),
+           "far"_a.none() = nb::none())
+        .def("set_lens_projection", [](Camera& self, double focal, std::optional<double> aspect, std::optional<double> near,
+                                       std::optional<double> far) {
             self.set_lens_projection(focal, aspect_value(aspect), near, far);
-        }, nb::kw_only(), "focal_length_mm"_a, "aspect"_a.none() = nb::none(), "near"_a, "far"_a)
+        }, nb::kw_only(), "focal_length_mm"_a, "aspect"_a.none() = nb::none(), "near"_a.none() = nb::none(),
+           "far"_a.none() = nb::none())
         .def("set_orthographic", [](Camera& self, std::optional<double> left, std::optional<double> right,
                                     std::optional<double> bottom, std::optional<double> top,
                                     std::optional<double> height, std::optional<std::array<double, 2>> center,
-                                    double near, double far) {
+                                    std::optional<double> near, std::optional<double> far) {
             const bool bounds = left || right || bottom || top;
             if (height) {
                 if (bounds) throw std::invalid_argument("Give either left/right/bottom/top or height, not both");
@@ -569,7 +676,8 @@ NB_MODULE(_native, module) {
             self.set_orthographic(*left, *right, *bottom, *top, near, far);
         }, nb::kw_only(), "left"_a.none() = nb::none(), "right"_a.none() = nb::none(),
            "bottom"_a.none() = nb::none(), "top"_a.none() = nb::none(),
-           "height"_a.none() = nb::none(), "center"_a.none() = nb::none(), "near"_a, "far"_a)
+           "height"_a.none() = nb::none(), "center"_a.none() = nb::none(), "near"_a.none() = nb::none(),
+           "far"_a.none() = nb::none())
         .def_prop_rw("position", &Camera::position, &Camera::set_position)
         .def("look_at", &Camera::look_at, "target"_a, "up"_a = Vec3{0, 1, 0})
         .def("frame", [](Camera& self, nb::handle target, double fill, std::optional<Vec3> direction, Vec3 up,
@@ -585,8 +693,8 @@ NB_MODULE(_native, module) {
         }, "target"_a, nb::kw_only(), "fill"_a = 0.8, "direction"_a.none() = nb::none(), "up"_a = Vec3{0, 1, 0},
            "fit"_a = "sphere", "near"_a.none() = nb::none(), "far"_a.none() = nb::none(),
            "aspect"_a.none() = nb::none(),
-           "Aim at the target's center and set the distance, and near and far, so that it fills `fill` "
-           "of the view. Returns the distance to the center.")
+           "Aim at the target's center and set the distance, and the planes that the projection was not "
+           "given, so that it fills `fill` of the view. Returns the distance to the center.")
         .def_prop_rw("transform", [](const Camera& self) { return to_array(self.transform()); },
             [](Camera& self, const MatrixInput& value) { self.set_transform(from_array(value)); }, nb::rv_policy::move)
         .def_prop_ro("view_matrix", [](const Camera& self) { return to_array(self.view_matrix()); }, nb::rv_policy::move)
@@ -594,16 +702,18 @@ NB_MODULE(_native, module) {
         .def_prop_ro("node", [](const Camera& self) -> nb::object {
             return self.has_node() ? nb::cast(self.node()) : nb::none();
         })
+        .def("close", &Camera::close)
+        .def_prop_ro("closed", &Camera::closed)
         .def("__eq__", [](const Camera& self, nb::handle other) {
             return nb::isinstance<Camera>(other) && self.same(nb::cast<const Camera&>(other));
         })
         .def("__hash__", [](const Camera& self) { return self.key(); });
 
-    nb::class_<Model>(module, "Model")
+    nb::class_<Model> model_type(module, "Model");
+    closable(model_type, "Model is closed");
+    model_type
         .def("close", &Model::close)
         .def_prop_ro("closed", &Model::closed)
-        .def("clone", [](Model& self, const Scene* scene) { return self.clone(scene); },
-             nb::kw_only(), "scene"_a.none() = nb::none())
         .def_prop_ro("memory", &Model::memory)
         .def("camera", [](const Model& self, nb::handle key) {
             return by_key(key, [&](const std::string& n) { return self.camera(n); }, [&](int64_t i) { return self.camera(i); });
@@ -650,8 +760,6 @@ NB_MODULE(_native, module) {
             [](Model& self, Vec3 value) { self.root().set_scale(value); })
         .def_prop_rw("quaternion", [](const Model& self) { return self.root().quaternion(); },
             [](Model& self, Vec4 value) { self.root().set_quaternion(value); })
-        .def_prop_rw("rotation_euler_rad", [](const Model& self) { return self.root().rotation_euler_rad(); },
-            [](Model& self, Vec3 value) { self.root().set_rotation_euler_rad(value); })
         .def_prop_rw("rotation_euler_deg", [](const Model& self) { return self.root().rotation_euler_deg(); },
             [](Model& self, Vec3 value) { self.root().set_rotation_euler_deg(value); });
 
@@ -674,7 +782,6 @@ NB_MODULE(_native, module) {
         .def_prop_rw("position", &Node::position, &Node::set_position)
         .def_prop_rw("scale", &Node::scale, &Node::set_scale)
         .def_prop_rw("quaternion", &Node::quaternion, &Node::set_quaternion)
-        .def_prop_rw("rotation_euler_rad", &Node::rotation_euler_rad, &Node::set_rotation_euler_rad)
         .def_prop_rw("rotation_euler_deg", &Node::rotation_euler_deg, &Node::set_rotation_euler_deg)
         .def("material", &Node::material, "slot"_a = 0,
              "Return this node slot's own material. The first call copies the shared material.")
@@ -695,7 +802,7 @@ NB_MODULE(_native, module) {
         .def_prop_rw("base_color_texture", [](const Material& self) { return wrap_texture(self.texture(0)); },
             [](Material& self, nb::handle value) {
                 auto texture = unwrap_texture(value);
-                // A new slot combination compiles a material.
+                // Changing a slot can duplicate and rebind the material instance.
                 nb::gil_scoped_release release;
                 self.set_texture(0, std::move(texture));
             },
@@ -703,14 +810,17 @@ NB_MODULE(_native, module) {
         .def_prop_rw("emissive_texture", [](const Material& self) { return wrap_texture(self.texture(1)); },
             [](Material& self, nb::handle value) {
                 auto texture = unwrap_texture(value);
-                // A new slot combination compiles a material.
+                // Changing a slot can duplicate and rebind the material instance.
                 nb::gil_scoped_release release;
                 self.set_texture(1, std::move(texture));
             },
             nb::for_setter(nb::arg("value").none()))
-        .def("set_texture_transform", [](Material& self, const std::string& slot, std::array<float, 2> offset,
-                                         std::array<float, 2> scale, float rotation_deg) {
-            self.set_texture_transform(texture_slot(slot), offset, scale, rotation_deg * float(3.141592653589793 / 180.0));
-        }, "slot"_a, nb::kw_only(), "offset"_a = std::array<float, 2>{0, 0}, "scale"_a = std::array<float, 2>{1, 1},
-           "rotation_deg"_a = 0.0f);
+        .def_prop_rw("base_color_texture_offset", uv_get<0>(&UvTransform::offset), uv_set<0>(&UvTransform::offset))
+        .def_prop_rw("base_color_texture_scale", uv_get<0>(&UvTransform::scale), uv_set<0>(&UvTransform::scale))
+        .def_prop_rw("base_color_texture_rotation_deg", uv_get<0>(&UvTransform::rotation_deg),
+                     uv_set<0>(&UvTransform::rotation_deg))
+        .def_prop_rw("emissive_texture_offset", uv_get<1>(&UvTransform::offset), uv_set<1>(&UvTransform::offset))
+        .def_prop_rw("emissive_texture_scale", uv_get<1>(&UvTransform::scale), uv_set<1>(&UvTransform::scale))
+        .def_prop_rw("emissive_texture_rotation_deg", uv_get<1>(&UvTransform::rotation_deg),
+                     uv_set<1>(&UvTransform::rotation_deg));
 }

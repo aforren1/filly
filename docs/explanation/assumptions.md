@@ -264,11 +264,11 @@ path and sets it in gltfio's parse, which cgltf then skips. No GLB is assembled.
   | Sponza | 0.88 s | 51 to 55 ms | 0.49 to 0.63 s | 243 to 269 ms |
   | NodePerformanceTest | 3.6 to 3.8 s | 1.4 to 1.8 s | 2.6 to 2.7 s | 2.3 to 2.6 s |
 
-- `Renderer.finish()` waits by request. `OffscreenTarget.read()` must wait for the readback.
+- `Renderer.finish()` waits by request. `RenderTarget.read()` must wait for the readback.
 - `ImportedTarget.close()` must wait for imported textures, because the host can then delete or
   reuse the texture name. For owned targets the wait is conservative.
-- `set_environment()` waits after the prefilter work. Filament orders the destroy commands itself,
-  so the wait is conservative. It keeps setup cost out of later frames.
+- `Renderer.load_environment()` and `create_environment()` wait after the prefilter work.
+  Filament orders the destroy commands itself, so the wait is conservative. It keeps setup cost out of later frames.
 
 **Verdict.** The load wait is not needed for memory safety. It is useful for experiments.
 

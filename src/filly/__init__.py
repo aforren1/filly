@@ -5,22 +5,24 @@ from importlib import metadata as _metadata
 
 from ._native import (
     AnimationInfo,
+    Asset,
     AssetCompatibilityWarning,
     AssetError,
+    AssetMemory,
     BackendError,
     Camera,
+    Environment,
     FillyError,
-    HostTexture,
     ImportedTarget,
+    ImportedTexture,
     InteropError,
     Light,
     Material,
     Model,
-    ModelMemory,
     Node,
-    OffscreenTarget,
     Preparation,
     Renderer,
+    RenderTarget,
     Scene,
     Stats,
     Texture,
@@ -36,8 +38,8 @@ from . import samples  # noqa: E402
 
 __version__ = _metadata.version("filly")  # one source: pyproject.toml
 __all__ = [
-    "AnimationInfo", "AssetCompatibilityWarning", "AssetError", "BackendError", "Camera",
-    "FillyError", "HostTexture", "ImportedTarget", "InteropError", "Light", "Material", "Model",
-    "ModelMemory", "Node", "OffscreenTarget", "Preparation", "Renderer", "Scene", "Stats", "Texture", "current_gl_context",
-    "samples", "set_log_level", "shapes",
+    "AnimationInfo", "Asset", "AssetCompatibilityWarning", "AssetError", "AssetMemory", "BackendError",
+    "Camera", "Environment", "FillyError", "ImportedTarget", "ImportedTexture", "InteropError", "Light",
+    "Material", "Model", "Node", "Preparation", "Renderer", "RenderTarget", "Scene", "Stats", "Texture",
+    "current_gl_context", "samples", "set_log_level", "shapes",
 ]

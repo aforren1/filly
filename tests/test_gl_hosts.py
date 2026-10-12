@@ -16,7 +16,7 @@ import pytest
 import filly
 
 pytest.importorskip("pyglet")
-from filly.integrations.pyglet import SharedTarget, create_renderer  # noqa: E402
+from filly.integrations.pyglet import HostTarget, create_renderer  # noqa: E402
 
 pytestmark = [pytest.mark.gpu, pytest.mark.interop,
               pytest.mark.skipif(sys.platform not in ("win32", "linux"), reason="WGL/GLX implementation")]
@@ -64,7 +64,10 @@ class PygletHost:
         assert gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) == gl.GL_FRAMEBUFFER_COMPLETE
 
     def target(self, renderer):
-        return self.adapter.SharedTarget(renderer, self.window, SIZE, SIZE)
+        return self.adapter.HostTarget(renderer, self.window, width=SIZE, height=SIZE)
+
+    def texture_name(self, target):
+        return target.texture
 
     def screen_target(self, renderer):
         self.gl.glBindFramebuffer(self.gl.GL_FRAMEBUFFER, 0)
@@ -77,9 +80,6 @@ class PygletHost:
         gl = self.gl
         gl.glClearColor(*color)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
-
-    def premultiplied_blending(self):
-        pass  # A blit cannot blend.
 
     def draw_own(self, x, y, size, color):
         gl = self.gl
@@ -115,7 +115,10 @@ class ModernglHost:
         self.framebuffer.use()
 
     def target(self, renderer):
-        return self.adapter.SharedTarget(renderer, self.ctx, SIZE, SIZE)
+        return self.adapter.HostTarget(renderer, self.ctx, width=SIZE, height=SIZE)
+
+    def texture_name(self, target):
+        return target.texture.glo
 
     def screen_target(self, renderer):
         self.ctx.screen.use()
@@ -132,11 +135,6 @@ class ModernglHost:
     def clear(self, color):
         self.framebuffer.clear(*color)
 
-    def premultiplied_blending(self):
-        # moderngl.PREMULTIPLIED_ALPHA is (SRC_ALPHA, ONE), which is not premultiplied source-over.
-        self.ctx.enable(self.moderngl.BLEND)
-        self.ctx.blend_func = self.moderngl.ONE, self.moderngl.ONE_MINUS_SRC_ALPHA
-
     def draw_own(self, x, y, size, color):
         if not hasattr(self, "solid"):
             self.solid = self.ctx.program(vertex_shader=SOLID_VERTEX, fragment_shader=SOLID_FRAGMENT)
@@ -150,7 +148,6 @@ class ModernglHost:
         return np.frombuffer(data, dtype=np.uint8).reshape(ATLAS, ATLAS, 4)
 
     def close(self):
-        self.ctx.disable(self.moderngl.BLEND)
         if hasattr(self, "solid"):
             self.solid_vao.release()
             self.solid.release()
@@ -171,10 +168,13 @@ class ZenglHost:
         self.image = self.ctx.image((ATLAS, ATLAS), "rgba8unorm")
 
     def target(self, renderer):
-        return self.adapter.SharedTarget(renderer, self.ctx, SIZE, SIZE, framebuffer=[self.image])
+        return self.adapter.HostTarget(renderer, self.ctx, width=SIZE, height=SIZE, framebuffer=[self.image])
 
     def screen_target(self, renderer):
-        return self.adapter.SharedTarget(renderer, self.ctx, SIZE, SIZE)
+        return self.adapter.HostTarget(renderer, self.ctx, width=SIZE, height=SIZE)
+
+    def texture_name(self, target):
+        return self.zengl.inspect(target.texture)["texture"]
 
     def read_screen(self):
         # zengl cannot read the default framebuffer, and it leaves its own FBO bound for reading.
@@ -184,9 +184,6 @@ class ZenglHost:
     def clear(self, color):
         self.image.clear_value = color
         self.image.clear()
-
-    def premultiplied_blending(self):
-        pass  # The adapter's pipeline always blends premultiplied source-over.
 
     def draw_own(self, x, y, size, color):
         if not hasattr(self, "solid"):
@@ -243,7 +240,7 @@ def host(request, window):
 
 def triangle_scene(renderer, glb, background=CLEAR, transparent=False):
     scene = renderer.create_scene()
-    camera = scene.create_camera()
+    camera = renderer.create_camera()
     camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
     camera.position = (0, 0, 3)
     camera.look_at((0, 0, 0))
@@ -287,7 +284,7 @@ def test_single_frame_orientation_and_clear(host, window, triangle_glb):
         target = host.target(renderer)
         host.clear((0.5, 0.5, 0.5, 1))
         renderer.render(scene, target)
-        target.draw(0, 0, SIZE, SIZE)
+        target.draw(viewport=(0, 0, SIZE, SIZE))
         samples = cell(host.read(), 0, 0, SIZE)
         target.close()
     finally:
@@ -332,7 +329,7 @@ def test_consecutive_frames_without_finish(host, window, triangle_glb):
         for frame in range(frames):
             material.base_color = COLORS[frame % 3]
             renderer.render(scene, target)
-            target.draw((frame % 8) * CELL, (frame // 8) * CELL, CELL, CELL)
+            target.draw(viewport=((frame % 8) * CELL, (frame // 8) * CELL, CELL, CELL))
         pixels = host.read()
         target.close()
     finally:
@@ -352,10 +349,10 @@ def test_acquire_allows_several_draws_per_frame(host, window, triangle_glb):
         host.clear((0.5, 0.5, 0.5, 1))
         renderer.render(scene, target)
         with target.acquire():
-            target.draw(0, 0, SIZE, SIZE)
-            target.draw(SIZE, 0, SIZE, SIZE)
+            target.draw(viewport=(0, 0, SIZE, SIZE))
+            target.draw(viewport=(SIZE, 0, SIZE, SIZE))
         # The released frame stays in the texture and can be drawn again without a render.
-        target.draw(0, SIZE, SIZE, SIZE)
+        target.draw(viewport=(0, SIZE, SIZE, SIZE))
         pixels = host.read()
         target.close()
         fresh = host.target(renderer)
@@ -369,28 +366,28 @@ def test_acquire_allows_several_draws_per_frame(host, window, triangle_glb):
         np.testing.assert_array_equal(cell(pixels, x, y, SIZE)["corner"], CYAN)
 
 
-def test_premultiplied_alpha(host, window, triangle_glb):
+@pytest.mark.parametrize("blend", [True, False])
+def test_premultiplied_alpha(host, window, triangle_glb, blend):
     renderer = create_renderer(window)
     try:
         scene, _ = triangle_scene(renderer, translucent(triangle_glb, 0.5),
                                   background=(0, 0, 0, 0), transparent=True)
         target = host.target(renderer)
         host.clear(BACKDROP)
-        host.premultiplied_blending()
         renderer.render(scene, target)
-        target.draw(0, 0, SIZE, SIZE)
+        target.draw(viewport=(0, 0, SIZE, SIZE), blend=blend)
         samples = cell(host.read(), 0, 0, SIZE)
         target.close()
     finally:
         renderer.close()
-    if host.name == "pyglet":
-        # The blit copies Filament's premultiplied RGBA and discards the backdrop.
-        np.testing.assert_allclose(samples["center"], (128, 0, 0, 128), atol=1)
-        np.testing.assert_array_equal(samples["corner"], (0, 0, 0, 0))
-    else:
+    if blend:
         # Premultiplied source-over: 0.5 red plus half of the blue backdrop.
         np.testing.assert_allclose(samples["center"], (128, 0, 127, 255), atol=2)
         np.testing.assert_array_equal(samples["corner"], (0, 0, 255, 255))
+    else:
+        # The copy writes Filament's premultiplied RGBA and discards the backdrop.
+        np.testing.assert_allclose(samples["center"], (128, 0, 0, 128), atol=1)
+        np.testing.assert_array_equal(samples["corner"], (0, 0, 0, 0))
 
 
 @pytest.mark.parametrize("alpha", [0.25, 0.5, 0.75])
@@ -408,9 +405,8 @@ def test_premultiplied_encoding_through_the_adapter(host, window, triangle_glb, 
         for grey in greys:
             model.material("red").base_color = (grey, grey, grey, alpha)
             host.clear((0, 0, 0, 1))
-            host.premultiplied_blending()
             renderer.render(scene, target)
-            target.draw(0, 0, SIZE, SIZE)
+            target.draw(viewport=(0, 0, SIZE, SIZE))
             samples.append(cell(host.read(), 0, 0, SIZE)["center"])
         target.close()
     finally:
@@ -430,7 +426,7 @@ def test_host_draws_interleave_with_shared_draws(host, window, triangle_glb):
         for frame in range(3):
             model.material("red").base_color = COLORS[frame]
             renderer.render(scene, target)
-            target.draw(0, frame * SIZE, SIZE, SIZE)
+            target.draw(viewport=(0, frame * SIZE, SIZE, SIZE))
             host.draw_own(SIZE, frame * SIZE, SIZE, (1, 1, 0, 1))
         pixels = host.read()
         target.close()
@@ -473,7 +469,7 @@ def test_filament_calls_leave_host_state(window, triangle_glb):
     try:
         with filly.Renderer(shared_context=filly.current_gl_context()) as renderer:
             scene, _ = triangle_scene(renderer, triangle_glb)
-            target = renderer.import_gl_texture(texture.value, width=SIZE, height=SIZE)
+            target = renderer.import_gl_target(texture.value, width=SIZE, height=SIZE)
             assert snapshot() == before
             for _ in range(3):
                 renderer.render(scene, target)
@@ -494,18 +490,18 @@ def test_close_after_window_close_releases_everything(window, triangle_glb, clos
     renderer = create_renderer(window)
     assert renderer.shared_context == filly.current_gl_context()
     scene, _ = triangle_scene(renderer, triangle_glb)
-    target = SharedTarget(renderer, window, SIZE, SIZE)
+    target = HostTarget(renderer, window, width=SIZE, height=SIZE)
     renderer.render(scene, target)
     target.draw()
     window.close()
     # Without the host context, only Filament's own work can be fenced.
     if close_target:
         target.close()
-        assert target._closed and target.texture.value == 0
+        assert target.closed and target.texture == 0
     renderer.close()
     assert renderer.closed and renderer.shared_context
+    assert target.closed and target.texture == 0
     target.close()
-    assert target._closed and target.texture.value == 0
 
 
 def test_offscreen_renderer_has_no_shared_context():
@@ -523,14 +519,14 @@ def test_size_errors_match_native(window, width, height):
         with pytest.raises((TypeError, ValueError)) as native:
             renderer.create_render_target(width=width, height=height)
         with pytest.raises(native.type) as adapter:
-            SharedTarget(renderer, window, width, height)
+            HostTarget(renderer, window, width=width, height=height)
     assert str(adapter.value) == str(native.value)
 
 
 def test_integral_sizes(window):
     with create_renderer(window) as renderer:
         for width, height in ((np.int64(64), np.int32(48)), (64.0, np.float32(48)), (np.uint16(64), 48.0)):
-            with SharedTarget(renderer, window, width, height) as target:
+            with HostTarget(renderer, window, width=width, height=height) as target:
                 assert (target.width, target.height) == (64, 48)
 
 
@@ -545,7 +541,7 @@ def test_import_ignores_stale_host_error(window):
         with filly.Renderer(shared_context=filly.current_gl_context()) as renderer:
             # pyglet's wrapper would consume the error; a host that never checks errors leaves it pending.
             ctypes.WinDLL("opengl32").glEnable(0xFFFF)
-            renderer.import_gl_texture(texture.value, width=SIZE, height=SIZE).close()
+            renderer.import_gl_target(texture.value, width=SIZE, height=SIZE).close()
     finally:
         gl.glDeleteTextures(1, ctypes.byref(texture))
 
@@ -562,14 +558,14 @@ def test_garbage_collection_stays_in_the_current_context(window, triangle_glb, a
     try:
         scene, _ = triangle_scene(renderer, triangle_glb)
         if adapter == "pyglet":
-            target = SharedTarget(renderer, window, SIZE, SIZE)
+            target = HostTarget(renderer, window, width=SIZE, height=SIZE)
         else:
             moderngl = pytest.importorskip("moderngl")
             from filly.integrations import moderngl as module
-            target = module.SharedTarget(renderer, moderngl.create_context(), SIZE, SIZE)
+            target = module.HostTarget(renderer, moderngl.create_context(), width=SIZE, height=SIZE)
         renderer.render(scene, target)
         target.draw()
-        name = target.texture.value if adapter == "pyglet" else target._name
+        name = target.texture if adapter == "pyglet" else target._name
         other.switch_to()
         current = filly.current_gl_context()
         with pytest.warns(ResourceWarning, match="not closed"):
@@ -595,7 +591,7 @@ def test_stereo_viewports_in_a_shared_target(host, window):
         scene.create_mesh(**filly.shapes.plane(0.5, 0.5), unlit=True, alpha_mode="blend", base_color=(1, 0, 0, 1))
         eyes = []
         for x in (-0.25, 0.25):
-            camera = scene.create_camera()
+            camera = renderer.create_camera()
             camera.set_orthographic(height=2, near=0.1, far=10)
             camera.position = (x, 0, 3)
             camera.look_at((x, 0, 0))
@@ -605,7 +601,7 @@ def test_stereo_viewports_in_a_shared_target(host, window):
         half = SIZE // 2
         renderer.render(scene, target, camera=eyes[0], viewport=(0, 0, half, SIZE))
         renderer.render(scene, target, camera=eyes[1], viewport=(half, 0, half, SIZE), clear=False)
-        target.draw(0, 0, SIZE, SIZE)
+        target.draw(viewport=(0, 0, SIZE, SIZE))
         row = host.read()[SIZE // 2, :SIZE]
         target.close()
     finally:
@@ -615,3 +611,197 @@ def test_stereo_viewports_in_a_shared_target(host, window):
     red = np.flatnonzero(np.all(row == (255, 0, 0, 255), axis=1))
     np.testing.assert_array_equal(red, np.arange(16, 48))
     np.testing.assert_array_equal(row[[0, 15, 48, 63]], [CYAN] * 4)
+
+
+def test_renderer_close_releases_host_targets(host, window, triangle_glb):
+    """renderer.close() alone closes the host targets and deletes their host objects."""
+    from pyglet import gl
+    renderer = create_renderer(window)
+    scene, _ = triangle_scene(renderer, triangle_glb)
+    target = host.target(renderer)
+    other = host.target(renderer)
+    renderer.render(scene, target)
+    target.draw()
+    names = [host.texture_name(target), host.texture_name(other)]
+    assert all(gl.glIsTexture(name) for name in names)
+    renderer.close()
+    window.switch_to()
+    assert target.closed and other.closed
+    assert not any(gl.glIsTexture(name) for name in names)
+    assert target.texture in (0, None) and other.texture in (0, None)
+    with pytest.raises(filly.InteropError, match="closed"):
+        target.draw()
+    target.close()
+    import gc
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ResourceWarning)
+        del target, other
+        gc.collect()
+
+
+def test_renderer_close_finishes_after_a_target_error(window, triangle_glb, monkeypatch):
+    """An exception from one target's close reaches the caller after everything else closed."""
+    from pyglet import gl
+    renderer = create_renderer(window)
+    scene, _ = triangle_scene(renderer, triangle_glb)
+    failing = HostTarget(renderer, window, width=SIZE, height=SIZE)
+    other = HostTarget(renderer, window, width=SIZE, height=SIZE)
+    name = other.texture
+
+    def fail():
+        raise RuntimeError("target close failed")
+
+    monkeypatch.setattr(failing, "close", fail)
+    with pytest.raises(RuntimeError, match="target close failed"):
+        renderer.close()
+    assert renderer.closed and scene.closed
+    assert other.closed and not gl.glIsTexture(name)
+    # The failing target's own close never ran; the renderer released its Filament side.
+    monkeypatch.undo()
+    assert failing.closed
+    failing.close()
+
+
+def test_default_size_is_the_framebuffer(window):
+    with create_renderer(window) as renderer:
+        with HostTarget(renderer, window) as target:
+            assert (target.width, target.height) == tuple(window.get_framebuffer_size())
+        with HostTarget(renderer, window, height=16) as target:
+            assert (target.width, target.height) == (window.get_framebuffer_size()[0], 16)
+
+
+@pytest.mark.parametrize("viewport, error", [
+    ((0, 0, 0, 8), ValueError), ((0, 0, 8), ValueError), ((0.5, 0, 8, 8), ValueError), (("0", 0, 8, 8), TypeError),
+])
+def test_draw_viewport_errors(window, triangle_glb, viewport, error):
+    with create_renderer(window) as renderer:
+        scene, _ = triangle_scene(renderer, triangle_glb)
+        with HostTarget(renderer, window, width=SIZE, height=SIZE) as target:
+            renderer.render(scene, target)
+            with pytest.raises(error):
+                target.draw(viewport=viewport)
+
+
+@pytest.mark.parametrize("adapter", ["pyglet", "moderngl"])
+@pytest.mark.parametrize("blend", [True, False])
+def test_draw_restores_host_state(window, triangle_glb, adapter, blend):
+    """Hosts cache GL state, so draw() must leave the state that it changes as it found it."""
+    from pyglet import gl
+    names = ["GL_ACTIVE_TEXTURE", "GL_CURRENT_PROGRAM", "GL_VIEWPORT", "GL_VERTEX_ARRAY_BINDING",
+             "GL_BLEND_SRC_RGB", "GL_BLEND_DST_RGB", "GL_BLEND_SRC_ALPHA", "GL_BLEND_DST_ALPHA",
+             "GL_BLEND_EQUATION_RGB", "GL_BLEND_EQUATION_ALPHA"]
+
+    def integers(name):
+        value = (gl.GLint * 4)()
+        gl.glGetIntegerv(getattr(gl, name), value)
+        return tuple(value)
+
+    def snapshot():
+        state = {name: integers(name) for name in names}
+        # The draw samples on unit 0, whatever unit is active.
+        gl.glActiveTexture(gl.GL_TEXTURE0)
+        state["unit 0"] = integers("GL_TEXTURE_BINDING_2D"), integers("GL_SAMPLER_BINDING")
+        gl.glActiveTexture(state["GL_ACTIVE_TEXTURE"][0])
+        for name in ["GL_BLEND", "GL_DEPTH_TEST", "GL_SCISSOR_TEST", "GL_CULL_FACE", "GL_STENCIL_TEST"]:
+            state[name] = gl.glIsEnabled(getattr(gl, name))
+        return state
+
+    with create_renderer(window) as renderer:
+        scene, _ = triangle_scene(renderer, triangle_glb)
+        if adapter == "pyglet":
+            target = HostTarget(renderer, window, width=SIZE, height=SIZE)
+        else:
+            moderngl = pytest.importorskip("moderngl")
+            from filly.integrations import moderngl as module
+            ctx = moderngl.create_context()
+            with module.create_renderer() as second:
+                assert second.shared_context == renderer.shared_context
+            target = module.HostTarget(renderer, ctx, width=SIZE, height=SIZE)
+        with target:
+            renderer.render(scene, target)
+            sampler, other = gl.GLuint(), gl.GLuint()
+            gl.glGenSamplers(1, ctypes.byref(sampler))
+            gl.glGenTextures(1, ctypes.byref(other))
+            try:
+                # A host state unlike the draw's: blending for straight alpha, depth testing,
+                # culling, another texture unit and texture, a sampler, and a small viewport.
+                gl.glEnable(gl.GL_BLEND)
+                gl.glBlendFuncSeparate(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA, gl.GL_ZERO, gl.GL_ONE)
+                gl.glBlendEquationSeparate(gl.GL_FUNC_SUBTRACT, gl.GL_MAX)
+                gl.glEnable(gl.GL_DEPTH_TEST)
+                gl.glEnable(gl.GL_CULL_FACE)
+                gl.glActiveTexture(gl.GL_TEXTURE0)
+                gl.glBindSampler(0, sampler)
+                gl.glBindTexture(gl.GL_TEXTURE_2D, other)
+                gl.glActiveTexture(gl.GL_TEXTURE2)
+                gl.glViewport(1, 2, 3, 4)
+                before = snapshot()
+                target.draw(blend=blend)
+                assert snapshot() == before
+                assert gl.glGetError() == gl.GL_NO_ERROR
+            finally:
+                gl.glActiveTexture(gl.GL_TEXTURE0)
+                gl.glBindSampler(0, 0)
+                gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+                gl.glDeleteSamplers(1, ctypes.byref(sampler))
+                gl.glDeleteTextures(1, ctypes.byref(other))
+                gl.glBlendFuncSeparate(gl.GL_ONE, gl.GL_ZERO, gl.GL_ONE, gl.GL_ZERO)
+                gl.glBlendEquationSeparate(gl.GL_FUNC_ADD, gl.GL_FUNC_ADD)
+                for flag in (gl.GL_BLEND, gl.GL_DEPTH_TEST, gl.GL_CULL_FACE):
+                    gl.glDisable(flag)
+                gl.glViewport(0, 0, SIZE, SIZE)
+
+
+@pytest.mark.parametrize("host_type", [PygletHost, ModernglHost], ids=["pyglet", "moderngl"])
+def test_draw_ignores_culling(window, triangle_glb, host_type):
+    """draw() composites onto the color buffer: the host's face culling does not apply."""
+    from pyglet import gl
+    host = host_type(window)
+    renderer = create_renderer(window)
+    try:
+        scene, _ = triangle_scene(renderer, triangle_glb)
+        target = host.target(renderer)
+        host.clear((0.5, 0.5, 0.5, 1))
+        renderer.render(scene, target)
+        gl.glEnable(gl.GL_CULL_FACE)
+        gl.glCullFace(gl.GL_FRONT_AND_BACK)
+        try:
+            target.draw(viewport=(0, 0, SIZE, SIZE))
+        finally:
+            gl.glDisable(gl.GL_CULL_FACE)
+            gl.glCullFace(gl.GL_BACK)
+        samples = cell(host.read(), 0, 0, SIZE)
+        target.close()
+    finally:
+        renderer.close()
+        window.switch_to()
+        host.close()
+    np.testing.assert_array_equal(samples["center"], (255, 0, 0, 255))
+    np.testing.assert_array_equal(samples["corner"], CYAN)
+
+
+def test_imported_target_supports_with(window):
+    from pyglet import gl
+    texture = filly._native._create_host_texture(SIZE, SIZE)
+    try:
+        with create_renderer(window) as renderer:
+            with renderer.import_gl_target(texture, width=SIZE, height=SIZE) as target:
+                assert isinstance(target, filly.ImportedTarget) and not target.closed
+            assert target.closed
+            with pytest.raises(filly.FillyError, match="closed"):
+                with target:
+                    pass
+            with pytest.raises(TypeError, match="callable"):
+                renderer.import_gl_target(texture, width=SIZE, height=SIZE, on_renderer_close=1)
+            calls = []
+            # A target lives while its handle does, so keep this one.
+            kept = renderer.import_gl_target(texture, width=SIZE, height=SIZE,
+                                              on_renderer_close=lambda: calls.append(1))
+            # A target that closed first drops its callback.
+            renderer.import_gl_target(texture, width=SIZE, height=SIZE,
+                                       on_renderer_close=lambda: calls.append(2)).close()
+        assert calls == [1] and kept.closed
+        assert gl.glIsTexture(texture)
+    finally:
+        filly._native._delete_host_texture(texture)

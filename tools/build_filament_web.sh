@@ -3,9 +3,10 @@
 #
 # Usage: tools/build_filament_web.sh [WORK_DIR]
 #
-# Run it on Linux x86_64 with glibc 2.38 or later (Ubuntu 24.04; WSL works). It needs curl, git,
-# python3, and ninja. No native compiler: the host tools (matc, resgen, ...) come from the Linux
-# release archive, whose binaries need that glibc. The script fetches a pinned CMake.
+# Run it on Linux x86_64 with glibc 2.38 or later (Ubuntu 24.04; WSL works), or on Windows with
+# tools/build_web_container.ps1. It needs curl, git, python3, xz-utils, and ninja. No native
+# compiler: the host tools (matc, resgen, ...) come from the Linux release archive, whose
+# binaries need that glibc. The script fetches a pinned CMake.
 # filly's web build (web/) links the libraries in WORK_DIR/sdk.
 #
 # Environment overrides: FILAMENT_SOURCE_TGZ and FILAMENT_LINUX_TGZ (local copies of the pinned

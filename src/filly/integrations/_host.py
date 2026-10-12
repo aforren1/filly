@@ -1,8 +1,9 @@
-"""Lifecycle shared by the host adapters: sizes, acquisition, and close order."""
+"""Lifecycle shared by the host adapters: sizes, acquisition, drawing, and close order."""
 
 import numbers
 import operator
 import warnings
+import weakref
 
 from .. import ImportedTarget, InteropError, Renderer, current_gl_context
 
@@ -23,12 +24,26 @@ def _pixel_size(name, value):
 
 
 def pixel_sizes(width, height):
-    """Coerce a target size as ``Renderer.import_gl_texture`` does."""
+    """Coerce a target size as ``Renderer.import_gl_target`` does."""
     width, height = _pixel_size("width", width), _pixel_size("height", height)
     # The host texture exists before the import validates it, so check the range here too.
     if not (1 <= width <= 8192 and 1 <= height <= 8192):
         raise ValueError(f"width and height must be from 1 through 8192, got {width}x{height}")
     return width, height
+
+
+def draw_viewport(viewport, default):
+    """Coerce ``draw(viewport=...)`` as ``Renderer.render`` coerces its viewport."""
+    if viewport is None:
+        return default
+    values = tuple(viewport)
+    if len(values) != 4:
+        raise ValueError("viewport must be (x, y, width, height)")
+    names = ("viewport x", "viewport y", "viewport width", "viewport height")
+    x, y, width, height = (_pixel_size(name, value) for name, value in zip(names, values))
+    if width < 1 or height < 1:
+        raise ValueError(f"viewport width and height must be positive, got {width}x{height}")
+    return x, y, width, height
 
 
 def shared_renderer(host):
@@ -39,12 +54,24 @@ def shared_renderer(host):
     return Renderer(shared_context=context)
 
 
-class HostTarget(ImportedTarget):
+def _close_with_renderer(target):
+    # The renderer holds this callback; a strong reference to the target would keep it alive
+    # through the native target, out of reach of the cycle collector.
+    reference = weakref.ref(target)
+
+    def close():
+        target = reference()
+        if target is not None:
+            target.close()
+
+    return close
+
+
+class HostTargetBase(ImportedTarget):
     """A host-owned RGBA8 texture that Filament renders into.
 
-    Subclasses create and release the host objects and draw the texture.
-    Preferred close order: this target, then the renderer, then the window. Closing after
-    the window also works, but then the host's last GPU work is not fenced.
+    Subclasses create and release the host objects and draw the texture. ``renderer.close()``
+    closes the target too, so only the window must close last.
     """
 
     # __del__ can run on an instance whose __init__ failed before setup.
@@ -52,12 +79,16 @@ class HostTarget(ImportedTarget):
     _context = 0
 
     def __init__(self, renderer, width, height):
-        width, height = pixel_sizes(width, height)
         self._make_host_current()
         self._context = current_gl_context()
+        if width is None or height is None:
+            size = self._default_size()
+            width, height = size[0] if width is None else width, size[1] if height is None else height
+        width, height = pixel_sizes(width, height)
         try:
             texture = self._create_host_texture(width, height)
-            super().__init__(renderer.import_gl_texture(texture, width=width, height=height))
+            super().__init__(renderer.import_gl_target(texture, width=width, height=height,
+                                                       on_renderer_close=_close_with_renderer(self)))
         except BaseException:
             self._release_host_resources(True)
             raise
@@ -75,6 +106,10 @@ class HostTarget(ImportedTarget):
         if not self._host_open():
             raise InteropError("Make the window's OpenGL context current first")
 
+    def _default_size(self):
+        """Return the size of a target that covers the host's framebuffer."""
+        raise TypeError(f"{type(self).__name__} needs width and height: the host does not report a size")
+
     def _create_host_texture(self, width, height):
         """Create the host RGBA8 texture and any draw objects. Return the GL texture name."""
         raise NotImplementedError
@@ -83,7 +118,7 @@ class HostTarget(ImportedTarget):
         """Release the host objects. If ``host_open`` is false, only drop them: a GL delete would fail."""
         raise NotImplementedError
 
-    def _draw(self, x, y, width, height):
+    def _draw(self, x, y, width, height, blend):
         raise NotImplementedError
 
     def acquire(self):
@@ -92,20 +127,23 @@ class HostTarget(ImportedTarget):
         The core target counts nesting, so an inner ``acquire()`` does nothing.
         """
         if self._closed:
-            raise InteropError("Shared target is closed")
+            raise InteropError("Host target is closed")
         # An outer acquisition already made the host context current.
         if not self.acquired:
             self._make_host_current()
         return super().acquire()
 
-    def draw(self, x=0, y=0, width=None, height=None):
-        """Draw the texture at window pixel (x, y), counted from the lower-left corner.
+    def draw(self, *, viewport=None, blend=True):
+        """Draw the texture into the window's viewport (x, y, width, height), in pixels from the
+        lower-left corner.
 
+        The viewport defaults to the texture's size at (0, 0). With ``blend``, the draw composites
+        Filament's premultiplied color source-over; ``blend=False`` copies the pixels.
         Outside ``acquire()``, the draw acquires and releases the texture itself.
-        The size defaults to the texture size.
         """
         with self.acquire():
-            self._draw(x, y, self.width if width is None else width, self.height if height is None else height)
+            x, y, width, height = draw_viewport(viewport, (0, 0, self.width, self.height))
+            self._draw(x, y, width, height, bool(blend))
 
     def close(self):
         """Release the Filament target and the host objects.
@@ -133,14 +171,6 @@ class HostTarget(ImportedTarget):
         finally:
             self._release_host_resources(host_open)
 
-    def __enter__(self):
-        if self._closed:
-            raise InteropError("Shared target is closed")
-        return self
-
-    def __exit__(self, *exc):
-        self.close()
-
     def __del__(self):
         # Garbage collection runs at arbitrary points, often while another window's context is
         # current. It must not switch contexts, so host objects are released only if this
@@ -148,7 +178,7 @@ class HostTarget(ImportedTarget):
         if self._closed:
             return
         try:
-            warnings.warn(f"{type(self).__name__} was not closed; call close() before closing its window",
+            warnings.warn(f"{type(self).__name__} was not closed; close it or its renderer before its window",
                           ResourceWarning, source=self)
             self._close(switch=False)
         except Exception:

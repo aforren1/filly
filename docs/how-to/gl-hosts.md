@@ -2,17 +2,22 @@
 
 Filament can render into an OpenGL texture that your application owns. Filament shares the
 window's OpenGL context, so frames do not go through CPU memory. This guide shows three thin
-host integrations that use a pyglet window. Each integration has a `SharedTarget` class with the
-same API:
+host integrations that use a pyglet window. Each integration module has the same two names:
 
-- `filly.integrations.pyglet.create_renderer(window)` makes the window's context current and
-  creates the renderer. Use it for all three hosts.
-- `SharedTarget(renderer, host, width, height)` creates the host texture and imports it. `host` is
-  the pyglet window, a moderngl context, or a zengl context.
-- `target.draw(x=0, y=0, width=None, height=None)` acquires the texture, draws it into the bound
-  framebuffer, and releases it. `x` and `y` are window pixels from the lower-left corner.
+- `create_renderer(...)` creates a renderer that shares the window's OpenGL context. The pyglet
+  module takes the window and makes its context current. moderngl and zengl cannot make a
+  context current, so their `create_renderer()` takes no argument and shares the current context.
+- `HostTarget(renderer, host, *, width=None, height=None)` creates the host texture and imports
+  it. `host` is the pyglet window, a moderngl context, or a zengl context. The size defaults to
+  the host's framebuffer size where the host reports it.
+- `target.texture` is the host texture: a GL texture name (`int`) for pyglet, a
+  `moderngl.Texture`, or a `zengl.Image`.
+- `target.draw(*, viewport=None, blend=True)` acquires the texture, draws it into the bound
+  framebuffer, and releases it. `viewport` is `(x, y, width, height)` in window pixels from the
+  lower-left corner, as in `renderer.render()`. It defaults to the texture size at (0, 0).
 - `with target.acquire():` holds the texture for more than one draw in a frame.
-- `target.close()` releases the Filament target and the host texture.
+- `target.close()` releases the Filament target and the host objects. `renderer.close()` also
+  closes every target of the renderer.
 
 The host texture is plain `GL_RGBA8` with immutable storage, so both
 [output paths](../reference/api.md#output-path) work, and it holds sRGB-encoded values
@@ -20,8 +25,9 @@ The host texture is plain `GL_RGBA8` with immutable storage, so both
 framebuffer, the default for these hosts, and the window shows the encoded values unchanged. To
 build an adapter for another host, see [`ImportedTarget`](../reference/api.md#importedtarget).
 
-Close each target before its window. A target that is garbage-collected instead emits
-`ResourceWarning`, and its host objects stay until the window closes.
+Close the renderer, or each target, before the window. A target that is garbage-collected
+while it is open emits `ResourceWarning`. It deletes its host objects only if its own context is
+current; otherwise they stay until the window closes.
 
 See [Host integrations](../reference/api.md#host-integrations) for sizes and errors.
 
@@ -46,17 +52,17 @@ The package also has the extras `pyglet`, `moderngl`, and `zengl`. Each extra in
 
 ## Plain pyglet
 
-The integration blits the texture into the bound draw framebuffer.
+The integration draws the texture as a quad into the bound draw framebuffer.
 
 ```python
 import pyglet
-from filly.integrations.pyglet import SharedTarget, create_renderer
+from filly.integrations.pyglet import HostTarget, create_renderer
 
 window = pyglet.window.Window(960, 640)
 renderer = create_renderer(window)
 scene = renderer.create_scene()
 # Add a camera, lights, and models to the scene here.
-target = SharedTarget(renderer, window, *window.get_framebuffer_size())
+target = HostTarget(renderer, window)
 
 @window.event
 def on_draw():
@@ -65,31 +71,31 @@ def on_draw():
 
 pyglet.clock.schedule(lambda dt: None)  # pyglet 1.4 redraws only when a callback runs.
 pyglet.app.run()
-target.close()
-renderer.close()
+renderer.close()  # Also closes the target.
 window.close()
 ```
 
-A blit has these limits:
-
-- It does not blend. It writes Filament's premultiplied RGBA directly.
-- It obeys the scissor test.
-- It cannot write to a multisampled framebuffer. For a window with `sample_buffers=1`, draw a
-  textured quad instead.
+The pyglet and moderngl integrations draw with the same native quad. It samples the texture with
+linear filtering on texture unit 0. The depth test, the stencil test, and face culling do not
+apply to it; the scissor test does. It saves the OpenGL state that it changes (program, vertex
+array, texture unit 0, sampler, viewport, blend state, and these tests) and restores it after
+the draw, so libraries that cache OpenGL state stay correct. It can write to a multisampled
+framebuffer.
 
 ## moderngl
 
 `moderngl.create_context()` attaches to the context that is current. It does not create a
-context, and it cannot make the pyglet context current. Call it after `create_renderer(window)`.
+context, and it cannot make the pyglet context current. Keep the window's context current while
+you create the context, the renderer, and the target.
 
 ```python
 import moderngl
-from filly.integrations.moderngl import SharedTarget
-from filly.integrations.pyglet import create_renderer
+from filly.integrations.moderngl import HostTarget, create_renderer
 
-renderer = create_renderer(window)
+window.switch_to()
 ctx = moderngl.create_context()
-target = SharedTarget(renderer, ctx, *window.get_framebuffer_size())
+renderer = create_renderer()
+target = HostTarget(renderer, ctx)
 
 @window.event
 def on_draw():
@@ -98,17 +104,20 @@ def on_draw():
     target.draw()
 
 # After the event loop:
-target.close()
 renderer.close()
 ctx.release()
 window.close()
 ```
 
-`ctx.texture()` allocates mutable storage, which the import rejects. The integration therefore
-creates the texture with `glTexStorage2D` and wraps it with `ctx.external_texture()`. It deletes
-the texture itself on `close()`, because moderngl does not delete external textures. The
-integration draws a quad with a small shader. It sets the viewport and restores it. It does not
-change the blend state.
+The size defaults to `ctx.fbo.size`, the size of the framebuffer that moderngl uses. For the
+window, moderngl reads that size when it attaches.
+
+`ctx.texture()` allocates mutable storage. The import accepts it, but `output_path = "direct"`
+with sRGB encoding then fails, because it needs immutable storage for the sRGB view. The
+integration therefore creates the texture with `glTexStorage2D` and wraps it with `ctx.external_texture()`. It deletes
+the texture itself on `close()`, because moderngl does not delete external textures. moderngl
+cannot read the blend state back, so the integration does not draw with moderngl: it uses the
+native quad, which restores the blend state.
 
 ## zengl
 
@@ -118,12 +127,14 @@ zengl context is one object for each process. Call `zengl.cleanup()` before you 
 
 ```python
 import zengl
-from filly.integrations.pyglet import create_renderer
-from filly.integrations.zengl import SharedTarget
+from filly.integrations.zengl import HostTarget, create_renderer
 
-renderer = create_renderer(window)
+window.switch_to()
 ctx = zengl.context()
-target = SharedTarget(renderer, ctx, *window.get_framebuffer_size())
+renderer = create_renderer()
+# zengl does not report the window's size.
+width, height = window.get_framebuffer_size()
+target = HostTarget(renderer, ctx, width=width, height=height)
 
 @window.event
 def on_draw():
@@ -133,18 +144,19 @@ def on_draw():
     ctx.end_frame()
 
 # After the event loop:
-target.close()
 renderer.close()
 zengl.cleanup()
 window.close()
 ```
 
-`ctx.image()` allocates mutable storage, which the import rejects. The integration therefore
-creates the texture with `glTexStorage2D` and wraps it with `ctx.image(..., external=name)`.
+`ctx.image()` allocates mutable storage, which works only on the exact output path (see
+moderngl above). The integration therefore creates the texture with `glTexStorage2D` and wraps it with `ctx.image(..., external=name)`.
 zengl deletes the texture when the integration releases the image.
 
-A zengl pipeline fixes its framebuffer when you create it. To draw into a zengl image instead of
-the window, pass `framebuffer=[image]` to `SharedTarget`.
+A zengl pipeline fixes its framebuffer and its blend state when you create it. To draw into a
+zengl image instead of the window, pass `framebuffer=[image]` to `HostTarget`; the size then
+defaults to the size of that image. The integration makes one pipeline for blended draws and,
+at the first `draw(blend=False)`, one for copies.
 
 zengl keeps an internal framebuffer bound to `GL_READ_FRAMEBUFFER` after it creates or reads an
 image. Before a raw `glReadPixels` from the window, bind framebuffer 0 for reading.
@@ -158,34 +170,30 @@ shows the same frame again. To draw one frame into several places with one fence
 ```python
 renderer.render(scene, target)
 with target.acquire():
-    target.draw(0, 0, 480, 640)
-    target.draw(480, 0, 480, 640)
+    target.draw(viewport=(0, 0, 480, 640))
+    target.draw(viewport=(480, 0, 480, 640))
 ```
 
 ## Show a transparent view
 
 With `scene.transparent = True`, Filament writes premultiplied RGB after the output encoding. A
-red surface with alpha 0.5 is stored as (128, 0, 0, 128). Use source-over blending for premultiplied
-color: `GL_ONE, GL_ONE_MINUS_SRC_ALPHA`.
+red surface with alpha 0.5 is stored as (128, 0, 0, 128). `target.draw()` composites it
+source-over for premultiplied color (`GL_ONE, GL_ONE_MINUS_SRC_ALPHA`) in every integration, so
+the window shows the view over what the host drew before. For an opaque view, the result is the
+same as a copy.
 
-- pyglet: the blit cannot blend. Use it for opaque views only.
-- moderngl: enable blending before `target.draw()`:
+`target.draw(blend=False)` copies the texture instead: the window gets Filament's premultiplied
+RGBA, alpha included, and the pixels under the view are replaced.
 
-  ```python
-  ctx.enable(moderngl.BLEND)
-  ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
-  ```
-
-  Do not use `moderngl.PREMULTIPLIED_ALPHA`. Its value is `(SRC_ALPHA, ONE)`, which is additive.
-- zengl: the integration's pipeline always uses premultiplied source-over blending. For an opaque
-  view, the result is the same as no blending.
+If you draw `target.texture` with your own moderngl code, use `GL_ONE, GL_ONE_MINUS_SRC_ALPHA`.
+Do not use `moderngl.PREMULTIPLIED_ALPHA`. Its value is `(SRC_ALPHA, ONE)`, which is additive.
 
 ## Close in the correct order
 
-Close the target, then the renderer, then the window. Keep the window open until the event loop
+Close the renderer, then the window. `renderer.close()` first closes the targets of the
+renderer, while the window's context can still be current, and deletes their host objects. You
+can also close a target earlier with `target.close()`. Keep the window open until the event loop
 stops. In an `on_close` handler, call `pyglet.app.exit()` and do not close the window there.
-
-If you close the renderer before the target, the target close does nothing. This is safe.
 
 moderngl and zengl cannot make the window's context current. If another context is current,
 `acquire()`, `draw()`, and `close()` treat the window as closed. Call `window.switch_to()` first.
@@ -213,27 +221,30 @@ origin. Texture row 0 is the bottom row of the image.
 
 ## Compare the hosts
 
-Data comes from `examples/*_shared.py` at 960 x 640, 600 frames, 60 warm-up frames, without
-vsync. Values are medians (p50). "Draw" is the time for the host draw calls only. It does not
-include entering or leaving `acquire()`. The GPU time comes from `GL_TIME_ELAPSED`
+Timing data comes from `examples/*_shared.py` at 960 x 640, 600 frames, 60 warm-up frames,
+without vsync. Values are medians (p50). "Draw" is the time for the host draw calls only. It
+does not include entering or leaving `acquire()`. The GPU time comes from `GL_TIME_ELAPSED`
 queries.
 
 | Item | pyglet | moderngl | zengl |
 | --- | --- | --- | --- |
-| Adapter code lines | 103 | 66 | 72 |
-| Draw method | `glBlitFramebuffer` | quad with a shader | zengl pipeline |
+| Adapter code lines | 71 | 56 | 102 |
+| Draw method | native quad | native quad | zengl pipeline |
 | Vertical flip | No | No | No |
-| Premultiplied alpha | Cannot blend; opaque views only | Caller sets `ONE, ONE_MINUS_SRC_ALPHA` | Built into the pipeline |
+| Premultiplied alpha | `draw()` blends source-over; `blend=False` copies | Same | Same |
 | State reset after Filament calls | None | None | None; call `new_frame()` if pyglet or raw GL also draws |
 | Host draw CPU time | 0.14 ms | 0.12 to 0.15 ms (with a clear) | 0.15 to 0.21 ms (with `new_frame()` and `end_frame()`) |
 | Host draw GPU time | 0.11 ms | 0.09 to 0.12 ms (with a clear) | 0.11 to 0.15 ms |
 | `acquire()` enter CPU time (`stats.host_wait_ms`) | 0.54 to 0.64 ms | 0.50 to 0.62 ms | 0.50 to 0.88 ms |
 | `acquire()` exit CPU time (`stats.host_release_ms`) | 0.04 to 0.05 ms | 0.04 ms | 0.02 to 0.03 ms |
 
-Ranges show two runs, measured before `acquire()` moved into the core `ImportedTarget`; the
-fence operations are the same. The line counts exclude `integrations/_host.py` (141 lines),
-which holds the size check, `draw()`, `close()`, and the context-manager methods for all
-adapters, including PsychoPy. The core `ImportedTarget.acquire()` counts nesting, so the adapters
+Ranges show two runs. The times were measured with earlier versions of the integrations and
+were not measured again: then the pyglet integration copied the texture with
+`glBlitFramebuffer`, the moderngl integration drew a quad with a moderngl program and did not
+blend, and `acquire()` was not yet in the core `ImportedTarget`. The fence operations are the
+same. The line counts exclude `integrations/_host.py` (186 lines), which holds the size and
+viewport checks, `draw()`, `close()`, and the close callback for all adapters, including
+PsychoPy, and the native quad in `native/gl_interop.cpp`. The core `ImportedTarget.acquire()` counts nesting, so the adapters
 keep no state of their own. Entering the outermost `acquire()` blocks the CPU until Filament's
 driver thread has processed the frame and published its fence. It does not wait for the GPU to
 finish.

@@ -48,7 +48,7 @@ def animate(model, seconds, spin=0.0, yaw=None):
     model.position = center - model.transform[:3, :3] @ center
 
 
-def setup_scene(renderer, aspect=1.5, source=None, spin=False):
+def setup_scene(renderer, source=None, spin=False):
     """Load the horse (or `source`) and frame it from the VIEW direction.
 
     A still image fits the box tightly. With `spin`, the bounding sphere keeps the whole model in
@@ -59,20 +59,18 @@ def setup_scene(renderer, aspect=1.5, source=None, spin=False):
     scene.antialiasing = "fxaa"
     scene.shadows = True
     model = scene.load(HORSE if source is None else source)
-    camera = scene.create_camera()
-    # frame() keeps the field of view and sets the clipping planes. It moves the camera, not the
-    # model: the horse is about 8.6 units tall, and scaling it would change its lighting.
-    camera.set_perspective(fov_y=30, near=1, far=2)
-    if spin:
-        camera.frame(model, fill=1.0, direction=view_direction(*VIEW), aspect=aspect)
-    else:
-        camera.frame(model, fill=1.0, direction=view_direction(*VIEW), fit="box", aspect=aspect)
+    camera = renderer.create_camera()
+    # frame() keeps the default 30-degree field of view and sets the clipping planes. It moves the
+    # camera, not the model: the horse is about 8.6 units tall, and scaling it would change its
+    # lighting. The render frames again for the target's aspect.
+    camera.frame(model, fill=1.0, direction=view_direction(*VIEW), fit="sphere" if spin else "box")
     scene.camera = camera
     key = scene.add_directional_light(direction=(-1, -1.5, -1), intensity=110000,
                                       color=(1, 0.92, 0.82))
     key.casts_shadows = True
     scene.add_directional_light(direction=(1, -0.3, -1), intensity=30000, color=(0.55, 0.75, 1))
-    scene.set_environment(studio_environment(), intensity=20000)
+    scene.environment = renderer.create_environment(studio_environment())
+    scene.environment_intensity = 20000
     return scene, model
 
 
@@ -87,7 +85,7 @@ def save_gif(output, width, height, fps, sway):
     # the horse covers over the whole cycle. One crop for all frames keeps the loop steady.
     scale = 2
     with filly.Renderer() as renderer:
-        scene, model = setup_scene(renderer, width / height, spin=True)
+        scene, model = setup_scene(renderer, spin=True)
         period = model.animations[0].duration
         count = max(2, round(period * fps))
         target = renderer.create_render_target(width=width * scale, height=height * scale)
@@ -153,7 +151,7 @@ def main():
         print(args.output)
         return
     with filly.Renderer() as renderer:
-        scene, model = setup_scene(renderer, args.width / args.height)
+        scene, model = setup_scene(renderer)
         animate(model, args.time)
         target = renderer.create_render_target(width=args.width, height=args.height)
         renderer.render(scene, target)

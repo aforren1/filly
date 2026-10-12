@@ -62,14 +62,14 @@ def open_window(args, caption):
 
 
 def run(window, renderer, target, draw, args):
-    """Render and draw args.frames frames, then close the target and the renderer.
+    """Render and draw args.frames frames, then close the renderer and with it the target.
 
     ``draw()`` is the host's per-frame drawing. It must call ``target.draw()``,
     which runs inside ``target.acquire()`` here.
     The caller closes the window after this returns.
     """
     width, height = target.width, target.height
-    scene, model = setup_scene(renderer, width / height, spin=True)
+    scene, model = setup_scene(renderer, spin=True)
     timer = GpuTimer()
     timings = []
     start = perf_counter()
@@ -91,7 +91,7 @@ def run(window, renderer, target, draw, args):
             pyglet.app.exit()
 
     def on_close():
-        # Keep the window open; the target and the renderer need its context to close.
+        # Keep the window open; the renderer needs its context to close.
         pyglet.app.exit()
         return pyglet.event.EVENT_HANDLED
 
@@ -103,7 +103,7 @@ def run(window, renderer, target, draw, args):
     finally:
         window.switch_to()
         timer.close()
-        target.close()
+        # Closes the target too.
         renderer.close()
     measured = np.array(timings[args.warmup:])
     names = ("host_draw_cpu_ms", "host_wait_ms", "host_release_ms", "host_draw_gpu_ms", "cpu_submit_ms")
@@ -115,15 +115,14 @@ def run(window, renderer, target, draw, args):
 
 
 def main():
-    from filly.integrations.pyglet import SharedTarget, create_renderer
+    from filly.integrations.pyglet import HostTarget, create_renderer
 
     args = parse_args(__doc__.splitlines()[0])
     filly.set_log_level("warning")
     window = open_window(args, "filly + pyglet")
     renderer = create_renderer(window)
-    width, height = window.get_framebuffer_size()
-    target = SharedTarget(renderer, window, width, height)
-    # The blit replaces every pixel, so the window needs no clear.
+    target = HostTarget(renderer, window)
+    # The scene is opaque and the target covers the window, so the window needs no clear.
     run(window, renderer, target, target.draw, args)
     window.close()
 

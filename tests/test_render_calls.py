@@ -30,7 +30,7 @@ def stereo_scene(renderer, path):
     scene.create_mesh(**filly.shapes.plane(0.5, 0.5), unlit=True, base_color=(1, 0, 0, 1))
     eyes = []
     for x in (-0.25, 0.25):
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         # Height 2 and the half-target viewport's aspect of 1: each eye sees [-1, 1] around x.
         camera.set_orthographic(height=2, center=(0, 0), near=0.1, far=10)
         camera.position = (x, 0, 3)
@@ -63,7 +63,7 @@ def test_two_eyes_land_in_their_halves(renderer, path):
 def test_clear_false_keeps_the_rest_and_fills_the_viewport(renderer, path):
     scene, (left, right) = stereo_scene(renderer, path)
     target = renderer.create_render_target(width=WIDTH, height=HEIGHT)
-    near, far = scene.create_camera(), scene.create_camera()
+    near, far = renderer.create_camera(), renderer.create_camera()
     # The near camera sees 0.2 units vertically, inside the square; the far one misses it.
     for camera, x in ((near, 0), (far, 10)):
         camera.set_orthographic(height=0.2, near=0.1, far=10)
@@ -87,7 +87,7 @@ def test_clear_false_keeps_the_rest_and_fills_the_viewport(renderer, path):
 def test_camera_override_is_for_one_call(renderer, scene):
     shape = filly.shapes.plane(0.5, 0.5)
     scene.create_mesh(**shape, unlit=True, alpha_mode="blend")
-    other = scene.create_camera()
+    other = renderer.create_camera()
     other.set_orthographic(height=2, near=0.1, far=10)
     other.position = (5, 0, 3)
     other.look_at((5, 0, 0))
@@ -103,15 +103,15 @@ def test_camera_override_is_for_one_call(renderer, scene):
         renderer.render(empty, target)
     renderer.render(empty, target, camera=other)
     with filly.Renderer() as foreign:
-        foreign_camera = foreign.create_scene().create_camera()
+        foreign_camera = foreign.create_camera()
         with pytest.raises(ValueError, match="this renderer"):
             renderer.render(scene, target, camera=foreign_camera)
     target.close()
 
 
 def test_projection_follows_the_viewport_aspect(renderer, scene):
-    camera = scene.create_camera()
-    camera.set_perspective(fov_y=60, near=0.1, far=10)
+    camera = renderer.create_camera()
+    camera.set_perspective(fov_y_deg=60, near=0.1, far=10)
     target = renderer.create_render_target(width=WIDTH, height=HEIGHT)
     renderer.render(scene, target, camera=camera, viewport=(0, 0, 16, 32))
     projection = camera.projection

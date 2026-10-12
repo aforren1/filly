@@ -151,19 +151,31 @@ def test_texture_transform_drifts(renderer, scene):
     material.base_color_texture = texture
     before = render(renderer, scene)
     assert before[8, 4, 0] == 0 and before[8, 12, 0] == 255
-    material.set_texture_transform("base_color", offset=(0.5, 0))
+    assert list(material.base_color_texture_offset) == [0, 0]
+    assert list(material.base_color_texture_scale) == [1, 1]
+    assert material.base_color_texture_rotation_deg == 0
+    material.base_color_texture_offset = (0.5, 0)
     after = render(renderer, scene)
     assert after[8, 4, 0] == 255 and after[8, 12, 0] == 0
-    material.set_texture_transform("base_color", scale=(2, 1))
+    material.base_color_texture_offset = (0, 0)
+    material.base_color_texture_scale = (2, 1)
     # Two periods: black, white, black, white.
     row = render(renderer, scene)[8, :, 0]
     np.testing.assert_array_equal(row[[2, 6, 10, 14]], [0, 255, 0, 255])
-    material.set_texture_transform("base_color", rotation_deg=180)
+    material.base_color_texture_scale = (1, 1)
+    material.base_color_texture_rotation_deg = 180
     np.testing.assert_array_equal(render(renderer, scene), after)
+    # Each component changes alone.
+    material.base_color_texture_offset = (0.25, 0.5)
+    assert list(material.base_color_texture_scale) == [1, 1]
+    assert material.base_color_texture_rotation_deg == 180
+    assert list(material.base_color_texture_offset) == [0.25, 0.5]
+    # A slot without a runtime texture has no transform to read or set.
+    assert material.emissive_texture_offset is None and material.emissive_texture_rotation_deg is None
     with pytest.raises(filly.FillyError, match="Assign a texture"):
-        material.set_texture_transform("emissive")
-    with pytest.raises(ValueError, match="slot"):
-        material.set_texture_transform("normal")
+        material.emissive_texture_offset = (0, 0)
+    with pytest.raises(ValueError):
+        material.base_color_texture_rotation_deg = float("nan")
 
 
 @pytest.mark.parametrize("path", ["direct", "exact"])
@@ -289,9 +301,13 @@ def test_glTF_texture_is_restored_after_removal(renderer, scene, triangle_glb):
     assert material.base_color_texture is None
     material.base_color_texture = renderer.create_texture(np.array([[[255, 0, 255, 255]]], np.uint8), color_space="srgb")
     np.testing.assert_array_equal(center(), [255, 0, 255, 255])
-    material.set_texture_transform("base_color", offset=(0.25, 0.25))
+    material.base_color_texture_offset = (0.25, 0.25)
     material.base_color_texture = None
     np.testing.assert_array_equal(center(), [0, 255, 0, 255])
+    # Removing the texture resets its transform.
+    assert material.base_color_texture_offset is None
+    material.base_color_texture = renderer.create_texture(np.array([[[255, 0, 255, 255]]], np.uint8), color_space="srgb")
+    assert list(material.base_color_texture_offset) == [0, 0]
 
 
 def test_new_slot_keeps_other_glTF_textures(renderer, scene, triangle_glb):
@@ -303,9 +319,9 @@ def test_new_slot_keeps_other_glTF_textures(renderer, scene, triangle_glb):
     material.emissive = (1, 1, 1)
     material.emissive_texture = renderer.create_texture(np.array([[[0, 128, 255]]], np.uint8), color_space="linear")
     np.testing.assert_allclose(render(renderer, scene)[8, 8], [0, srgb(128 / 255), 255, 255], atol=1)
-    material.set_texture_transform("emissive", offset=(0.5, 0))
+    material.emissive_texture_offset = (0.5, 0)
     material.base_color_texture = renderer.create_texture(np.full((1, 1, 3), 255, np.uint8), color_space="srgb")
-    material.set_texture_transform("base_color", offset=(0.5, 0))
+    material.base_color_texture_offset = (0.5, 0)
     material.emissive_texture = None
     material.base_color_texture = None
     material.base_color = (1, 1, 1, 1)
@@ -394,7 +410,7 @@ def test_texture_slots_on_lit_glTF_material(triangle_glb):
     """A lit glTF material without textures takes both runtime textures, and loses them again."""
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(height=2, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))

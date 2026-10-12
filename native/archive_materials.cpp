@@ -121,7 +121,7 @@ void set_core_indices(f::MaterialInstance* mi, g::MaterialKey& k) {
 class ArchiveProvider final : public g::MaterialProvider {
 public:
     f::Engine* engine;
-    // The asset being created or cloned; null otherwise.
+    // The asset whose instance is being created; null otherwise.
     const PreparedAsset* asset = nullptr;
     std::vector<MaterialBinding> bindings;
     std::vector<MaterialRecord> records;
@@ -335,8 +335,8 @@ public:
     f::Texture* decode(const AssetTexture& data, bool srgb) {
         if (data.bytes.empty()) return dummy;
         // Materials of one asset that use the same texture share its decoded copy, and so do
-        // clones: decoding again cost each clone the decode time and the texture's GPU memory,
-        // which stayed until the asset closed.
+        // the asset's other instances: decoding again cost each instance the decode time and the
+        // texture's GPU memory, which stayed until the asset closed.
         if (asset)
             for (const auto& entry : asset->decoded)
                 if (entry.source == &data && entry.srgb == srgb) return entry.texture;

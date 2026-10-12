@@ -14,7 +14,7 @@ import numpy as np
 import pyglet
 
 import filly
-from filly.integrations.pyglet import SharedTarget, create_renderer
+from filly.integrations.pyglet import HostTarget, create_renderer
 
 
 def parse_args():
@@ -39,13 +39,12 @@ def main():
                                   vsync=not args.no_vsync)
     window.switch_to()
     renderer = create_renderer(window)
-    width, height = window.get_framebuffer_size()
-    target = SharedTarget(renderer, window, width, height)
+    target = HostTarget(renderer, window)
 
     scene = renderer.create_scene()
     scene.background = (0.5, 0.5, 0.5, 1)
-    camera = scene.create_camera()
-    camera.set_perspective(fov_y=40, near=0.1, far=10)
+    camera = renderer.create_camera()
+    camera.set_perspective(fov_y_deg=40)
     camera.position = (0, 0, 3)
     camera.look_at((0, 0, 0))
     scene.camera = camera
@@ -82,7 +81,7 @@ def main():
         began = perf_counter()
         if args.transform:
             # A shift of 1 / cycles in U moves the texture by one grating period.
-            material.set_texture_transform("base_color", offset=(phase / args.cycles, 0))
+            material.base_color_texture_offset = (phase / args.cycles, 0)
         else:
             texture.update(grating(phase))
         updated = perf_counter()
@@ -102,8 +101,7 @@ def main():
         pyglet.app.run()
     finally:
         window.switch_to()
-        texture.close()
-        target.close()
+        # Closes the texture and the target too.
         renderer.close()
         window.close()
     measured = np.array(timings[min(30, len(timings) // 2):])

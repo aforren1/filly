@@ -100,9 +100,10 @@ Small C++ facade (native/renderer.h)
  │ Model, Node             │
  │ Camera                  │
  │ Light                   │
+ │ Asset, Environment      │
  │ Material                │
- │ Texture, HostTexture    │
- │ OffscreenTarget         │
+ │ Texture, ImportedTexture│
+ │ RenderTarget            │
  │ ImportedTarget          │
  └─────────────────────────┘
         │
@@ -117,7 +118,8 @@ Small C++ facade (native/renderer.h)
  └─────────────────────────┘
         │
         ▼
- OpenGL (WGL on Windows, GLX on Linux)
+ OpenGL (WGL on Windows; GLX or headless EGL on Linux)
+ WebGL2 (the WebAssembly build, web/)
 ```
 
 The C++ facade is the stable public implementation API. Its header includes neither Python nor Filament headers.
@@ -138,7 +140,7 @@ import filly
 
 Minimum supported Python versions should follow the currently practical nanobind ecosystem rather than historical Python releases.
 
-**Decision.** Python 3.12 and later use one limited-ABI (`cp312-abi3`) wheel. Python 3.10 and 3.11 use version-specific wheels; the PsychoPy adapter is tested on 3.11.
+**Decision.** Python 3.12 and later use one limited-ABI (`cp312-abi3`) wheel. Python 3.10 and 3.11 use version-specific wheels; the PsychoPy adapter is tested on 3.10 and 3.11.
 
 The extension uses nanobind directly rather than pybind11.
 
@@ -171,15 +173,28 @@ Filament's engine is associated with a hardware rendering context and manages a 
 
 ```python
 renderer.create_scene()
+renderer.create_camera()
+renderer.load_asset(source)
+renderer.load_environment(path)
+renderer.load_environment_ktx(ibl_path, skybox_path=None)
+renderer.create_environment(pixels)
 renderer.create_render_target(width=..., height=...)
-renderer.import_gl_texture(texture_id, width=..., height=...)
+renderer.import_gl_target(texture_id, width=..., height=...)
 renderer.create_texture(pixels, color_space=...)
-renderer.import_gl_input(texture_id, width=..., height=..., color_space=...)
+renderer.import_gl_texture(texture_id, width=..., height=..., color_space=...)
+renderer.prepare(scene)
 renderer.render(scene, target, camera=None, viewport=None, clear=True)
 renderer.finish()
 renderer.close()
 renderer.stats
+renderer.closed
+renderer.shared_context
+renderer.gl_platform
 ```
+
+The full signatures are in [the API reference](docs/reference/api.md#renderer).
+
+**Decision (names).** `render()` writes into a target, and materials sample a texture. `create_*` returns an object whose storage filly owns (`RenderTarget`, `Texture`, `Environment`), and `load_*` reads a file or bytes into one (`Asset`, `Environment`); `import_gl_*` wraps a host OpenGL texture (`ImportedTarget`, `ImportedTexture`). Earlier names (`import_gl_texture()` for a target, `import_gl_input()` for a texture, `OffscreenTarget`, `HostTexture`) said the opposite of what the objects do.
 
 **Decision.** `render()` flushes its commands to the driver, so there is no `flush()`. A target is required; there is no window target (section 11.1).
 
@@ -216,7 +231,13 @@ scene.antialiasing = "fxaa"
 
 The wrapper maps this to Filament's `Scene`, `View`, camera, and entity infrastructure.
 
-**Decision.** Rendering options are scene properties (`encoding`, `tone_mapping`, `antialiasing`, `msaa`, `shadows`, `refraction`, `transparent`, `dithering`, `ssao`, `bloom`, `fog`, `depth_of_field`, `vignette`). An assignment validates one value and changes only that option.
+**Decision.** Rendering options are scene properties (`encoding`, `output_path`, `tone_mapping`, `antialiasing`, `msaa`, `shadows`, `transparent`, `dithering`, `ssao`, `bloom`, `fog`, `depth_of_field`, `vignette`). An assignment validates one value and changes only that option.
+
+**Decision (refraction).** Screen-space refraction is not an option: every scene has it on. Transmission and volume materials sample the refraction pass and render as flat white without it, and Filament runs the pass only in frames that draw such a material, so other scenes render the same pixels in the same time (measured: identical pixels, 0.40 to 0.48 ms per 1080p frame either way). The earlier `scene.refraction` looked like a render option, but no material depended on it: only a load-time warning did, which made "set it before loading glass" a rule. A load argument would have been equally empty. The direct output path rejects these materials, as it rejected the option.
+
+**Decision (effect parameters).** Every parameter of an effect, a light, or a texture transform is its own readable property, for example `scene.fog_density`, `scene.vignette_color`, `light.shadow_map_size`, `light.cone_deg`, and `material.base_color_texture_offset`. There are no `set_*_options()` methods. Such methods gave every argument a default, so a call that changed one parameter reset the others, and nothing could read the parameters back. Flat properties match the other settings (`camera.focus_distance`, `light.range`), change one value without touching the others, and map one to one to JavaScript properties and to PsychoPy component parameters. Value objects (for example `scene.fog = Fog(...)`) would also be readable, but a change of one parameter would need a copy of the whole object, and `None` for off would lose the parameters. The on/off property (`scene.fog`, `scene.vignette`, `light.casts_shadows`) stays separate, and the parameters keep their values while the effect is off, so a trial loop can toggle an effect. Two values that one rule constrains together, such as the inner and outer spot cone angles, form one property.
+
+**Decision (properties that an object lacks).** A property that does not apply to an object reads as `None`, and setting it raises `ValueError`: `position` and `range` of directional and sun lights, `direction` of point lights, `cone_deg` of all lights except spot lights, and texture transforms of a slot without a runtime texture (`FillyError`). A setter that accepted a value and ignored it hid errors in experiment code. Every value that a getter returns, the setter accepts: `camera.focus_distance` reads 0 for a new camera, and 0 is valid (Filament focuses no closer than the near plane).
 
 ---
 
@@ -251,11 +272,12 @@ Rotation units must be explicit:
 
 ```python
 model.rotation_euler_deg
-model.rotation_euler_rad
 model.quaternion
 ```
 
 There is no ambiguous `rotation` property.
+
+**Decision (angles).** Every angle in the API is in degrees, and its name ends in `_deg` (`fov_y_deg`, `rotation_euler_deg`, `environment_rotation_deg`, `angular_radius_deg`, `cone_deg`, `base_color_texture_rotation_deg`); JavaScript names end in `Deg`. Psychophysics users specify stimuli in degrees. One unit removes the conversion errors that a mix of degrees and radians invited, and the suffix keeps a call site readable and makes a radian value from another library fail by name rather than render a wrong angle. Radian forms are not offered. glTF assets store radians; filly converts at the boundary.
 
 Hierarchy from the original glTF asset is retained.
 
@@ -270,9 +292,9 @@ This is particularly useful for articulated experimental stimuli.
 
 **Decision.** A lookup key is a name or an integer. An integer is always an index into the glTF array that the item comes from: nodes, animations, and variants. Nodes place lights and cameras, so `model.light(key)` and `model.camera(key)` take a node key, and `light.node` and `camera.node` return that node. Names are the glTF names; an unnamed node has the name `None`, not `gltfio`'s fallback to its mesh, light, or camera name. `node.mesh_name`, the node index, and the node tree reach unnamed nodes. Names that several items share raise an error that lists their indices.
 
-**Decision.** `model.clone()` makes another instance that shares geometry, textures, and compiled materials. It needs the asset's source data, about the file size in CPU memory, so cloning is opt-in: `scene.load(source, clonable=True)`.
+**Decision (assets).** `renderer.load_asset(source)` returns an `Asset` that the renderer owns, as it owns cameras and environments; `scene.add(asset)` returns a new `Model` that shares the asset's geometry, textures, and compiled materials, in any scene of the renderer. `scene.load(source)` is the shortcut that loads, adds once, and releases the source data. An open asset keeps its source data, about the file size in CPU memory, because Filament needs it to create instances; `asset.close()` releases it, and existing models keep the GPU data. This replaced `scene.load(source, clonable=True)` and `model.clone(scene=...)`, which could create a clonable asset only through a scene: keeping a prototype needed a hidden model in some scene, and closing that scene closed it. A clone of an edited model copied none of the edits, so `clone()` had no use that `add()` lacks. Generated meshes stay one model each: an asset for them would add a renderer method and shared-buffer rules for a use that no caller had.
 
-**Decision (geometry from arrays).** `scene.create_mesh(positions, indices, normals=..., uvs=..., colors=...)` returns a `Model` from NumPy arrays. It has the glTF metallic-roughness material that the loader makes for the same factors, through the same material provider, so it renders like a glTF mesh with equal parameters and supports nodes, material handles, and clones. Missing normals are area-weighted vertex normals. Tangent frames come from Filament's geometry library (`SurfaceOrientation`). `model.update_mesh()` replaces vertex data of the same size in place without per-frame allocation; clones share the vertex data. Pure-Python helpers in `filly.shapes` return arrays for a plane, a box, a UV sphere, and a cylinder. Geometry processing stays a non-goal (section 3).
+**Decision (geometry from arrays).** `scene.create_mesh(positions, indices, normals=..., uvs=..., colors=...)` returns a `Model` from NumPy arrays. It has the glTF metallic-roughness material that the loader makes for the same factors, through the same material provider, so it renders like a glTF mesh with equal parameters and supports nodes and material handles. Missing normals are area-weighted vertex normals. Tangent frames come from Filament's geometry library (`SurfaceOrientation`). `model.update_mesh()` replaces vertex data of the same size in place without per-frame allocation. Native functions in `filly.shapes` (`native/shapes.cpp`) return arrays for a plane, a box, a UV sphere, and a cylinder. Geometry processing stays a non-goal (section 3).
 
 ---
 
@@ -324,14 +346,14 @@ Loading from bytes is important for packaged experiment resources.
 Support perspective and orthographic projection equally.
 
 ```python
-camera = scene.create_camera()
+camera = renderer.create_camera()
 ```
 
 Perspective:
 
 ```python
 camera.set_perspective(
-    fov_y=45,
+    fov_y_deg=45,
     near=0.1,
     far=100,
 )
@@ -352,6 +374,8 @@ camera.set_orthographic(height=4, near=0.1, far=100)
 ```
 
 **Decision.** Without an explicit `aspect`, and with the `height` form, the projection follows the render target's aspect at each `render()`, or the viewport's aspect when `render()` has a viewport. `render(..., camera=...)` uses another camera for one call (section 6.1). `set_lens_projection()` gives a perspective from a focal length. Imported glTF cameras are available through `model.camera(key)` and keep their glTF projection.
+
+**Decision (defaults and planes).** A new camera has a perspective projection with a 30-degree vertical field of view, `near=0.1`, and `far=100`, and it follows the target aspect, so `frame()` alone aims it. `near` and `far` are optional in the projection methods: a plane that the caller gives, to a projection method or to `frame()`, stays until the next projection call, and `frame()` sets only the others. Without `aspect`, a `frame()` of a camera that follows the target aspect is repeated in `render()` when the target aspect differs, so a framing before the first render is correct. Creation-time projection options would repeat the setters, so `create_camera()` takes none. A scene has no default camera: a camera that nobody aimed renders an empty image without an error, while a render without a camera raises an error that tells how the scene lost it.
 
 **Decision (depth-of-field inputs).** `camera.focus_distance` (scene units, read as meters) and `camera.aperture` (f-number) feed depth of field (section 16). The depth-of-field aperture is separate from the exposure aperture, so it does not change brightness.
 
@@ -381,7 +405,7 @@ scene.add_spot_light(...)
 Also support:
 
 ```python
-scene.load_environment("studio.hdr")
+scene.environment = renderer.load_environment("studio.hdr")
 scene.background = (0.5, 0.5, 0.5, 1)
 ```
 
@@ -390,6 +414,10 @@ Environment lighting should allow an IBL/environment map but should not require 
 A simple experiment should be renderable using one directional light and a constant background.
 
 **Decision.** Environments come from a 2:1 panorama (file or NumPy array) or from prefiltered `cmgen` KTX files. Shadows are opt-in per scene and per light.
+
+**Decision (shared environments).** An `Environment` belongs to the renderer (`renderer.load_environment()`, `create_environment()`, `load_environment_ktx()`), and scenes use it through `scene.environment`. Filtering a panorama took 54 to 83 ms, and each scene filtered its own copy; a shared environment is filtered once, and a scene takes it in 0.03 to 0.3 ms. Intensity and rotation are scene properties only (defaults 30000 lux and 0 degrees), because Filament keeps them in the `IndirectLight`, which each scene builds from the shared textures; two scenes can therefore light the same environment differently. They keep their values without an environment, as `environment_visible` does, instead of reading `None`. `environment.close()` removes it from every scene.
+
+**Decision (default intensities).** Every light type is visible with its defaults at the default camera exposure (EV100 about 15). Directional lights default to 50000 lux, sun lights to 100000 lux (as in `gltf_viewer`), and point and spot lights to 50000 cd, which lights a surface 1 m away as brightly as the default directional light. A measurement with a white diffuse plane, the light 1 m in front of it, and the default camera gave 3 of 255 for the earlier point and spot default of 100 cd, and 173 of 255 for both 50000 cd and the 50000 lux directional default.
 
 ---
 
@@ -415,7 +443,7 @@ model.node("arm_a").material(0).base_color = (1, 0, 0, 1)
 
 **Decision (runtime textures).** A texture can come from a NumPy array (H x W x 1, 3, or 4; `uint8` or `float32`) with an explicit color space (`"srgb"` for color, `"linear"` for data) and optional mipmaps. It updates in place with the same shape and type for per-frame stimuli; updates copy into a ring of three staging buffers, add no frame of latency, and allocate nothing after the first three. A texture goes into the base color or emissive slot of a shared material (`model.material(name)`) or a node-local one, with an optional UV transform (offset, scale, rotation) for drifting patterns; `None` removes it. A glTF material compiled without the slot gets the material for the same glTF key with the slot added, through the material provider, and keeps its factors. Closing a texture removes it from its materials; the renderer closes its textures.
 
-**Decision (host texture input).** `renderer.import_gl_input()` makes a host OpenGL texture a material input, for zero-copy video or host-drawn patterns on 3D surfaces. The host writes it inside `write()`. The order is explicit in both directions with the fences of section 14: the next render waits on the GPU for the host's writes, and the host waits on the GPU for Filament's last read before it writes again.
+**Decision (host texture input).** `renderer.import_gl_texture()` makes a host OpenGL texture a material input, for zero-copy video or host-drawn patterns on 3D surfaces. The host writes it inside `write()`. The order is explicit in both directions with the fences of section 14: the next render waits on the GPU for the host's writes, and the host waits on the GPU for Filament's last read before it writes again.
 
 Do not expose Filament's complete material compiler/material-language system initially.
 
@@ -466,7 +494,7 @@ Readback is expected to be relatively expensive and is not the preferred per-fra
 Primary interoperability mode:
 
 ```python
-target = renderer.import_gl_texture(
+target = renderer.import_gl_target(
     texture_id,
     width=1920,
     height=1080,
@@ -654,7 +682,7 @@ Filament supports disabling postprocessing on a `View`; its own render-target sa
 
 **Decision (sRGB output).** Output is sRGB-encoded by default; `scene.encoding = "linear"` stores linear values. PsychoPy and the other hosts sample the texture as plain RGBA8 into a non-sRGB framebuffer, and readback users save or compare 8-bit images, so encoded values display and compare correctly without host changes. Linear 8-bit output wastes precision in dark tones. The encoding does not depend on other options, and it is within one 8-bit level of the analytic transfer function. On the default path it is exact for the value in the scene-linear RGBA16F buffer.
 
-**Decision (encoding path).** filly's encode pass encodes by default (`Scene.output_path = "exact"`): the scene renders scene-linear color into an RGBA16F buffer, and one full-screen pass applies the linear tone mapper's clamp, the analytic transfer function in fp32, and the alpha rule, and rounds to 8-bit levels. Every option ends in this pass. Filament's postprocessing runs only for the options that are part of it (a non-linear tone mapper, bloom, depth of field, vignette), and then writes linear color into the same buffer; FXAA and dithering are filly's own, after the encoding. The pass replaced Filament's color grading as the default, which cost about 1.5 ms per 1080p frame on the tested Intel GPU (see docs/reference/performance.md). `Scene.output_path = "direct"` is an explicit opt-in that renders straight into the target, so the GPU encodes on write into sRGB storage and the encode pass is saved. The two paths round differently by up to one 8-bit level, so the renderer never switches between them on its own: an automatic choice let a stimulus change by one level when an unrelated setting, such as a material's alpha mode, changed. The opt-in never falls back. Each setting that it cannot render (a non-linear tone mapper, FXAA, MSAA, refraction, SSAO, bloom, dithering, depth of field, vignette, or a transparent view) raises `ValueError` when it meets the opt-in, in either order. `MASK` materials raise too, because only the encode pass stores alpha one for their sharpened edge alpha in an opaque view; unlit `OPAQUE` materials are compiled to output alpha one and work on both paths. Transparent views need the encode pass, because it premultiplies after encoding, which is what hosts that blend in encoded space expect.
+**Decision (encoding path).** filly's encode pass encodes by default (`Scene.output_path = "exact"`): the scene renders scene-linear color into an RGBA16F buffer, and one full-screen pass applies the linear tone mapper's clamp, the analytic transfer function in fp32, and the alpha rule, and rounds to 8-bit levels. Every option ends in this pass. Filament's postprocessing runs only for the options that are part of it (a non-linear tone mapper, bloom, depth of field, vignette), and then writes linear color into the same buffer; FXAA and dithering are filly's own, after the encoding. The pass replaced Filament's color grading as the default, which cost about 1.5 ms per 1080p frame on the tested Intel GPU (see docs/reference/performance.md). `Scene.output_path = "direct"` is an explicit opt-in that renders straight into the target, so the GPU encodes on write into sRGB storage and the encode pass is saved. The two paths round differently by up to one 8-bit level, so the renderer never switches between them on its own: an automatic choice let a stimulus change by one level when an unrelated setting, such as a material's alpha mode, changed. The opt-in never falls back. Each setting that it cannot render (a non-linear tone mapper, FXAA, MSAA, SSAO, bloom, dithering, depth of field, vignette, or a transparent view) raises `ValueError` when it meets the opt-in, in either order. Transmission and volume materials raise too, because they need the refraction pass. `MASK` materials raise too, because only the encode pass stores alpha one for their sharpened edge alpha in an opaque view; unlit `OPAQUE` materials are compiled to output alpha one and work on both paths. Transparent views need the encode pass, because it premultiplies after encoding, which is what hosts that blend in encoded space expect.
 
 **Decision (tone mapping).** The default tone mapper is a linear clamp, so neutral colors stay neutral and factors map directly to output levels. Filament's other tone mappers are available; `"aces_legacy"`, the `gltf_viewer` default, tints neutral grey.
 
@@ -726,11 +754,17 @@ A `Renderer` is the lifetime root.
 Renderer
  ├── Scene
  │    ├── Model
- │    ├── Camera
+ │    │    └── imported Camera / Light (close with the model)
  │    └── Light
- ├── Texture / HostTexture
- └── OffscreenTarget / ImportedTarget
+ ├── Camera (scenes refer to it; any scene of the renderer can use it)
+ ├── Asset (scene.add() makes models of it; they keep the GPU data after asset.close())
+ ├── Environment (close() removes it from every scene)
+ ├── Texture / ImportedTexture
+ └── RenderTarget / ImportedTarget (including the host targets of filly.integrations)
 ```
+
+`renderer.close()` also closes the imported targets and host targets, while the host context
+can still be made current. So only the host window must close last.
 
 Child objects must maintain a reference to their owner or otherwise guarantee that their Filament resources cannot outlive the engine.
 
@@ -838,7 +872,7 @@ The core renderer must not depend on PsychoPy.
 Optional helper layer:
 
 ```python
-from filly.integrations.psychopy import SharedTarget, create_renderer
+from filly.integrations.psychopy import HostTarget, create_renderer
 ```
 
 Workflow:
@@ -850,9 +884,11 @@ renderer = create_renderer(win)
 
 scene = renderer.create_scene()
 model = scene.load("stimulus.glb")
+scene.camera = renderer.create_camera()
+scene.camera.frame(model)
 
-target = SharedTarget(renderer, win, 1024, 1024)
-stim = target.as_psychopy_texture()
+target = HostTarget(renderer, win, width=1024, height=1024)
+stim = target.create_image_stim()
 
 renderer.render(scene, target)
 stim.draw()
@@ -862,9 +898,9 @@ win.flip()
 
 The texture wrapper follows PsychoPy internals rather than requiring pixel copies.
 
-**Decision.** `stim.draw()` acquires the texture itself, and `with target.acquire():` holds one frame for several draws. The adapter is pinned to psychopy-lib 2026.2.4 and the pyglet window backend, because it uses PsychoPy's context and texture internals.
+**Decision.** `stim.draw()` acquires the texture itself, and `with target.acquire():` holds one frame for several draws. The adapter requires PsychoPy 2024.2 or later (tested with 2024.2.4 and 2026.2.4) and the pyglet window backend, because it uses PsychoPy's context and texture internals.
 
-**Decision (other hosts).** The same `SharedTarget` design exists for a plain pyglet window, moderngl, and zengl in `filly.integrations`, tested with pyglet 1.4.11, moderngl 5.12.0, and zengl 2.7.3 on Windows. Each is a thin subclass of `ImportedTarget`, which is the API for other host adapters.
+**Decision (other hosts).** The same `HostTarget` design exists for a plain pyglet window, moderngl, and zengl in `filly.integrations`, tested with pyglet 1.4.11, moderngl 5.12.0, and zengl 2.7.3 on Windows. Each is a thin subclass of `ImportedTarget`, which is the API for other host adapters.
 
 ---
 
@@ -915,9 +951,9 @@ Backend-native zero-copy interop can be explored later.
 
 This deliberately keeps the first interop implementation focused on the graphics API actually exposed by existing PsychoPy/PTB workflows.
 
-**Decision.** Only OpenGL is built, on Windows (WGL) and Linux (GLX). **Open.** Vulkan, Metal, and macOS.
+**Decision.** Only OpenGL is built: on Windows (WGL), on Linux (GLX, and headless EGL for offscreen renderers without an X display), and as WebGL2 in the WebAssembly build (`web/`). **Open.** Vulkan, Metal, and macOS.
 
-**Status (Linux).** The Linux build compiles the pinned Filament from source in manylinux_2_28 with three local patches and passed the tests on Mesa software rendering and WSLg. It needs an X11 display. Linux was not retested after the API redesign.
+**Status (Linux).** The Linux build compiles the pinned Filament from source in manylinux_2_28 with three local patches and passed the tests on Mesa software rendering and WSLg. Offscreen renderers use headless EGL when there is no X display; shared contexts need GLX and an X11 display. Linux was last tested on September 30, 2026, before the October API changes.
 
 ---
 
@@ -945,7 +981,7 @@ OpenGL support must remain enabled; Filament itself has a build option controlli
 
 Do not build Filament samples/tools unless required for asset processing.
 
-**Decision.** The build uses CMake with scikit-build-core. Windows links the official Filament 1.77.1 release SDK; Linux builds the same version from source. Only the needed static libraries are linked, and the material compiler is included for load-time shader compilation.
+**Decision.** The build uses CMake with scikit-build-core. Windows links the official Filament 1.77.1 release SDK; Linux builds the same version from source. Only the needed static libraries are linked. The material compiler is not linked: every material comes from the precompiled archive, which `matc` and `uberz` make at build time (section 6.1).
 
 ---
 
@@ -993,7 +1029,7 @@ renderer = filly.Renderer()
 
 scene = renderer.create_scene()
 
-camera = scene.create_camera()
+camera = renderer.create_camera()
 camera.set_orthographic(
     left=-3,
     right=3,
@@ -1038,10 +1074,12 @@ renderer = filly.Renderer(shared_context=filly.current_gl_context())
 
 scene = renderer.create_scene()
 model = scene.load("stimulus.glb")
+scene.camera = renderer.create_camera()
+scene.camera.frame(model)
 
 host_texture = create_host_gl_texture(1024, 1024)   # immutable GL_RGBA8 storage
 
-target = renderer.import_gl_texture(
+target = renderer.import_gl_target(
     host_texture,
     width=1024,
     height=1024,
@@ -1270,7 +1308,7 @@ The project succeeds if an experiment can effectively do this:
 
 ```python
 model = scene.load("shepard_metzler.glb")
-stimulus = shared_target.as_psychopy_texture()
+stimulus = shared_target.create_image_stim()
 
 for trial in trials:
     model.node("arm_a").rotation_euler_deg = trial.arm_a

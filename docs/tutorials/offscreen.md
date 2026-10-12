@@ -8,17 +8,16 @@ import filly
 
 with filly.Renderer() as renderer:
     scene = renderer.create_scene()
-    scene.refraction = True
     scene.antialiasing = "fxaa"
-    camera = scene.create_camera()
+    scene.camera = renderer.create_camera()
     # The width follows the aspect ratio of the render target. frame() sets the height.
-    camera.set_orthographic(height=1, near=1, far=2)
-    scene.camera = camera
+    scene.camera.set_orthographic(height=1)
     scene.add_directional_light(direction=(-1, -1, -1), intensity=50000)
 
     model = scene.load("stimulus.glb")
-    # Look along -Z at the model's center; its bounding sphere spans 80% of the image.
-    camera.frame(model, fill=0.8, direction=(0, 0, -1), aspect=1)
+    # A new camera looks along -Z. Aim it at the model's center, so that the model's bounding
+    # sphere spans 80% of the image.
+    scene.camera.frame(model, fill=0.8)
     target = renderer.create_render_target(width=1024, height=1024)
     renderer.render(scene, target)
     image = target.read()
@@ -37,7 +36,7 @@ Use it for images and diagnostics. For display without CPU readback, use the
 For reflective metals, add environment lighting before rendering:
 
 ```python
-scene.load_environment("studio.hdr", intensity=30000)
+scene.environment = renderer.load_environment("studio.hdr")
 ```
 
 For an animated asset, select the time explicitly:

@@ -93,7 +93,7 @@ void assign_texture(ModelData& model, size_t index, int slot, std::shared_ptr<Te
     if (previous.textures[slot] == texture) return;
     Assignment next = previous;
     next.textures[slot] = texture;
-    if (!texture) next.transforms[slot] = m::mat3f{};
+    if (!texture) { next.transforms[slot] = m::mat3f{}; next.uv[slot] = {}; }
     f::MaterialInstance* replacement = current;
     if (!local && !next.any()) replacement = base;
     else if (!texture || current == base) replacement = f::MaterialInstance::duplicate(base, name.c_str());

@@ -27,6 +27,12 @@ def extents(image):
     return int(lit[height // 2].sum()), int(lit[:, width // 2].sum())
 
 
+def near_plane(camera):
+    """The near plane of a perspective projection. Filament puts the far plane at infinity."""
+    projection = np.asarray(camera.projection)
+    return projection[2, 3] / (projection[2, 2] - 1)
+
+
 def render(renderer, scene, width, height):
     target = renderer.create_render_target(width=width, height=height)
     renderer.render(scene, target)
@@ -42,9 +48,9 @@ def test_sphere_fill_covers_the_expected_pixels(renderer, projection, size):
     spans half of the narrower image axis, in both directions."""
     width, height = size
     scene = renderer.create_scene()
-    camera = scene.create_camera()
+    camera = renderer.create_camera()
     if projection == "perspective":
-        camera.set_perspective(fov_y=40, near=0.1, far=100)
+        camera.set_perspective(fov_y_deg=40, near=0.1, far=100)
     else:
         camera.set_orthographic(height=2, near=0.1, far=100)
     scene.camera = camera
@@ -63,10 +69,73 @@ def test_sphere_fill_covers_the_expected_pixels(renderer, projection, size):
         np.testing.assert_allclose(distance, np.sqrt(1 + 1 / (0.5 * tan_half) ** 2), rtol=1e-6)
 
 
+def test_new_camera_has_a_default_projection(renderer):
+    camera = renderer.create_camera()
+    np.testing.assert_allclose(camera.position, [0, 0, 0])
+    projection = np.asarray(camera.projection)
+    # Perspective, 30 degrees vertically, aspect 1 until a render, near 0.1.
+    assert projection[1, 1] == pytest.approx(1 / np.tan(np.radians(15)), rel=1e-5)
+    assert projection[0, 0] == pytest.approx(projection[1, 1], rel=1e-5)
+    assert near_plane(camera) == pytest.approx(0.1, rel=1e-4)
+    scene = renderer.create_scene()
+    scene.camera = camera
+    render(renderer, scene, 80, 40)
+    projection = np.asarray(camera.projection)
+    assert projection[0, 0] == pytest.approx(projection[1, 1] / 2, rel=1e-5)
+
+
+@pytest.mark.parametrize("projection", ["perspective", "orthographic"])
+def test_frame_before_the_first_render_follows_the_target(renderer, projection):
+    """Without aspect, a render frames again for its target's aspect, also when the aspect
+    changes between targets. A pose change ends that."""
+    scene = renderer.create_scene()
+    scene.camera = camera = renderer.create_camera()
+    if projection == "orthographic":
+        camera.set_orthographic(height=2)
+    unit_sphere(scene)
+    half = 1 / np.sqrt(3)
+    camera.frame([OFFSET - half, OFFSET + half], fill=0.5, direction=(0.3, -0.2, -1))
+    for width, height in [(96, 160), (160, 96), (96, 160)]:
+        across, down = extents(render(renderer, scene, width, height))
+        expected = 0.5 * min(width, height)
+        assert abs(across - expected) <= 1 and abs(down - expected) <= 1, (width, height, across, down)
+    # Placed for the portrait target; after a move, a landscape target shows it smaller.
+    camera.position = tuple(np.asarray(camera.position) + 0.01)
+    across, down = extents(render(renderer, scene, 160, 96))
+    assert down < 0.5 * 96 - 4, down
+
+
+def test_given_planes_stay_through_frame(scene):
+    camera = scene.camera
+    box = [OFFSET - 1, OFFSET + 1]
+    camera.set_perspective(fov_y_deg=45, near=0.5, far=50)
+    camera.frame(box, direction=(0, 0, -1))
+    assert near_plane(camera) == pytest.approx(0.5, rel=1e-4)
+    # A plane given to frame() replaces it and stays as well.
+    camera.frame(box, direction=(0, 0, -1), near=0.25)
+    camera.frame(box, direction=(0, 0, -1))
+    assert near_plane(camera) == pytest.approx(0.25, rel=1e-4)
+    # A projection call without planes keeps their values, and the next frame() computes them.
+    camera.set_perspective(fov_y_deg=45)
+    assert near_plane(camera) == pytest.approx(0.25, rel=1e-4)
+    distance = camera.frame(box, direction=(0, 0, -1))
+    assert 0.5 < near_plane(camera) < distance - np.sqrt(3)
+    # One given plane: frame() computes the other.
+    camera.set_perspective(fov_y_deg=45, near=0.01)
+    camera.frame(box, direction=(0, 0, -1))
+    assert near_plane(camera) == pytest.approx(0.01, rel=1e-3)
+    # The given plane must fit the kept one.
+    camera.set_perspective(fov_y_deg=45, near=0.5, far=50)
+    with pytest.raises(ValueError, match="near < far"):
+        camera.set_perspective(fov_y_deg=45, near=60)
+    with pytest.raises(ValueError, match="near < far"):
+        camera.set_orthographic(height=2, far=0.4)
+
+
 def test_sphere_framing_ignores_rotation(renderer):
     scene = renderer.create_scene()
-    camera = scene.create_camera()
-    camera.set_perspective(fov_y=35, near=0.1, far=100)
+    camera = renderer.create_camera()
+    camera.set_perspective(fov_y_deg=35, near=0.1, far=100)
     scene.camera = camera
     shape = filly.shapes.box(2, 1, 0.5)
     shape["positions"] = shape["positions"] + np.float32([1, 2, 3])
@@ -91,8 +160,8 @@ def test_sphere_framing_ignores_rotation(renderer):
 def test_box_fit_touches_fill(renderer):
     """fit='box': the farthest projected corner reaches fill of the half-extent."""
     scene = renderer.create_scene()
-    camera = scene.create_camera()
-    camera.set_perspective(fov_y=30, near=0.1, far=100)
+    camera = renderer.create_camera()
+    camera.set_perspective(fov_y_deg=30, near=0.1, far=100)
     scene.camera = camera
     shape = filly.shapes.plane(4, 1)
     model = scene.create_mesh(**shape, unlit=True, base_color=(1, 1, 1, 1))
@@ -149,7 +218,7 @@ def test_frame_node_not_model(renderer, scene):
     model = scene.load(two_node_glb())
     model.position = (0, 1, 0)
     camera = scene.camera
-    camera.set_perspective(fov_y=30, near=0.1, far=100)
+    camera.set_perspective(fov_y_deg=30, near=0.1, far=100)
     camera.frame(model.node("right"), fill=0.9, direction=(0, 0, -1))
     # The model transform applies: the node's center is (5, 1, 0).
     np.testing.assert_allclose(camera.position[:2], [5, 1], atol=1e-5)
@@ -164,7 +233,7 @@ def test_frame_node_not_model(renderer, scene):
 def test_frame_sets_enclosing_clip_planes(scene):
     unit_sphere(scene)
     camera = scene.camera
-    camera.set_perspective(fov_y=45, near=0.1, far=1000)
+    camera.set_perspective(fov_y_deg=45)
     box = [OFFSET - 1, OFFSET + 1]
     distance = camera.frame(box, direction=(0, -1, -1))
     # Filament renders with the far plane at infinity, so the projection shows only near.
@@ -179,7 +248,7 @@ def test_frame_sets_enclosing_clip_planes(scene):
 
 def test_frame_keeps_the_field_of_view(scene):
     camera = scene.camera
-    camera.set_perspective(fov_y=50, near=0.1, far=100)
+    camera.set_perspective(fov_y_deg=50, near=0.1, far=100)
     before = np.asarray(camera.projection)[1, 1]
     camera.frame([[0, 0, 0], [1, 1, 1]], direction=(1, 0, 0))
     assert np.asarray(camera.projection)[1, 1] == pytest.approx(before)
@@ -187,7 +256,7 @@ def test_frame_keeps_the_field_of_view(scene):
 
 def test_frame_uses_the_current_direction(scene):
     camera = scene.camera
-    camera.set_perspective(fov_y=50, near=0.1, far=100)
+    camera.set_perspective(fov_y_deg=50, near=0.1, far=100)
     camera.position = (0, 0, 0)
     camera.look_at((1, 0, 0))
     distance = camera.frame([[9, -1, -1], [11, 1, 1]])

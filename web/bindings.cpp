@@ -70,37 +70,50 @@ val animations(const Model& model) {
 }
 
 // Byte counts as doubles: JavaScript numbers hold integers exactly up to 2^53.
-val model_memory(const Model& model) {
-    const auto memory = model.memory();
+val asset_memory(const AssetMemory& memory) {
     val out = val::object();
     out.set("gpuTextureBytes", double(memory.gpu_texture_bytes));
     out.set("gpuGeometryBytes", double(memory.gpu_geometry_bytes));
     out.set("gpuBytes", double(memory.gpu_texture_bytes + memory.gpu_geometry_bytes));
     out.set("cpuBytes", double(memory.cpu_bytes));
-    out.set("cloneGpuBytes", double(memory.clone_gpu_bytes));
-    out.set("cloneCpuBytes", double(memory.clone_cpu_bytes));
+    out.set("instanceGpuBytes", double(memory.instance_gpu_bytes));
+    out.set("instanceCpuBytes", double(memory.instance_cpu_bytes));
     out.set("models", double(memory.models));
     return out;
 }
 
-val loaded(Model model, const std::vector<std::string>& warnings) {
+// { model or asset, warnings }.
+template <class T> val loaded(const char* name, T result, const std::vector<std::string>& warnings) {
     val out = val::object();
-    out.set("model", model);
+    out.set(name, result);
     out.set("warnings", array_of(warnings));
     return out;
 }
 
-val load_bytes(Scene& scene, const val& bytes, bool strict, bool clonable) {
+val load_bytes(Scene& scene, const val& bytes, bool strict) {
     std::vector<std::string> warnings;
     const auto copy = copy_numbers<uint8_t>(bytes);
-    Model model = scene.load(copy.data.get(), copy.size, strict, clonable, warnings);
-    return loaded(model, warnings);
+    Model model = scene.load(copy.data.get(), copy.size, strict, warnings);
+    return loaded("model", model, warnings);
 }
 
-val load_path(Scene& scene, const std::string& path, bool strict, bool clonable) {
+val load_path(Scene& scene, const std::string& path, bool strict) {
     std::vector<std::string> warnings;
-    Model model = scene.load(path, strict, clonable, warnings);
-    return loaded(model, warnings);
+    Model model = scene.load(path, strict, warnings);
+    return loaded("model", model, warnings);
+}
+
+val load_asset_bytes(Renderer& renderer, const val& bytes, bool strict) {
+    std::vector<std::string> warnings;
+    const auto copy = copy_numbers<uint8_t>(bytes);
+    Asset asset = renderer.load_asset(copy.data.get(), copy.size, strict, warnings);
+    return loaded("asset", asset, warnings);
+}
+
+val load_asset_path(Renderer& renderer, const std::string& path, bool strict) {
+    std::vector<std::string> warnings;
+    Asset asset = renderer.load_asset(path, strict, warnings);
+    return loaded("asset", asset, warnings);
 }
 
 FrameOptions frame_options(const val& options) {
@@ -234,11 +247,30 @@ void update_texture(Texture& texture, const val& pixels) {
 val material_texture(const Material& material, int slot) {
     auto data = material.texture(slot);
     if (!data) return val::null();
-    if (is_host_texture(data)) return val(HostTexture(data));
+    if (is_imported_texture(data)) return val(ImportedTexture(data));
     return val(Texture(data));
 }
 
 val optional_name(const std::optional<std::string>& name) { return name ? val(*name) : val::null(); }
+
+// A property that the object lacks reads as null, as None in Python.
+template <class T> val optional_value(const std::optional<T>& value) { return value ? val(*value) : val::null(); }
+
+val texture_transform(const Material& material, int slot) {
+    const auto value = material.texture_transform(slot);
+    if (!value) return val::null();
+    val out = val::object();
+    out.set("offset", value->offset);
+    out.set("scale", value->scale);
+    out.set("rotationDeg", value->rotation_deg);
+    return out;
+}
+
+// undefined and null leave a clipping plane to the camera; see Camera::set_perspective().
+std::optional<double> plane(const val& value) {
+    if (value.isUndefined() || value.isNull()) return std::nullopt;
+    return value.as<double>();
+}
 }
 
 EMSCRIPTEN_BINDINGS(filly) {
@@ -294,16 +326,22 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("setColor", &Light::set_color)
         .function("intensity", &Light::intensity)
         .function("setIntensity", &Light::set_intensity)
-        .function("position", &Light::position)
+        .function("position", optional_override([](const Light& light) { return optional_value(light.position()); }))
         .function("setPosition", &Light::set_position)
-        .function("direction", &Light::direction)
+        .function("direction", optional_override([](const Light& light) { return optional_value(light.direction()); }))
         .function("setDirection", &Light::set_direction)
-        .function("range", &Light::range)
+        .function("range", optional_override([](const Light& light) { return optional_value(light.range()); }))
         .function("setRange", &Light::set_range)
+        .function("coneDeg", optional_override([](const Light& light) { return optional_value(light.cone_deg()); }))
+        .function("setConeDeg", &Light::set_cone_deg)
         .function("castsShadows", &Light::casts_shadows)
         .function("setCastsShadows", &Light::set_casts_shadows)
-        .function("setShadowOptions", &Light::set_shadow_options)
-        .function("setSpotCone", &Light::set_spot_cone);
+        .function("shadowMapSize", &Light::shadow_map_size)
+        .function("setShadowMapSize", &Light::set_shadow_map_size)
+        .function("shadowConstantBias", &Light::shadow_constant_bias)
+        .function("setShadowConstantBias", &Light::set_shadow_constant_bias)
+        .function("shadowNormalBias", &Light::shadow_normal_bias)
+        .function("setShadowNormalBias", &Light::set_shadow_normal_bias);
 
     class_<Texture>("Texture")
         .function("width", &Texture::width)
@@ -317,16 +355,16 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("closed", &Texture::closed)
         .function("same", &Texture::same);
 
-    class_<HostTexture>("HostTexture")
-        .function("width", &HostTexture::width)
-        .function("height", &HostTexture::height)
-        .function("colorSpace", &HostTexture::color_space)
-        .function("beginWrite", &HostTexture::begin_write)
-        .function("endWrite", &HostTexture::end_write)
-        .function("writing", &HostTexture::writing)
-        .function("close", &HostTexture::close)
-        .function("closed", &HostTexture::closed)
-        .function("same", &HostTexture::same);
+    class_<ImportedTexture>("ImportedTexture")
+        .function("width", &ImportedTexture::width)
+        .function("height", &ImportedTexture::height)
+        .function("colorSpace", &ImportedTexture::color_space)
+        .function("beginWrite", &ImportedTexture::begin_write)
+        .function("endWrite", &ImportedTexture::end_write)
+        .function("writing", &ImportedTexture::writing)
+        .function("close", &ImportedTexture::close)
+        .function("closed", &ImportedTexture::closed)
+        .function("same", &ImportedTexture::same);
 
     class_<Material>("Material")
         .function("baseColor", &Material::base_color)
@@ -341,13 +379,17 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("setTexture", optional_override([](Material& material, int slot, const Texture& texture) {
             material.set_texture(slot, texture.data());
         }))
-        .function("setHostTexture", optional_override([](Material& material, int slot, const HostTexture& texture) {
+        .function("setImportedTexture", optional_override([](Material& material, int slot, const ImportedTexture& texture) {
             material.set_texture(slot, texture.data());
         }))
         .function("clearTexture", optional_override([](Material& material, int slot) {
             material.set_texture(slot, nullptr);
         }))
-        .function("setTextureTransform", &Material::set_texture_transform);
+        .function("textureTransform", &texture_transform)
+        .function("setTextureTransform", optional_override([](Material& material, int slot, std::array<float, 2> offset,
+                                                             std::array<float, 2> scale, float rotation_deg) {
+            material.set_texture_transform(slot, UvTransform{offset, scale, rotation_deg});
+        }));
 
     class_<Node>("Node")
         .function("name", optional_override([](const Node& node) { return optional_name(node.name()); }))
@@ -365,8 +407,6 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("setScale", &Node::set_scale)
         .function("quaternion", &Node::quaternion)
         .function("setQuaternion", &Node::set_quaternion)
-        .function("rotationEulerRad", &Node::rotation_euler_rad)
-        .function("setRotationEulerRad", &Node::set_rotation_euler_rad)
         .function("rotationEulerDeg", &Node::rotation_euler_deg)
         .function("setRotationEulerDeg", &Node::set_rotation_euler_deg)
         .function("material", optional_override([](const Node& node, int slot) { return node.material(size_t(slot)); }))
@@ -379,10 +419,24 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("same", &Node::same);
 
     class_<Camera>("Camera")
-        .function("setPerspective", &Camera::set_perspective)
-        .function("setLensProjection", &Camera::set_lens_projection)
-        .function("setOrthographic", &Camera::set_orthographic)
-        .function("setOrthographicHeight", &Camera::set_orthographic_height)
+        .function("close", &Camera::close)
+        .function("closed", &Camera::closed)
+        .function("setPerspective", optional_override([](Camera& camera, double fov_y_deg, double aspect, const val& near,
+                                                         const val& far) {
+            camera.set_perspective(fov_y_deg, aspect, plane(near), plane(far));
+        }))
+        .function("setLensProjection", optional_override([](Camera& camera, double focal_length, double aspect,
+                                                            const val& near, const val& far) {
+            camera.set_lens_projection(focal_length, aspect, plane(near), plane(far));
+        }))
+        .function("setOrthographic", optional_override([](Camera& camera, double left, double right, double bottom,
+                                                          double top, const val& near, const val& far) {
+            camera.set_orthographic(left, right, bottom, top, plane(near), plane(far));
+        }))
+        .function("setOrthographicHeight", optional_override([](Camera& camera, double height, double center_x,
+                                                                double center_y, const val& near, const val& far) {
+            camera.set_orthographic_height(height, center_x, center_y, plane(near), plane(far));
+        }))
         .function("position", &Camera::position)
         .function("setPosition", &Camera::set_position)
         .function("lookAt", &Camera::look_at)
@@ -412,9 +466,7 @@ EMSCRIPTEN_BINDINGS(filly) {
     class_<Model>("Model")
         .function("close", &Model::close)
         .function("closed", &Model::closed)
-        .function("clone", optional_override([](Model& model) { return model.clone(); }))
-        .function("cloneInto", optional_override([](Model& model, const Scene& scene) { return model.clone(&scene); }))
-        .function("memory", &model_memory)
+        .function("memory", optional_override([](const Model& model) { return asset_memory(model.memory()); }))
         .function("bounds", &Model::bounds)
         .function("transform", &Model::transform)
         .function("setTransform", &Model::set_transform)
@@ -429,12 +481,6 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("quaternion", optional_override([](const Model& model) { return model.root().quaternion(); }))
         .function("setQuaternion", optional_override([](Model& model, Vec4 value) {
             model.root().set_quaternion(value);
-        }))
-        .function("rotationEulerRad", optional_override([](const Model& model) {
-            return model.root().rotation_euler_rad();
-        }))
-        .function("setRotationEulerRad", optional_override([](Model& model, Vec3 value) {
-            model.root().set_rotation_euler_rad(value);
         }))
         .function("rotationEulerDeg", optional_override([](const Model& model) {
             return model.root().rotation_euler_deg();
@@ -467,14 +513,24 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("vertexCount", optional_override([](const Model& model) { return double(model.vertex_count()); }))
         .function("updateMesh", &update_mesh);
 
+    class_<Asset>("Asset")
+        .function("memory", optional_override([](const Asset& asset) { return asset_memory(asset.memory()); }))
+        .function("close", &Asset::close)
+        .function("closed", &Asset::closed);
+
+    class_<Environment>("Environment")
+        .function("close", &Environment::close)
+        .function("closed", &Environment::closed)
+        .function("same", &Environment::same);
+
     class_<Scene>("Scene")
         .function("close", &Scene::close)
         .function("closed", &Scene::closed)
-        .function("createCamera", &Scene::create_camera)
         .function("camera", &Scene::camera)
         .function("setCamera", &Scene::set_camera)
         .function("loadBytes", &load_bytes)
         .function("loadPath", &load_path)
+        .function("add", &Scene::add)
         .function("createMesh", &create_mesh)
         .function("addDirectionalLight", &Scene::add_directional_light)
         .function("addSunLight", &Scene::add_sun_light)
@@ -492,8 +548,6 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("setMsaa", &Scene::set_msaa)
         .function("shadows", &Scene::shadows)
         .function("setShadows", &Scene::set_shadows)
-        .function("refraction", &Scene::refraction)
-        .function("setRefraction", &Scene::set_refraction)
         .function("transparent", &Scene::transparent)
         .function("setTransparent", &Scene::set_transparent)
         .function("dithering", &Scene::dithering)
@@ -504,26 +558,34 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("setBloom", &Scene::set_bloom)
         .function("fog", &Scene::fog)
         .function("setFog", &Scene::set_fog)
-        .function("setFogOptions", &Scene::set_fog_options)
+        .function("fogColor", &Scene::fog_color)
+        .function("setFogColor", &Scene::set_fog_color)
+        .function("fogDensity", &Scene::fog_density)
+        .function("setFogDensity", &Scene::set_fog_density)
+        .function("fogStart", &Scene::fog_start)
+        .function("setFogStart", &Scene::set_fog_start)
         .function("depthOfField", &Scene::depth_of_field)
         .function("setDepthOfField", &Scene::set_depth_of_field)
         .function("vignette", &Scene::vignette)
         .function("setVignette", &Scene::set_vignette)
-        .function("setVignetteOptions", &Scene::set_vignette_options)
-        .function("setEnvironment", optional_override([](Scene& scene, const val& pixels, uint32_t width,
-                                                         uint32_t height, float intensity, float rotation) {
-            const auto values = copy_numbers<float>(pixels);
-            scene.set_environment(values.data.get(), values.size, width, height, intensity, rotation);
-        }))
-        .function("loadEnvironmentPath", &Scene::load_environment)
-        .function("loadEnvironmentKtxPath", &Scene::load_environment_ktx)
-        .function("clearEnvironment", &Scene::clear_environment)
+        .function("vignetteMidpoint", &Scene::vignette_midpoint)
+        .function("setVignetteMidpoint", &Scene::set_vignette_midpoint)
+        .function("vignetteRoundness", &Scene::vignette_roundness)
+        .function("setVignetteRoundness", &Scene::set_vignette_roundness)
+        .function("vignetteFeather", &Scene::vignette_feather)
+        .function("setVignetteFeather", &Scene::set_vignette_feather)
+        .function("vignetteColor", &Scene::vignette_color)
+        .function("setVignetteColor", &Scene::set_vignette_color)
+        .function("environment", optional_override([](const Scene& scene) { return optional_value(scene.environment()); }))
+        .function("setEnvironment", optional_override([](Scene& scene, const Environment* environment) {
+            scene.set_environment(environment);
+        }), allow_raw_pointers())
         .function("environmentIntensity", &Scene::environment_intensity)
         .function("setEnvironmentIntensity", &Scene::set_environment_intensity)
+        .function("environmentRotationDeg", &Scene::environment_rotation_deg)
+        .function("setEnvironmentRotationDeg", &Scene::set_environment_rotation_deg)
         .function("environmentVisible", &Scene::environment_visible)
         .function("setEnvironmentVisible", &Scene::set_environment_visible)
-        .function("environmentRotation", &Scene::environment_rotation)
-        .function("setEnvironmentRotation", &Scene::set_environment_rotation)
         .function("background", &Scene::background)
         .function("setBackground", &Scene::set_background);
 
@@ -537,12 +599,12 @@ EMSCRIPTEN_BINDINGS(filly) {
             return typed_copy("Uint8Array", readback.take());
         }));
 
-    class_<OffscreenTarget>("OffscreenTarget")
-        .function("width", &OffscreenTarget::width)
-        .function("height", &OffscreenTarget::height)
-        .function("beginRead", &OffscreenTarget::begin_read)
-        .function("close", &OffscreenTarget::close)
-        .function("closed", &OffscreenTarget::closed);
+    class_<RenderTarget>("RenderTarget")
+        .function("width", &RenderTarget::width)
+        .function("height", &RenderTarget::height)
+        .function("beginRead", &RenderTarget::begin_read)
+        .function("close", &RenderTarget::close)
+        .function("closed", &RenderTarget::closed);
 
     class_<ImportedTarget>("ImportedTarget")
         .function("width", &ImportedTarget::width)
@@ -557,27 +619,37 @@ EMSCRIPTEN_BINDINGS(filly) {
             return Renderer(uintptr_t(context));
         }))
         .function("createScene", &Renderer::create_scene)
+        .function("createCamera", &Renderer::create_camera)
+        .function("loadAssetBytes", &load_asset_bytes)
+        .function("loadAssetPath", &load_asset_path)
+        .function("loadEnvironmentPath", &Renderer::load_environment)
+        .function("loadEnvironmentKtxPath", &Renderer::load_environment_ktx)
+        .function("createEnvironment", optional_override([](Renderer& renderer, const val& pixels, uint32_t width,
+                                                            uint32_t height) {
+            const auto values = copy_numbers<float>(pixels);
+            return renderer.create_environment(values.data.get(), values.size, width, height);
+        }))
         .function("createRenderTarget", optional_override([](Renderer& renderer, double width, double height, bool depth) {
             return renderer.create_render_target(int64_t(width), int64_t(height), "rgba8", depth);
         }))
-        .function("importGlTexture", optional_override([](Renderer& renderer, uint32_t texture, double width,
-                                                          double height, bool depth) {
-            return renderer.import_gl_texture(texture, int64_t(width), int64_t(height), "rgba8", depth);
+        .function("importGlTarget", optional_override([](Renderer& renderer, uint32_t texture, double width,
+                                                         double height, bool depth) {
+            return renderer.import_gl_target(texture, int64_t(width), int64_t(height), "rgba8", depth);
         }))
         .function("render", optional_override([](Renderer& renderer, const Scene& scene, const ImportedTarget& target,
                                                  const Camera* camera, const val& viewport, bool clear) {
             renderer.render(scene, target, render_options(camera, viewport, clear));
         }), allow_raw_pointers())
         .function("renderOffscreen", optional_override([](Renderer& renderer, const Scene& scene,
-                                                          const OffscreenTarget& target, const Camera* camera,
+                                                          const RenderTarget& target, const Camera* camera,
                                                           const val& viewport, bool clear) {
             renderer.render(scene, target, render_options(camera, viewport, clear));
         }), allow_raw_pointers())
         .function("createTexture", &create_texture)
-        .function("importGlInput", optional_override([](Renderer& renderer, uint32_t texture, double width,
-                                                        double height, const std::string& color_space,
-                                                        const std::string& filter, const std::string& wrap) {
-            return renderer.import_gl_input(texture, int64_t(width), int64_t(height), color_space, filter, wrap);
+        .function("importGlTexture", optional_override([](Renderer& renderer, uint32_t texture, double width,
+                                                          double height, const std::string& color_space,
+                                                          const std::string& filter, const std::string& wrap) {
+            return renderer.import_gl_texture(texture, int64_t(width), int64_t(height), color_space, filter, wrap);
         }))
         .function("prepare", &Renderer::prepare)
         .function("finish", &Renderer::finish)

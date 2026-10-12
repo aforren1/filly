@@ -44,7 +44,7 @@ _unregister_pyglet_window_classes()
 # Importing pyglet.gl opens an X display, so these modules cannot be collected without one.
 # Offscreen tests still run on headless EGL.
 if sys.platform == "linux" and not os.environ.get("DISPLAY"):
-    collect_ignore = ["test_gl_hosts.py", "test_host_texture.py"]
+    collect_ignore = ["test_gl_hosts.py", "test_imported_texture.py"]
 
 
 @pytest.fixture
@@ -82,7 +82,7 @@ def renderer():
 @pytest.fixture
 def scene(renderer):
     value = renderer.create_scene()
-    camera = value.create_camera()
+    camera = renderer.create_camera()
     camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
     camera.position = (0, 0, 3)
     camera.look_at((0, 0, 0))

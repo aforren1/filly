@@ -3,7 +3,7 @@
      window.testResult; tests/test_web.py compares them with desktop filly. -->
 <html><body><canvas width="16" height="16"></canvas>
 <script type="module">
-import { AssetError, createRenderer, FillyError, HostTexture, shapes, Texture } from "./filly/filly.js";
+import { AssetError, createRenderer, FillyError, ImportedTexture, shapes, Texture } from "./filly/filly.js";
 
 const gl = document.querySelector("canvas").getContext("webgl2");
 const renderer = await createRenderer(gl);
@@ -32,7 +32,7 @@ async function plane({ baseColor = [1, 1, 1, 1], texture = null, setup = null } 
 	{
 		material.baseColorTexture = texture;
 	}
-	const camera = scene.createCamera();
+	const camera = renderer.createCamera();
 	camera.setOrthographic({ height: 2, near: 0.1, far: 10 });
 	camera.position = [0, 0, 1];
 	camera.lookAt([0, 0, 0]);
@@ -54,11 +54,12 @@ await check("prepare", async () =>
 {
 	const scene = renderer.createScene();
 	scene.antialiasing = "fxaa";
-	scene.setEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8, { intensity: 20000 });
+	scene.environment = renderer.createEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8);
+	scene.environmentIntensity = 20000;
 	scene.createMesh({ ...shapes.uvSphere({ radius: 0.6 }), baseColor: [0.8, 0.6, 0.4, 1], roughness: 0.4 });
 	scene.addDirectionalLight({ direction: [-1, -1, -2], intensity: 100000 });
-	const camera = scene.createCamera();
-	camera.setPerspective({ fovY: 40, near: 0.1, far: 10 });
+	const camera = renderer.createCamera();
+	camera.setPerspective({ fovYDeg: 40, near: 0.1, far: 10 });
 	camera.position = [0, 0, 2.2];
 	camera.lookAt([0, 0, 0]);
 	scene.camera = camera;
@@ -90,7 +91,7 @@ await check("render_options", async () =>
 {
 	const scene = renderer.createScene();
 	scene.createMesh({ ...shapes.plane({ width: 2, height: 2 }), unlit: true, baseColor: [0.5, 0.5, 0.5, 1] });
-	const camera = scene.createCamera();
+	const camera = renderer.createCamera();
 	camera.setOrthographic({ height: 2, near: 0.1, far: 10 });
 	camera.position = [0, 0, 1];
 	camera.lookAt([0, 0, 0]);
@@ -141,13 +142,13 @@ function pageTexture(format)
 }
 await check("host_linear", async () =>
 {
-	const host = renderer.importInput(pageTexture(gl.RGBA8), 2, 2, { colorSpace: "linear" });
+	const host = renderer.importTexture(pageTexture(gl.RGBA8), 2, 2, { colorSpace: "linear" });
 	const center = pixel(await plane({ texture: host }), 32, 32);
-	return { center, isHost: host instanceof HostTexture, colorSpace: host.colorSpace };
+	return { center, isHost: host instanceof ImportedTexture, colorSpace: host.colorSpace };
 });
 await check("host_srgb", async () =>
 {
-	const host = renderer.importInput(pageTexture(gl.SRGB8_ALPHA8), 2, 2, { colorSpace: "srgb" });
+	const host = renderer.importTexture(pageTexture(gl.SRGB8_ALPHA8), 2, 2, { colorSpace: "srgb" });
 	let wrote = false;
 	host.write(() => { wrote = true; });
 	const center = pixel(await plane({ texture: host }), 32, 32);
@@ -162,10 +163,16 @@ await check("material_texture_slots", async () =>
 	await plane({ setup: ({ material }) =>
 	{
 		material.baseColorTexture = texture;
-		material.setTextureTransform("baseColor", { offset: [0.5, 0], scale: [0.5, 1], rotationDeg: 0 });
-		slots = { base: material.baseColorTexture?.equals(texture), emissive: material.emissiveTexture };
+		material.baseColorTextureOffset = [0.5, 0];
+		material.baseColorTextureScale = [0.5, 1];
+		slots = {
+			base: material.baseColorTexture?.equals(texture), emissive: material.emissiveTexture,
+			offset: material.baseColorTextureOffset, scale: material.baseColorTextureScale,
+			rotationDeg: material.baseColorTextureRotationDeg, emissiveOffset: material.emissiveTextureOffset,
+		};
 		material.baseColorTexture = null;
 		slots.cleared = material.baseColorTexture;
+		slots.clearedOffset = material.baseColorTextureOffset;
 	} });
 	return slots;
 });
@@ -178,7 +185,7 @@ await check("mesh_update", async () =>
 	const scene = renderer.createScene();
 	scene.background = [0, 0, 0, 1];
 	const model = scene.createMesh({ positions: left, indices: new Uint32Array([0, 1, 2]), unlit: true, baseColor: [1, 1, 1, 1] });
-	const camera = scene.createCamera();
+	const camera = renderer.createCamera();
 	camera.setOrthographic({ height: 2, near: 0.1, far: 10 });
 	camera.position = [0, 0, 1];
 	camera.lookAt([0, 0, 0]);
@@ -219,13 +226,14 @@ await check("lit_box", async () =>
 	scene.background = [0.1, 0.2, 0.3, 1];
 	const model = scene.createMesh({ ...shapes.box(), baseColor: [0.8, 0.5, 0.2, 1], roughness: 0.6 });
 	model.rotationEulerDeg = [20, 35, 0];
-	const camera = scene.createCamera();
-	camera.setPerspective({ fovY: 35, near: 0.5, far: 10 });
+	const camera = renderer.createCamera();
+	camera.setPerspective({ fovYDeg: 35, near: 0.5, far: 10 });
 	camera.position = [0, 0, 3];
 	camera.lookAt([0, 0, 0]);
 	scene.camera = camera;
 	scene.addDirectionalLight({ direction: [-1, -2, -1], intensity: 80000 });
-	scene.setEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8, { intensity: 15000 });
+	scene.environment = renderer.createEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8);
+	scene.environmentIntensity = 15000;
 	const target = renderer.createRenderTarget(160, 120);
 	renderer.render(scene, target);
 	const pixels = await target.read();
@@ -237,7 +245,7 @@ await check("lit_box", async () =>
 await check("model_tree", async () =>
 {
 	const scene = renderer.createScene();
-	const model = await scene.loadUrl("tree.glb", { clonable: true });
+	const model = await scene.loadUrl("tree.glb");
 	const nodes = model.nodes;
 	const root = model.node("root");
 	const triangle = model.node(1);
@@ -247,16 +255,18 @@ await check("model_tree", async () =>
 		rootParent: root.parent, rootChildren: root.children.map((node) => node.name),
 		triangleParent: triangle.parent.name, meshName: triangle.meshName,
 		sameNode: model.node("triangle").equals(triangle), differentNode: root.equals(triangle),
-		cameraNode: camera.node.name, sceneCameraNode: scene.createCamera().node,
-		morphTargets: triangle.morphTargetCount, rotationEulerRad: model.rotationEulerRad,
+		cameraNode: camera.node.name, sceneCameraNode: renderer.createCamera().node,
+		morphTargets: triangle.morphTargetCount, rotationEulerDeg: model.rotationEulerDeg,
 		liveModels: renderer.stats.liveModels,
 	};
-	const clone = model.clone();
-	clone.position = [1, 0, 0];
-	result.cloneLiveModels = renderer.stats.liveModels;
-	result.clonePosition = clone.position;
+	const asset = await renderer.loadAssetUrl("tree.glb");
+	const added = scene.add(asset);
+	added.position = [1, 0, 0];
+	result.addedLiveModels = renderer.stats.liveModels;
+	result.addedPosition = added.position;
 	result.originalPosition = model.position;
-	clone.close();
+	added.close();
+	asset.close();
 	result.afterCloseLiveModels = renderer.stats.liveModels;
 	scene.close();
 	return result;
@@ -274,26 +284,47 @@ await check("load_files", async () =>
 	return result;
 });
 
-// A model cache: the size decides clonable before the load, clones go into another scene, and
-// the memory estimate counts what the prototype and its clones share.
+// A model cache: an Asset that the renderer keeps, models of it in two scenes, and the memory
+// estimate of what they share. Closing a scene keeps the asset; closing the asset keeps models.
 await check("model_cache", async () =>
 {
 	const first = renderer.createScene();
 	const second = renderer.createScene();
-	let decided = null;
-	const prototype = await first.loadUrl("tree.glb", { clonable: (bytes) => { decided = bytes; return bytes < 1e6; } });
-	prototype.visible = false;
-	const clone = prototype.clone({ scene: second });
-	const memory = clone.memory;
-	const result = { decided, fetchedBytes: prototype.fetchedBytes, memory, liveModels: renderer.stats.liveModels };
+	const asset = await renderer.loadAssetUrl("tree.glb");
+	const kept = asset.memory;
+	const model = first.add(asset);
+	const other = second.add(asset);
+	const result = { fetchedBytes: asset.fetchedBytes, kept, memory: asset.memory, liveModels: renderer.stats.liveModels };
 	first.close();
-	result.prototypeClosed = prototype.closed;
-	result.cloneClosed = clone.closed;
-	result.modelsAfterClose = clone.memory.models;
-	const again = clone.clone();
+	result.firstClosed = model.closed;
+	result.modelsAfterClose = asset.memory.models;
+	const again = second.add(asset);
 	result.againModels = again.memory.models;
+	asset.close();
+	result.assetClosed = asset.closed;
+	result.afterAssetClose = other.memory;
 	second.close();
 	result.liveAfter = renderer.stats.liveModels;
+	return result;
+});
+
+// Scenes share an Environment; each keeps its own intensity, and closing it removes it.
+await check("environment", async () =>
+{
+	const first = renderer.createScene();
+	const second = renderer.createScene();
+	const defaults = { environment: first.environment, intensity: first.environmentIntensity,
+		rotationDeg: first.environmentRotationDeg };
+	const environment = renderer.createEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8);
+	first.environment = environment;
+	second.environment = environment;
+	second.environmentIntensity = 15000;
+	const result = { defaults, shared: first.environment.equals(second.environment),
+		intensities: [first.environmentIntensity, second.environmentIntensity] };
+	environment.close();
+	result.afterClose = [first.environment, second.environment, environment.closed];
+	first.close();
+	second.close();
 	return result;
 });
 
@@ -306,14 +337,31 @@ await check("scene_effects", async () =>
 		scene[name] = true;
 		values[name] = scene[name];
 	}
-	scene.setFogOptions({ color: [1, 0, 0], density: 0.5, start: 0 });
-	scene.setVignetteOptions({ midpoint: 0.3, roundness: 0.5, feather: 0.5, color: [0, 0, 0] });
-	const camera = scene.createCamera();
+	scene.fogColor = [1, 0, 0];
+	scene.fogDensity = 0.5;
+	scene.vignetteMidpoint = 0.25;
+	for (const name of ["fogColor", "fogDensity", "fogStart", "vignetteMidpoint", "vignetteRoundness",
+		"vignetteFeather", "vignetteColor", "environmentIntensity", "environmentRotationDeg"])
+	{
+		values[name] = scene[name];
+	}
+	const point = scene.addPointLight({ position: [0, 0, 5], intensity: 0 });
+	const sun = scene.addSunLight({ direction: [0, -1, 0], intensity: 0 });
+	const spot = scene.addSpotLight({ position: [0, 0, 5], direction: [0, 0, -1], intensity: 0 });
+	spot.shadowNormalBias = 0.5;
+	values.lights = {
+		pointDirection: point.direction, pointRange: point.range, sunPosition: sun.position,
+		sunRange: sun.range, sunCone: sun.coneDeg, spotCone: spot.coneDeg,
+		spotShadow: [spot.shadowMapSize, spot.shadowNormalBias],
+	};
+	spot.coneDeg = [10, 20];
+	values.lights.spotConeAfter = spot.coneDeg;
+	const camera = renderer.createCamera();
 	camera.focusDistance = 2.5;
 	camera.aperture = 4;
 	values.focusDistance = camera.focusDistance;
 	values.aperture = camera.aperture;
-	camera.setPerspective({ fovY: 35, near: 0.5, far: 10 });
+	camera.setPerspective({ fovYDeg: 35, near: 0.5, far: 10 });
 	camera.position = [0, 0, 3];
 	camera.lookAt([0, 0, 0]);
 	scene.camera = camera;
@@ -336,9 +384,10 @@ await check("errors", async () =>
 		catch (error) { caught[name] = error.name; }
 	};
 	await attempt("badBytes", () => scene.load(new Uint8Array([1, 2, 3, 4])));
-	await attempt("badFill", () => scene.createCamera().frame([[0, 0, 0], [1, 1, 1]], { fill: 2 }));
+	await attempt("badFill", () => renderer.createCamera().frame([[0, 0, 0], [1, 1, 1]], { fill: 2 }));
 	await attempt("badMesh", () => scene.createMesh({ positions: new Float32Array([0, 0, 0, 1, 0]), indices: new Uint32Array([0, 1, 2]) }));
-	await attempt("badSlot", () => scene.createMesh({ ...shapes.box() }).material("mesh").setTextureTransform("normal"));
+	await attempt("noTexture", () => { scene.createMesh({ ...shapes.box() }).material("mesh").emissiveTextureOffset = [0, 0]; });
+	await attempt("lightLacks", () => { scene.addDirectionalLight({ direction: [0, -1, 0] }).position = [0, 0, 0]; });
 	await attempt("badUpdate", () => renderer.createTexture(quadrants, { width: 2, height: 2, colorSpace: "srgb" }).update(new Float32Array(16)));
 	await attempt("missingUrl", () => scene.loadUrl("missing.glb"));
 	let unknownMaterial = null;
@@ -346,6 +395,39 @@ await check("errors", async () =>
 	catch (error) { unknownMaterial = error.message; }
 	scene.close();
 	return { caught, unknownMaterial, assetIsFilly: new AssetError("x") instanceof FillyError };
+});
+
+// A new camera, framed before the first render, frames again for the target's aspect. Planes
+// given to a projection call stay through frame(). A scene names how it lost its camera.
+await check("camera_defaults", async () =>
+{
+	const scene = renderer.createScene();
+	const errors = {};
+	const target = renderer.createRenderTarget(128, 64);
+	try { renderer.render(scene, target); }
+	catch (error) { errors.none = error.message; }
+	scene.createMesh({ ...shapes.uvSphere({ radius: 1, segments: 128, rings: 64 }), unlit: true });
+	scene.camera = renderer.createCamera();
+	const half = 1 / Math.sqrt(3);
+	scene.camera.frame([[-half, -half, -half], [half, half, half]], { fill: 0.5 });
+	renderer.render(scene, target);
+	const pixels = await target.read();
+	const lit = (x, y) => pixels[4 * (y * 128 + x)] > 128;
+	let across = 0;
+	let down = 0;
+	for (let x = 0; x < 128; x++) across += lit(x, 32);
+	for (let y = 0; y < 64; y++) down += lit(64, y);
+	const camera = scene.camera;
+	camera.setPerspective({ fovYDeg: 30, near: 0.5, far: 40 });
+	camera.frame([[-1, -1, -1], [1, 1, 1]]);
+	const p = camera.projection;
+	const keptNear = p[11] / (p[10] - 1);
+	camera.close();
+	try { renderer.render(scene, target); }
+	catch (error) { errors.closed = error.message; }
+	target.close();
+	scene.close();
+	return { across, down, keptNear, errors };
 });
 
 results.platform = renderer.glPlatform;

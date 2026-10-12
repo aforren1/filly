@@ -60,7 +60,7 @@ def test_lookup_errors(scene, triangle_glb):
             model.node(key)
 
 
-def test_lights_and_cameras_by_node(scene, triangle_glb):
+def test_lights_and_cameras_by_node(renderer, scene, triangle_glb):
     model = scene.load(tree_asset(triangle_glb))
     # Keys are node names or glTF node indices, as for model.node().
     camera = model.camera("eye")
@@ -69,6 +69,10 @@ def test_lights_and_cameras_by_node(scene, triangle_glb):
     assert model.cameras == [camera] and camera.node == model.node("eye")
     scene.camera = model.camera(4)
     assert scene.camera == camera
+    # Imported cameras belong to their model.
+    with pytest.raises(filly.FillyError, match="close with their model"):
+        camera.close()
+    assert not camera.closed
     model.light(5).intensity = 20
     lamp = model.light("lamp")
     assert lamp.intensity == pytest.approx(20)
@@ -89,7 +93,7 @@ def test_lights_and_cameras_by_node(scene, triangle_glb):
         with pytest.raises(TypeError):
             model.camera(key)
     # Scene-created lights and cameras have no node.
-    assert scene.create_camera().node is None
+    assert renderer.create_camera().node is None
     assert scene.add_point_light(position=(0, 0, 1)).node is None
     # Position-based name lists were replaced by the handle lists.
     assert not hasattr(filly.Model, "light_names") and not hasattr(filly.Model, "camera_names")

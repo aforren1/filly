@@ -29,7 +29,7 @@ def test_clearcoat_normal_scale_pointer(triangle_glb):
     add_clip(doc, binary, "/materials/0/extensions/KHR_materials_clearcoat/clearcoatNormalTexture/scale", [0.5, 0])
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        scene.camera = scene.create_camera()
+        scene.camera = renderer.create_camera()
         scene.camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         scene.camera.position = (0, 0, 3)
         scene.camera.look_at((0, 0, 0))
@@ -87,10 +87,17 @@ def test_imported_camera_animation_and_close(renderer, scene, triangle_glb, orth
     other_scene = renderer.create_scene()
     other_scene.camera = model.camera("view")
     model.close()
-    with pytest.raises(filly.FillyError, match="closed"):
+    with pytest.raises(filly.FillyError, match="close with their model"):
         _ = camera.projection
-    with pytest.raises(filly.FillyError, match="camera"):
-        renderer.render(other_scene, target)
+    # The render far from the close names the cause, in every scene that used the camera.
+    for each in (scene, other_scene):
+        with pytest.raises(filly.FillyError, match="no camera: its camera was imported from a model that closed"):
+            renderer.render(each, target)
+        with pytest.raises(filly.FillyError, match="model that closed"):
+            _ = each.camera
+    other_scene.camera = renderer.create_camera()
+    other_scene.camera.position = (0, 0, 3)
+    renderer.render(other_scene, target)
 
 
 @pytest.mark.parametrize("orthographic", [False, True])
@@ -134,7 +141,7 @@ def test_uv_animation_matches_static_transform(triangle_glb):
         clip["channels"].append({"sampler": len(clip["samplers"])-1, "target": {"path": "pointer", "extensions": {"KHR_animation_pointer": {"pointer": path+suffix}}}})
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
@@ -175,7 +182,7 @@ def test_uv_rotation_direction_matches_static_transform(triangle_glb):
     add_clip(doc, binary, path + "rotation", [0, np.pi / 2])
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
@@ -273,7 +280,8 @@ def test_surface_environment_combination_and_rotation(renderer, scene, triangle_
     model = scene.load(pack(doc, binary), strict=True)
     panorama = np.full((16, 32, 3), 0.01, dtype="float32")
     panorama[4:8, 3:12] = 5
-    scene.set_environment(panorama, intensity=1000000)
+    scene.environment = renderer.create_environment(panorama)
+    scene.environment_intensity = 1000000
     # Filament's anisotropic IBL approximation bends reflections at oblique angles.
     model.rotation_euler_deg = (20, 30, 0)
     target = renderer.create_render_target(width=64, height=64)

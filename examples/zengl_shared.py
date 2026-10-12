@@ -3,8 +3,7 @@
 import zengl
 
 import filly
-from filly.integrations.pyglet import create_renderer
-from filly.integrations.zengl import SharedTarget
+from filly.integrations.zengl import HostTarget, create_renderer
 from pyglet_shared import open_window, parse_args, run
 
 
@@ -12,11 +11,13 @@ def main():
     args = parse_args(__doc__)
     filly.set_log_level("warning")
     window = open_window(args, "filly + zengl")
-    renderer = create_renderer(window)
-    # zengl loads GL functions from the current WGL/GLX context and keeps one context per process.
+    # zengl loads GL functions from the current WGL/GLX context, which open_window() made
+    # current, and keeps one context per process.
     ctx = zengl.context()
+    renderer = create_renderer()
+    # zengl does not report the window's size.
     width, height = window.get_framebuffer_size()
-    target = SharedTarget(renderer, ctx, width, height)
+    target = HostTarget(renderer, ctx, width=width, height=height)
 
     def draw():
         # new_frame() drops zengl's cached bindings, which pyglet may have changed.

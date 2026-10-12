@@ -60,7 +60,8 @@ Filament's timer reported 16.2 ms for a frame whose work takes 0.37 ms. Replacin
 
 A shared-texture host adds about 1.8 ms of main-thread CPU time per frame at 1080p (2.1 ms
 against 0.26 ms offscreen), most of it the wait in `acquire()`. The host draw costs 0.39 ms of
-GPU time for the pyglet blit and 0.78 ms for PsychoPy's `ImageStim` at 1080p.
+GPU time for the pyglet blit and 0.78 ms for PsychoPy's `ImageStim` at 1080p. Since
+2026-10-12, the pyglet adapter draws a blended quad instead of a blit; it was not measured again.
 
 ## Channel-mixing tone mappers (September 30, 2026)
 
@@ -260,6 +261,10 @@ native submit is 0.19 to 0.25 ms, and all 60 Hz offscreen runs had frame interva
 
 ## Materials: runtime and archive
 
+The runtime material path was removed on October 6, 2026 (see
+[phase 4 results](../explanation/material-precompilation.md#phase-4-results-october-6-2026)).
+These numbers compare the two paths before the removal.
+
 Intel, offscreen, color grading on, 60 Hz pacing. "Delta" is archive minus runtime.
 
 | Asset | Runtime 1080p | Archive 1080p | Delta 1080p | Runtime 512 | Archive 512 | Delta 512 |
@@ -447,15 +452,15 @@ exact path is not remeasured.
 
 | Rank | Saving | Change | Cost or risk | Native |
 | --- | --- | --- | --- | --- |
-| - | done: 0.84 ms GPU (0.15 ms at 512); NVIDIA 0.09 ms | Default output through filly's encode pass instead of Filament's color grading. | 0.12 ms more CPU per frame; renderer creation compiles the encode material (about 0.17 s more). | Yes (done) |
+| - | done: 0.84 ms GPU (0.15 ms at 512); NVIDIA 0.09 ms | Default output through filly's encode pass instead of Filament's color grading. | 0.12 ms more CPU per frame. Renderer creation compiled the encode material (about 0.17 s more) until October 3, 2026; the material is now precompiled at build time. | Yes (done) |
 | - | done: NVIDIA one refresh of latency and 0.58 ms CPU per frame in `acquire()`; Intel 0.46 ms GPU and 0.21 ms CPU | `SyncPlatform::commit()` calls `glFlush()` instead of `SwapBuffers()`. | Not tested on Linux in these runs. | Yes (done) |
 | 1 | 0.71 ms GPU (0.12 ms at 512) | Use `output_path = "direct"`. | No tone mapping other than linear, no FXAA, MSAA, bloom, SSAO, refraction, transparency, dithering, vignette, or depth of field; `MASK` materials rejected. Output is within one 8-bit level of the analytic encoding but rounds differently from the exact path. | No (exists as an opt-in) |
 | 2 | 1.2 ms GPU (0.35 ms at 512) | Do not use MSAA 4x. | Aliased edges. | No |
 | 3 | 0.94 ms GPU (1.0 ms before the change) | Do not use FXAA. | Aliased edges. | No |
-| 4 | 0.4 to 1.2 ms GPU (0.17 to 0.48 ms at 512) for plain to anisotropic materials | Keep the runtime material path, or split the archive's extended entries into specialized entries. | The runtime path compiles materials at load (0.1 to 0.35 s per new configuration). More archive entries increase its size. | Yes (material build) |
+| 4 | 0.4 to 1.2 ms GPU (0.17 to 0.48 ms at 512) for plain to anisotropic materials | Split the archive's extended entries into specialized entries. | More archive entries increase its size. | Yes (material build) |
 | 5 | 0.68 ms GPU (0.36 ms at 512) | Turn shadows off where a stimulus does not need them. | Visual. | No |
 | 6 | about 0.1 ms CPU per frame | Run the encode pass without a second Filament view: raw GL on Filament's driver thread through the platform hook. | filly would have to restore every GL state that Filament caches, and create the textures itself to know their names. Not tried. | Yes |
-| 7 | about 0.39 ms GPU at 1080p (0.06 ms at 512) | Draw the shared texture in PsychoPy with the blit that the pyglet adapter uses, when no transform, mask, or blending is needed. | Loses `ImageStim` placement, opacity, and masking for that path. Estimated from the pyglet blit (0.384 ms) against `ImageStim` (0.776 ms); not measured in PsychoPy. | No (adapter) |
+| 7 | about 0.39 ms GPU at 1080p (0.06 ms at 512) | Draw the shared texture in PsychoPy with a blit, as the pyglet adapter did when this was measured, when no transform, mask, or blending is needed. | Loses `ImageStim` placement, opacity, and masking for that path. Estimated from the pyglet blit (0.384 ms) against `ImageStim` (0.776 ms); not measured in PsychoPy. | No (adapter) |
 | 8 | about 2 ms GPU for DamagedHelmet at 1080p (2.32 ms Intel, 0.28 ms NVIDIA) | Render on the NVIDIA GPU (`SHIM_MCCOMPAT=0x800000001`, a driver profile, or a per-executable GPU preference). | On this Optimus laptop the panel is driven by the Intel GPU, so the host window's frames are copied between adapters. The latency of that copy is not measured. | No |
 | - | not measured | Render and acquire later in the frame so that `acquire()` finds the frame already published. | Changes the experiment loop. | No |
 

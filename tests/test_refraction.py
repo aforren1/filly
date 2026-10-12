@@ -52,14 +52,14 @@ def striped_glass(*, roughness=0.6, ior=1.5, volume=False, thickness=0.15):
     return pack(doc, binary)
 
 
-def configure_camera(scene, projection):
-    camera = scene.create_camera()
+def configure_camera(renderer, scene, projection):
+    camera = renderer.create_camera()
     camera.position = (0, 0, 3)
     camera.look_at((0, 0, 0))
     if projection == "ortho":
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=20)
     else:
-        camera.set_perspective(fov_y=projection, aspect=1, near=0.1, far=20)
+        camera.set_perspective(fov_y_deg=projection, aspect=1, near=0.1, far=20)
     scene.camera = camera
     return camera
 
@@ -69,9 +69,8 @@ def configure_camera(scene, projection):
 def test_ior_one_preserves_background(projection, volume):
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        scene.refraction = True
         scene.tone_mapping = "aces_legacy"
-        configure_camera(scene, projection)
+        configure_camera(renderer, scene, projection)
         model = scene.load(striped_glass(ior=1, volume=volume))
         target = renderer.create_render_target(width=128, height=128)
         renderer.render(scene, target)
@@ -96,9 +95,8 @@ def stripe_contrast(renderer, scene, target, **glass):
 def test_roughness_progressively_filters_transmission(projection, volume):
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        scene.refraction = True
         scene.tone_mapping = "aces_legacy"
-        configure_camera(scene, projection)
+        configure_camera(renderer, scene, projection)
         target = renderer.create_render_target(width=128, height=128)
         contrasts = [stripe_contrast(renderer, scene, target, roughness=roughness, volume=volume)
                      for roughness in (0, 0.4, 0.8)]
@@ -116,9 +114,8 @@ def stripe_std(image):
 def test_orthographic_filter_is_invariant_to_scene_units():
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        scene.refraction = True
         scene.tone_mapping = "aces_legacy"
-        camera = configure_camera(scene, "ortho")
+        camera = configure_camera(renderer, scene, "ortho")
         model = scene.load(striped_glass(roughness=0.3))
         target = renderer.create_render_target(width=192, height=192)
         images = []
@@ -140,9 +137,8 @@ def test_orthographic_filter_is_invariant_to_scene_units():
 def test_orthographic_filter_matches_45_degree_perspective(renderer):
     """Orthographic views use the SDK's own filter for a 45-degree vertical field of view."""
     scene = renderer.create_scene()
-    scene.refraction = True
     scene.tone_mapping = "aces_legacy"
-    camera = configure_camera(scene, "ortho")
+    camera = configure_camera(renderer, scene, "ortho")
     target = renderer.create_render_target(width=192, height=192)
     blurred = {}
     for roughness in (0, 0.3):
@@ -155,7 +151,7 @@ def test_orthographic_filter_matches_45_degree_perspective(renderer):
             if projection == "ortho":
                 camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=20)
             else:
-                camera.set_perspective(fov_y=45, aspect=1, near=0.1, far=20)
+                camera.set_perspective(fov_y_deg=45, aspect=1, near=0.1, far=20)
             renderer.render(scene, target)
             images.append(target.read().astype(float))
         model.close()
@@ -169,9 +165,8 @@ def test_orthographic_filter_matches_45_degree_perspective(renderer):
 
 def test_zero_thickness_keeps_thin_sheet_filter(renderer):
     scene = renderer.create_scene()
-    scene.refraction = True
     scene.tone_mapping = "aces_legacy"
-    configure_camera(scene, "ortho")
+    configure_camera(renderer, scene, "ortho")
     target = renderer.create_render_target(width=128, height=128)
     images = []
     for volume in (False, True):
@@ -187,16 +182,16 @@ def test_zero_transmission_preserves_shadows_and_reflections(renderer, scene, tr
     from test_features import unpack
     from test_lighting import shadow_asset, panorama
 
-    scene.refraction = True
     scene.shadows = True
     scene.tone_mapping = "aces_legacy"
-    scene.set_environment(panorama(), intensity=10000)
+    scene.environment = renderer.create_environment(panorama())
+    scene.environment_intensity = 10000
     if kind == "point":
         light = scene.add_point_light(position=(-0.7, 0, 2), intensity=100000)
     else:
         light = scene.add_directional_light(direction=(0.35, 0, -1), intensity=100000)
     light.casts_shadows = True
-    light.set_shadow_options(map_size=512)
+    light.shadow_map_size = 512
     target = renderer.create_render_target(width=128, height=128)
     asset = shadow_asset(triangle_glb)
     model = scene.load(asset)

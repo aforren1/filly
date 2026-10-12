@@ -42,6 +42,8 @@ def test_light_cleanup_and_imported_handles(renderer, scene, triangle_glb):
     assert renderer.stats.live_lights == 2
     first.close()
     assert alias.closed
+    # The model's list leaves closed lights out; a lookup by node still returns the closed handle.
+    assert model.lights == [] and model.light("triangle").closed
     with pytest.raises(filly.FillyError):
         alias.intensity = 2
     model.node("triangle").position = (0.1, 0, 0)
@@ -153,7 +155,7 @@ def test_transparent_target(renderer, scene, triangle_glb, encoding):
 
 def test_scene_close_releases_contents(renderer, scene, triangle_glb):
     other = renderer.create_scene()
-    other_camera = other.create_camera()
+    other_camera = renderer.create_camera()
     other_camera.set_orthographic(height=2, near=0.1, far=10)
     other_camera.position = (0, 0, 3)
     other.camera = other_camera
@@ -162,8 +164,9 @@ def test_scene_close_releases_contents(renderer, scene, triangle_glb):
     node = model.node("triangle")
     light = scene.add_point_light(position=(0, 0, 1))
     camera = scene.camera
-    scene.set_environment(np.full((8, 16, 3), 0.5, dtype="f"))
-    # A camera from the closing scene can be active elsewhere; it must be detached there too.
+    environment = renderer.create_environment(np.full((8, 16, 3), 0.5, dtype="f"))
+    scene.environment = other.environment = environment
+    # Cameras belong to the renderer: closing a scene that uses one leaves it open for others.
     third = renderer.create_scene()
     third.camera = camera
     target = renderer.create_render_target(width=16, height=16)
@@ -175,13 +178,37 @@ def test_scene_close_releases_contents(renderer, scene, triangle_glb):
     assert renderer.stats.live_models == 1 and renderer.stats.live_lights == 0
     for action in (lambda: renderer.render(scene, target), lambda: scene.load(triangle_glb),
                    lambda: scene.background, lambda: setattr(scene, "encoding", "linear"),
-                   lambda: node.position, lambda: camera.position, lambda: model.clone()):
+                   lambda: node.position, lambda: model.memory, lambda: scene.environment):
         with pytest.raises(filly.FillyError, match="closed"):
             action()
-    with pytest.raises(filly.FillyError, match="no active camera"):
-        third.camera
+    # Cameras and environments belong to the renderer, so other scenes keep them.
+    assert not camera.closed and third.camera == camera
+    assert not environment.closed and other.environment == environment
     renderer.render(other, target)
     assert target.read()[8, 8, 0] == 255 and not kept.closed
+
+
+def test_camera_close_detaches_it_from_every_scene(renderer, scene):
+    camera = scene.camera
+    other = renderer.create_scene()
+    other.camera = camera
+    camera.close()
+    camera.close()  # repeated calls are valid
+    assert camera.closed
+    with pytest.raises(filly.FillyError, match="closed"):
+        camera.position
+    for each in (scene, other):
+        with pytest.raises(filly.FillyError, match="no camera: its camera was closed"):
+            each.camera
+    target = renderer.create_render_target(width=8, height=8)
+    with pytest.raises(filly.FillyError, match="no camera: its camera was closed"):
+        renderer.render(scene, target)
+    # A scene that never had a camera says so.
+    with pytest.raises(filly.FillyError, match=r"^Scene has no camera\. Set scene\.camera"):
+        renderer.render(renderer.create_scene(), target)
+    kept = renderer.create_camera()
+    renderer.close()
+    assert kept.closed
 
 
 def test_many_renderers_close_cleanly():
@@ -199,7 +226,7 @@ def test_many_renderers_close_cleanly():
         for _ in range(40):
             with filly.Renderer() as renderer:
                 scene = renderer.create_scene()
-                camera = scene.create_camera()
+                camera = renderer.create_camera()
                 camera.position = (0, 0, 3)
                 camera.look_at((0, 0, 0))
                 scene.camera = camera
@@ -210,3 +237,49 @@ def test_many_renderers_close_cleanly():
     """)
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=300)
     assert result.returncode == 0 and result.stdout.decode().strip() == "ok", result.stderr.decode(errors="replace")[-400:]
+
+
+def test_closable_objects_support_with(renderer, triangle_glb):
+    from test_node_tree import tree_asset
+    with renderer.create_scene() as scene:
+        with renderer.create_camera() as camera:
+            assert not camera.closed
+        assert camera.closed
+        with scene.load(triangle_glb) as model:
+            assert not model.closed
+        assert model.closed
+        with scene.add_point_light(position=(0, 0, 1)) as light:
+            assert not light.closed
+        assert light.closed
+        tree = scene.load(tree_asset(triangle_glb))
+        with tree.light("lamp") as imported:
+            assert tree.lights == [imported]
+        assert imported.closed and tree.lights == []
+        # Imported cameras close with their model, so `with` fails at the start.
+        with pytest.raises(filly.FillyError, match="close with their model"):
+            with tree.camera("eye"):
+                pass
+        assert not tree.camera("eye").closed
+        with renderer.create_render_target(width=8, height=8) as target:
+            assert not target.closed
+        assert target.closed
+        with renderer.load_asset(triangle_glb) as asset:
+            assert not asset.closed
+        assert asset.closed
+        with renderer.create_environment(np.ones((2, 4, 3), np.float32)) as environment:
+            assert not environment.closed
+        assert environment.closed
+        with renderer.create_texture(np.zeros((2, 2, 4), np.uint8), color_space="srgb") as texture:
+            assert not texture.closed
+        assert texture.closed
+    assert scene.closed and tree.closed
+    for value in (scene, camera, model, light, imported, asset, environment, target, texture):
+        with pytest.raises(filly.FillyError, match="closed"):
+            with value:
+                pass
+    # An exception in the block propagates after the close.
+    with pytest.raises(ZeroDivisionError):
+        with renderer.create_scene() as scene:
+            1 / 0
+    assert scene.closed
+

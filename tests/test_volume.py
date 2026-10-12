@@ -38,9 +38,8 @@ def test_volume_thickness_uses_parent_and_model_scale(triangle_glb, extended):
     backing["extensionsUsed"] = ["KHR_materials_unlit"]
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        scene.refraction = True
         scene.tone_mapping = "aces_legacy"
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
@@ -87,7 +86,6 @@ def test_volume_cache_separates_dispersion(triangle_glb, reverse):
     doc["scenes"][0]["nodes"].append(1)
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        scene.refraction = True
         scene.tone_mapping = "aces_legacy"
         # Both variants must retain their own shader layout, regardless of cache insertion order.
         model = scene.load(pack(doc, binary))

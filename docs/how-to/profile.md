@@ -21,7 +21,7 @@ use a number.
 
 - A build of filly in `.venv` (Python 3.12) or `.deps\psychopy311` (Python 3.11, for PsychoPy).
 - The sample assets in `.deps\sample-audit\assets\Models`. The scenarios use `DamagedHelmet`,
-  `ClearCoatCarPaint`, and `SheenChair`. `--asset PATH` accepts any glTF file.
+  `ClearCoatCarPaint`, `SheenChair`, `CompareAnisotropy`, and `CompareSpecular`. `--asset PATH` accepts any glTF file.
 - For `renderdoc`: RenderDoc 1.39 in `C:\Program Files\RenderDoc`. Set `RENDERDOC_DIR` for
   another location.
 - For `nsys`: Nsight Systems 2025.3.2. Set `NSYS` to the path of `nsys.exe` for another version.
@@ -82,7 +82,7 @@ GPU: host draw                              0.065    0.124    0.129    0.134
 | update | Python scene edits: one model rotation per frame. |
 | render() wall | The Python call. `native submit` is the time inside filly's native `render()`: bookkeeping, Filament's `beginFrame()`, `render()`, `endFrame()`, and the command flush. `outside native submit` is the binding, argument checks, and GIL release. |
 | acquire() enter | Waits until Filament's driver thread has processed the frame and published its fence, then queues a GPU wait in the host context. It is CPU time on the main thread. `host wait` is the native part. |
-| host draw | The adapter's blit, or PsychoPy's `ImageStim.draw()`. |
+| host draw | The adapter's `draw()`: the native quad for pyglet, or PsychoPy's `ImageStim.draw()`. Profiles from before 2026-10-12 measured a `glBlitFramebuffer` copy for pyglet. |
 | acquire() exit | The host fence and flush. |
 | present | `flip()` for hosts, the pacing sleep offscreen. With vsync, the wait for the display is here. |
 | CPU busy | Frame start to the end of `acquire()` exit. This is the CPU cost that competes with other per-frame work. |
@@ -246,7 +246,6 @@ message that names the anchor that no longer matches.
 
 Other `build` options:
 
-- `--work DIR`: a separate scratch directory per variant, for example `C:\tmp\prof\w-ar`.
 - `--no-tracy`: only the `Renderer._frame_info_history()` binding, for `cpu --frame-info`
   without Tracy overhead.
 - `--define NAME=VALUE`: an extra CMake definition.
@@ -254,6 +253,10 @@ Other `build` options:
   an earlier revision or a copy with probe switches. The tree needs `CMakeLists.txt`,
   `pyproject.toml`, `README.md`, `native`, and `src`.
 - `--jobs N`: parallel compile jobs (default 2, at below-normal priority).
+
+`--work DIR` sets the scratch directory, for example `C:\tmp\prof\w-ar` for a separate directory
+per variant. It is an option of `profile_tracy.py` itself, so put it before the subcommand:
+`tools/profile_tracy.py --work C:\tmp\prof\w-ar build`.
 
 ## Compare configurations in rounds
 

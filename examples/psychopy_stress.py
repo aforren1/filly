@@ -4,7 +4,7 @@ import argparse
 import csv
 from datetime import datetime, timezone
 import gc
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 import json
 from pathlib import Path
 import platform
@@ -17,6 +17,17 @@ from filly._memory import MEMORY_COLUMNS, MemorySampler
 from filly._stress import FRAME_COLUMNS, memory_trend, summarize_frames
 from filly.benchmark import positive_int
 from screenshot import HORSE
+
+
+def psychopy_version():
+    # The PsychoPy app and pip installs ship the `psychopy` distribution; psychopy-lib is the
+    # Builder-free one.
+    for name in ("psychopy-lib", "psychopy"):
+        try:
+            return version(name)
+        except PackageNotFoundError:
+            pass
+    return None
 
 
 def main():
@@ -51,7 +62,8 @@ def main():
               "settings": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items() if key != "assets"},
               "assets": [str(p) for p in sources],
               "environment": {"python": platform.python_version(), "platform": platform.platform(),
-                              **{name: version(name) for name in ("filly", "psychopy-lib", "pyglet", "numpy")}},
+                              "psychopy": psychopy_version(),
+                              **{name: version(name) for name in ("filly", "pyglet", "numpy")}},
               "cycles": [], "aborted": False, "error": None}
     try:
         run(args, sources, output, report)
@@ -66,7 +78,7 @@ def main():
 def run(args, sources, output, report):
     from psychopy import event, visual
     from pyglet import gl
-    from filly.integrations.psychopy import SharedTarget, create_renderer
+    from filly.integrations.psychopy import HostTarget, create_renderer
     from screenshot import studio_environment
 
     win = renderer = target = model = None
@@ -115,17 +127,17 @@ def run(args, sources, output, report):
             renderer = create_renderer(win)
             scene = renderer.create_scene()
             scene.background = (0, 0, 0, 0) if args.transparent else (0.025, 0.035, 0.055, 1)
-            scene.refraction = True
             scene.antialiasing = "fxaa"
             scene.transparent = args.transparent
-            camera = scene.create_camera()
+            camera = renderer.create_camera()
             # frame() sets the height and the clipping planes for each asset.
-            camera.set_orthographic(height=1, near=1, far=2)
+            camera.set_orthographic(height=1)
             scene.camera = camera
             light = scene.add_directional_light(direction=(-1, -1, -2), intensity=100000)
-            scene.set_environment(studio_environment(), intensity=30000)
-            target = SharedTarget(renderer, win, args.width, args.height)
-            stimulus = target.as_psychopy_texture(win)
+            scene.environment = renderer.create_environment(studio_environment())
+            scene.environment_intensity = 30000
+            target = HostTarget(renderer, win, width=args.width, height=args.height)
+            stimulus = target.create_image_stim()
             renderer.finish()
             baseline = sample(-1, "baseline")
             # Storage is reused so the report itself does not grow by one array per trial.
@@ -139,7 +151,7 @@ def run(args, sources, output, report):
                 # there. The bounding sphere spans 87% of the narrower axis at every rotation.
                 model.position = -center
                 try:
-                    camera.frame(model, fill=1 / 1.15, direction=(0, 0, -1), aspect=args.width / args.height)
+                    camera.frame(model, fill=1 / 1.15, direction=(0, 0, -1))
                 except ValueError as error:
                     raise ValueError("The asset must have finite, nonzero geometry bounds") from error
                 authored = bool(model.lights)

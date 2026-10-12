@@ -29,16 +29,14 @@ const renderer = await createRenderer(gl);
 const texture = gl.createTexture();
 gl.bindTexture(gl.TEXTURE_2D, texture);
 gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 512, 512);
-const target = renderer.importTexture(texture, 512, 512);
+const target = renderer.importTarget(texture, 512, 512);
 
 const scene = renderer.createScene();
 scene.transparent = true;
 scene.background = [0, 0, 0, 0];
 const model = await scene.loadUrl("model.glb");
-const camera = scene.createCamera();
-camera.setPerspective({ fovY: 30, near: 0.1, far: 100 });
-camera.frame(model, { aspect: 1 });
-scene.camera = camera;
+scene.camera = renderer.createCamera();
+scene.camera.frame(model);
 scene.addDirectionalLight({ direction: [-1, -1, -2], intensity: 100000 });
 
 function frame(time) {
@@ -56,7 +54,7 @@ transparent scene, premultiplied by alpha.
 
 ## Share the context with another renderer
 
-filly and your renderer use the same WebGL2 context. Follow two rules:
+filly and your renderer use the same WebGL2 context. Follow three rules:
 
 1. Call `renderer.handBack()` after your last filly call and before your renderer draws. filly
    enters the context again by itself at its next call. Property reads, for example
@@ -85,7 +83,7 @@ const base = new PIXI.BaseTexture(null, { width: 512, height: 512, alphaMode: PI
 renderer.handBack();
 pixi.texture.bind(base);
 const glTexture = base._glTextures[pixi.CONTEXT_UID].texture;
-const target = renderer.importTexture(glTexture, 512, 512);
+const target = renderer.importTarget(glTexture, 512, 512);
 const sprite = new PIXI.Sprite(new PIXI.Texture(base));
 ```
 
@@ -97,30 +95,50 @@ example.
 ## Load models and environments
 
 - `scene.load(bytes)` loads a GLB, or a glTF document with embedded resources, from a
-  `Uint8Array`.
-- `await scene.loadUrl(url, options)` fetches a `.glb`, or a `.gltf` and the buffers and images
-  it names. The content decides which, not the URL. `clonable` can be a function of the number of
-  bytes fetched, so that a cache with a size limit decides before the load; the model's
-  `fetchedBytes` is that number.
+  `Uint8Array`, and adds it to the scene.
+- `await scene.loadUrl(url)` fetches a `.glb`, or a `.gltf` and the buffers and images it names,
+  and adds it to the scene. The content decides which, not the URL. The model's `fetchedBytes` is
+  the number of bytes fetched.
 - `scene.loadFiles(main, files)` loads a glTF document whose files you already have: `files` maps
   each relative URI, decoded, to its bytes.
-- `scene.loadEnvironment(bytes)` loads a 2:1 Radiance HDR, PNG, or JPEG panorama;
-  `scene.loadEnvironmentKtx(ibl, skybox)` loads cubemaps from Filament's `cmgen`.
 
 Each model has `loadWarnings`, the compatibility warnings of its load. filly also writes them to
 the console.
 
-Load a model with `{ clonable: true }` to make more instances with `model.clone()`, or with
-`model.clone({ scene })` in another scene of the same renderer. `model.memory` estimates the
-memory that the asset holds, as `Model.memory` in Python does, with JavaScript names
-(`gpuTextureBytes`, `gpuGeometryBytes`, `gpuBytes`, `cpuBytes`, `cloneGpuBytes`,
-`cloneCpuBytes`, `models`). In the browser, the CPU part lives in the WebAssembly heap. The heap
+To show a file more than once, or in more than one scene, load it once as an `Asset` and add it:
+
+```javascript
+const asset = await renderer.loadAssetUrl("model.glb");  // also loadAsset(bytes), loadAssetFiles()
+const left = scene.add(asset);
+const right = otherScene.add(asset);  // any scene of the same renderer
+asset.close();  // releases the source data; left and right stay
+```
+
+Each model starts from the file's authored state, with its own transforms, materials, lights,
+and animation. `asset.memory` estimates the memory that the asset holds, as `Asset.memory` in
+Python does, with JavaScript names (`gpuTextureBytes`, `gpuGeometryBytes`, `gpuBytes`,
+`cpuBytes`, `instanceGpuBytes`, `instanceCpuBytes`, `models`); `model.memory` gives the same
+for the asset of a model. In the browser, the CPU part lives in the WebAssembly heap. The heap
 grows but never shrinks: a closed asset's memory is free for later loads, but the page keeps the
 largest size that the heap reached. For a budget, count the high-water mark of the cache, not the
 current total. `model.animations` lists each clip's `materialProperties` as
 `{ material, property }` objects.
 `model.nodes`, `node.parent`, and `node.children` walk the glTF node tree; `model.light(key)`,
 `model.camera(key)`, and `model.node(key)` take a name or a glTF index.
+
+Environments also belong to the renderer, so scenes share one without filtering it again:
+
+```javascript
+const environment = renderer.loadEnvironment(hdrBytes);  // a 2:1 Radiance HDR, PNG, or JPEG panorama
+scene.environment = environment;
+otherScene.environment = environment;
+otherScene.environmentIntensity = 15000;  // per scene, as environmentRotationDeg
+scene.environment = null;  // removes it from this scene only
+```
+
+`renderer.createEnvironment(pixels, width, height)` takes linear RGB float pixels, and
+`renderer.loadEnvironmentKtx(ibl, skybox)` loads cubemaps from Filament's `cmgen`.
+`environment.close()` removes it from every scene that uses it.
 
 ## Compile before the first frame
 
@@ -174,13 +192,35 @@ or 4 channels: WebGL2 cannot show a 1-channel texture as grey.
 A material can also sample a texture that your page draws into, without a copy:
 
 ```javascript
-const input = renderer.importInput(pageTexture, 256, 256, { colorSpace: "linear" });
+const input = renderer.importTexture(pageTexture, 256, 256, { colorSpace: "linear" });
 material.baseColorTexture = input;
 input.write(() => { /* draw into pageTexture with your renderer */ });
 ```
 
 For `colorSpace: "srgb"`, allocate the page texture with `SRGB8_ALPHA8` storage; for
 `"linear"`, with `RGBA8` storage.
+
+To drift a texture, set `material.baseColorTextureOffset` (also `...Scale` and
+`...RotationDeg`, and the same for `emissiveTexture`). Each property changes only its own value.
+
+## Set lights, effects, and angles
+
+Settings are properties with the Python names in camelCase. Effect parameters are separate
+properties that keep their values while the effect is off:
+
+```javascript
+scene.fog = true;
+scene.fogColor = [0.6, 0.65, 0.7];
+scene.fogDensity = 0.08;  // fogColor and fogStart do not change
+const spot = scene.addSpotLight({ position: [0, 2, 2], direction: [0, -1, -1], coneDeg: [15, 30] });
+spot.shadowMapSize = 512;
+camera.setPerspective({ fovYDeg: 40 });
+model.rotationEulerDeg = [0, 45, 0];
+```
+
+All angles are in degrees, and their names end in `Deg`. A property that an object does not have
+reads as `null`, and setting it throws: for example `position` of a directional light and
+`coneDeg` of a point light.
 
 ## Read pixels
 
@@ -229,3 +269,8 @@ the flags of its own build, so its JPEG and PNG decoding does not change.
 handle to a filly object; `dispose()` releases the handle at once, and the garbage collector
 releases the others. Closing and releasing are separate: `model.close()` removes the model from
 its scene, and `model.dispose()` only drops the JavaScript handle.
+
+The Python objects support `with`, which closes them at the end of the block. The JavaScript
+objects do not support `using`: `using` calls `[Symbol.dispose]()`, and in this API, dispose
+means to release the handle, not to close the object. Call `close()` in a `finally` block
+instead.

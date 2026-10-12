@@ -23,7 +23,8 @@ def test_suzanne_renders_blue_metal(renderer, scene):
     assert model.material_names == ["Suzanne"]
     material = model.material("Suzanne")
     assert material.metallic == 1 and 0 < material.roughness < 1
-    scene.set_environment(np.ones((8, 16, 3), np.float32), intensity=20000)
+    scene.environment = renderer.create_environment(np.ones((8, 16, 3), np.float32))
+    scene.environment_intensity = 20000
     scene.add_directional_light(direction=(-1, -1, -2), intensity=100000)
     target = renderer.create_render_target(width=64, height=64)
     renderer.render(scene, target)

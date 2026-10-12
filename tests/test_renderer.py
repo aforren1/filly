@@ -74,7 +74,7 @@ def test_perspective_changes_coverage(renderer, scene, triangle_glb):
     target = renderer.create_render_target(width=64, height=64)
     renderer.render(scene, target)
     ortho = target.read()[..., 0] > 200
-    scene.camera.set_perspective(fov_y=60, aspect=1, near=0.1, far=10)
+    scene.camera.set_perspective(fov_y_deg=60, aspect=1, near=0.1, far=10)
     renderer.render(scene, target)
     perspective = target.read()[..., 0] > 200
     assert 0 < perspective.sum() < ortho.sum()
@@ -143,7 +143,7 @@ def test_validation(renderer, scene):
     with pytest.raises(ValueError, match="format must be 'rgba8', got 'rgb8'"):
         renderer.create_render_target(width=4, height=4, format="rgb8")
     with pytest.raises(ValueError):
-        scene.camera.set_perspective(fov_y=180, aspect=1, near=0.1, far=10)
+        scene.camera.set_perspective(fov_y_deg=180, aspect=1, near=0.1, far=10)
     with pytest.raises(ValueError):
         scene.camera.look_at(scene.camera.position)
     with pytest.raises(ValueError):
@@ -161,7 +161,7 @@ def test_cross_renderer_and_thread_rejection(renderer, scene):
         with pytest.raises(ValueError, match="belong"):
             renderer.render(scene, target)
         with pytest.raises(ValueError, match="belong"):
-            scene.camera = other.create_scene().create_camera()
+            scene.camera = other.create_camera()
     with ThreadPoolExecutor(max_workers=1) as executor:
         with pytest.raises(filly.FillyError, match="creating thread"):
             executor.submit(renderer.create_scene).result()
@@ -175,7 +175,7 @@ def test_close_invalidates_children(renderer, scene, triangle_glb):
     renderer.close()
     assert renderer.closed
     for operation in [lambda: camera.transform, lambda: model.position,
-                      lambda: target.width, scene.create_camera, renderer.finish]:
+                      lambda: target.width, renderer.create_camera, renderer.finish]:
         with pytest.raises(filly.FillyError, match="closed"):
             operation()
 
@@ -185,9 +185,8 @@ def test_children_keep_engine_alive():
     scene = renderer.create_scene()
     del renderer
     gc.collect()
-    camera = scene.create_camera()
-    camera.position = (1, 2, 3)
-    np.testing.assert_array_equal(camera.position, [1, 2, 3])
+    light = scene.add_point_light(position=(1, 2, 3))
+    np.testing.assert_array_equal(light.position, [1, 2, 3])
 
 
 def test_removed_surface_is_gone():
@@ -196,9 +195,12 @@ def test_removed_surface_is_gone():
         filly.Renderer(backend="opengl")
     for owner, name in ((filly.Renderer, "flush"), (filly.Model, "update_bones"), (filly.Scene, "load_glb"),
                         (filly.Scene, "load_gltf"), (filly.Scene, "set_rendering_options"),
-                        (filly.Node, "make_material_unique"), (filly.Stats, "gpu_ms")):
+                        (filly.Node, "make_material_unique"), (filly.Stats, "gpu_ms"),
+                        (filly.Renderer, "import_gl_input")):
         assert not hasattr(owner, name), name
-    assert not hasattr(filly, "RenderTarget")
+    # Renamed: create_* objects are filly's own, import_gl_* objects wrap host textures.
+    for name in ("OffscreenTarget", "HostTexture"):
+        assert not hasattr(filly, name), name
 
 
 def test_context_manager_preserves_exception():
@@ -229,9 +231,10 @@ def test_environment_before_first_frame(triangle_glb, postprocessing):
         if postprocessing:
             scene.antialiasing = "fxaa"
             scene.tone_mapping = "aces_legacy"
-        scene.set_environment(np.ones((16, 32, 3), dtype=np.float32), intensity=20000)
-        camera = scene.create_camera()
-        camera.set_perspective(fov_y=40, aspect=1, near=0.1, far=10)
+        scene.environment = renderer.create_environment(np.ones((16, 32, 3), dtype=np.float32))
+        scene.environment_intensity = 20000
+        camera = renderer.create_camera()
+        camera.set_perspective(fov_y_deg=40, aspect=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
         scene.camera = camera

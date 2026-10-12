@@ -126,11 +126,14 @@ def build_scene(renderer, spec):
             raise SystemExit(f"Asset not found: {path}. See docs/how-to/profile.md.")
         model = scene.load(path)
         center = np.asarray(model.bounds, dtype=float).mean(axis=0)
-    camera = scene.create_camera()
+    camera = renderer.create_camera()
     aspect = spec["width"] / spec["height"]
     box = np.asarray(model.bounds if model is not None else [[-1, -1, -1], [1, 1, 1]], dtype=float)
     if hasattr(camera, "frame"):
-        camera.set_perspective(fov_y=45, near=1, far=2)
+        try:
+            camera.set_perspective(fov_y_deg=45)
+        except TypeError:  # builds before near and far became optional; frame() sets them
+            camera.set_perspective(fov_y_deg=45, near=1, far=2)
         # Fill 1 puts the camera 2.61 sphere radii from the center; results before September 30,
         # 2026 used 2.6 radii and planes at 0.01 and 10 radii.
         camera.frame(box, fill=1.0, direction=(0, 0, -1), aspect=aspect)
@@ -140,13 +143,14 @@ def build_scene(renderer, spec):
         t = np.tan(np.radians(22.5)) * min(1.0, aspect)
         distance = radius * np.sqrt(1 + 1 / t**2)
         near, far = max(distance - 1.1 * radius, 0.5 * (distance - radius)), distance + 1.1 * radius
-        camera.set_perspective(fov_y=45, near=near, far=far)
+        camera.set_perspective(fov_y_deg=45, near=near, far=far)
         camera.position = tuple(box.mean(axis=0) + (0, 0, distance))
         camera.look_at(tuple(box.mean(axis=0)))
     scene.camera = camera
     light = scene.add_directional_light(direction=(-1, -1, -2), intensity=100000)
     light.casts_shadows = spec["shadows"]
-    scene.set_environment(studio_environment(), intensity=30000)
+    scene.environment = renderer.create_environment(studio_environment())
+    scene.environment_intensity = 30000
     return scene, model, center
 
 
@@ -366,14 +370,14 @@ class PygletHost:
 
     def __init__(self, spec, args):
         import pyglet
-        from filly.integrations.pyglet import SharedTarget, create_renderer
+        from filly.integrations.pyglet import HostTarget, create_renderer
 
         self.window = pyglet.window.Window(spec["width"], spec["height"], caption="filly profile",
                                            vsync=args.vsync)
         self.window.switch_to()
         self.gl_renderer = gl_renderer_string()
         self.renderer = create_renderer(self.window)
-        self.target = SharedTarget(self.renderer, self.window, spec["width"], spec["height"])
+        self.target = HostTarget(self.renderer, self.window, width=spec["width"], height=spec["height"])
 
     def make_current(self):
         self.window.switch_to()
@@ -397,7 +401,7 @@ class PsychopyHost:
 
     def __init__(self, spec, args):
         from psychopy import visual
-        from filly.integrations.psychopy import SharedTarget, create_renderer
+        from filly.integrations.psychopy import HostTarget, create_renderer
 
         self.win = visual.Window(size=(spec["width"], spec["height"]), units="pix", winType="pyglet",
                                  useFBO=False, checkTiming=False, autoLog=False,
@@ -405,8 +409,8 @@ class PsychopyHost:
         self.win.flip()
         self.gl_renderer = gl_renderer_string()
         self.renderer = create_renderer(self.win)
-        self.target = SharedTarget(self.renderer, self.win, spec["width"], spec["height"])
-        self.stimulus = self.target.as_psychopy_texture(self.win)
+        self.target = HostTarget(self.renderer, self.win, width=spec["width"], height=spec["height"])
+        self.stimulus = self.target.create_image_stim()
 
     def make_current(self):
         self.win.winHandle.switch_to()
@@ -1037,7 +1041,7 @@ def main():
 
     scenario = argparse.ArgumentParser(add_help=False)
     scenario.add_argument("scenario", choices=sorted(SCENARIOS))
-    scenario.add_argument("--asset", help="helmet, clearcoat, sheen, or a glTF path (overrides the scenario)")
+    scenario.add_argument("--asset", help="helmet, clearcoat, sheen, aniso, specular, or a glTF path (overrides the scenario)")
     scenario.add_argument("--host", choices=sorted(HOSTS))
     scenario.add_argument("--size", type=size, help="WIDTHxHEIGHT of the target")
     scenario.add_argument("--output-path", choices=("exact", "direct", "graded"),

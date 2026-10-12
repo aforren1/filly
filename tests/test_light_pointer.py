@@ -61,7 +61,9 @@ def test_spot_cones_combined_before_commit(renderer, scene, triangle_glb, revers
     after = target.read()
     assert np.abs(after.astype(int)-before.astype(int)).max() > 20
     assert model.light("lamp").intensity == pytest.approx(1000)
+    np.testing.assert_allclose(model.light("lamp").cone_deg, np.degrees([0.4, 0.7]), rtol=1e-6)
     model.reset_animation()
+    np.testing.assert_allclose(model.light("lamp").cone_deg, np.degrees([0.1, 0.2]), rtol=1e-6)
     renderer.render(scene, target)
     np.testing.assert_array_equal(before, target.read())
     model.light("lamp").close()

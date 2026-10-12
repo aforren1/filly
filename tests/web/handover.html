@@ -46,18 +46,19 @@ const pixelStoreState = () => ({ flipY: gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL),
 const scene = renderer.createScene();
 scene.background = [0.1, 0.2, 0.3, 1];
 const model = scene.createMesh({ ...shapes.box(), baseColor: [0.8, 0.5, 0.2, 1], roughness: 0.6 });
-const camera = scene.createCamera();
-camera.setPerspective({ fovY: 35, near: 0.5, far: 10 });
+const camera = renderer.createCamera();
+camera.setPerspective({ fovYDeg: 35, near: 0.5, far: 10 });
 camera.position = [0, 0, 3];
 camera.lookAt([0, 0, 0]);
 scene.camera = camera;
 scene.addDirectionalLight({ direction: [-1, -2, -1], intensity: 80000 });
-scene.setEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8, { intensity: 15000 });
+scene.environment = renderer.createEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8);
+scene.environmentIntensity = 15000;
 renderer.handBack();
 const targetTexture = gl.createTexture();
 gl.bindTexture(gl.TEXTURE_2D, targetTexture);
 gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 512, 512);
-const target = renderer.importTexture(targetTexture, 512, 512);
+const target = renderer.importTarget(targetTexture, 512, 512);
 await renderer.prepare(scene);
 
 // Counts calls of WebGL methods while counting is on.

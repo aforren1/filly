@@ -9,7 +9,7 @@ import numpy as np
 from psychopy import core, event, visual
 
 import filly
-from filly.integrations.psychopy import SharedTarget, create_renderer
+from filly.integrations.psychopy import HostTarget, create_renderer
 from screenshot import HORSE, VIEW, studio_environment, view_direction
 
 
@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--environment", type=Path, help="2:1 Radiance HDR panorama")
     parser.add_argument("--environment-intensity", type=float, help="Environment intensity in lux")
     parser.add_argument("--show-environment", action="store_true", help="Draw the environment panorama behind the model")
-    parser.add_argument("--environment-rotation", type=float, default=0, help="Environment rotation about Y in degrees")
+    parser.add_argument("--environment-rotation-deg", type=float, default=0, help="Environment rotation about Y in degrees")
     parser.add_argument("--shadows", action="store_true", help="Enable shadow maps for the selected lights")
     parser.add_argument("--shadow-map-size", type=int, default=1024, help="Shadow resolution per face, a power of two from 8 to 4096")
     parser.add_argument("--animation", type=int, default=0, help="Animation clip index")
@@ -59,8 +59,8 @@ def main():
         parser.error("--exposure must be between -10 and 24 EV100")
     if args.environment_intensity is not None and (not np.isfinite(args.environment_intensity) or args.environment_intensity < 0):
         parser.error("--environment-intensity must be finite and nonnegative")
-    if not np.isfinite(args.environment_rotation):
-        parser.error("--environment-rotation must be finite")
+    if not np.isfinite(args.environment_rotation_deg):
+        parser.error("--environment-rotation-deg must be finite")
     if args.shadow_map_size<8 or args.shadow_map_size>4096 or args.shadow_map_size & (args.shadow_map_size-1):
         parser.error("--shadow-map-size must be a power of two from 8 to 4096")
     if args.show_environment and args.transparent:
@@ -93,7 +93,6 @@ def main():
     renderer = create_renderer(win)
     scene = renderer.create_scene()
     scene.background = (0, 0, 0, 0) if args.transparent else (*args.background, 1)
-    scene.refraction = True
     scene.antialiasing = "fxaa"
     scene.transparent = args.transparent
     scene.shadows = args.shadows
@@ -125,17 +124,17 @@ def main():
             win.close()
             parser.error(f"{error}; camera nodes (index, name): {available}")
     else:
-        camera = scene.create_camera()
-        # The projection follows the render target; frame() sets the clipping planes.
+        camera = renderer.create_camera()
+        # The projection follows the render target; frame() sets the clipping planes, and the
+        # height of an orthographic view.
         if (args.projection or "perspective") == "perspective":
-            camera.set_perspective(fov_y=45, near=1, far=2)
+            camera.set_perspective(fov_y_deg=45)
         else:
-            camera.set_orthographic(height=1, near=1, far=2)
+            camera.set_orthographic(height=1)
         # The loop keeps the asset's center at the origin while it spins; frame it there. The
         # bounding sphere spans 85% of the window height at every rotation.
         model.position = -center
-        camera.frame(model, fill=0.85, direction=view_direction(*(args.view or ((0, 0) if args.model else VIEW))),
-                     aspect=win_size[0] / win_size[1])
+        camera.frame(model, fill=0.85, direction=view_direction(*(args.view or ((0, 0) if args.model else VIEW))))
     scene.camera = camera
     lights = model.lights
     use_asset_lights = args.lighting == "asset" or (args.lighting == "auto" and bool(lights))
@@ -145,16 +144,18 @@ def main():
         lights = [] if args.lighting == "environment" else [scene.add_directional_light(direction=(-1, -1, -2), intensity=100000)]
     if args.shadows:
         for light in lights:
-            light.set_shadow_options(map_size=args.shadow_map_size)
+            light.shadow_map_size = args.shadow_map_size
             light.casts_shadows = True
     camera.exposure = args.exposure if args.exposure is not None else (0 if use_asset_lights else 15)
     intensity = args.environment_intensity
     if intensity is None:
         intensity = (1 if args.show_environment else 0) if use_asset_lights else 30000
     if args.environment:
-        scene.load_environment(args.environment, intensity=intensity, rotation_deg=args.environment_rotation)
+        scene.environment = renderer.load_environment(args.environment)
     elif intensity > 0:
-        scene.set_environment(studio_environment(), intensity=intensity, rotation_deg=args.environment_rotation)
+        scene.environment = renderer.create_environment(studio_environment())
+    scene.environment_intensity = intensity
+    scene.environment_rotation_deg = args.environment_rotation_deg
 
     if args.variant is not None:
         variants = model.variants
@@ -176,8 +177,8 @@ def main():
         print("Animations:", [(i, clip.name, clip.duration) for i, clip in enumerate(clips)])
     if model.variants:
         print("Variants:", model.variants)
-    target = SharedTarget(renderer, win, win.size[0], win.size[1])
-    stimulus = target.as_psychopy_texture(win)
+    target = HostTarget(renderer, win)
+    stimulus = target.create_image_stim()
     clock = core.Clock()
     spin = args.spin if args.spin is not None else (0 if args.model else 30)
     timings = np.empty((args.frames, 7)) if args.profile else None
@@ -214,8 +215,7 @@ def main():
             previous_flip = flipped
             recorded += 1
 
-    # Shared GPU resources must be released while the host window is still open.
-    target.close()
+    # Closes the target too. Shared GPU resources must be released while the window is open.
     renderer.close()
     win.close()
     if args.profile:

@@ -29,8 +29,8 @@ def main():
         scene = renderer.create_scene()
         scene.output_path = args.output_path
         scene.load(args.asset)
-        camera = scene.create_camera()
-        camera.set_perspective(fov_y=45, near=0.01, far=100)
+        camera = renderer.create_camera()
+        camera.set_perspective(fov_y_deg=45)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
         scene.camera = camera

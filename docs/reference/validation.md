@@ -1,6 +1,6 @@
 # Validation results
 
-The renderer and shared-texture adapter were tested on September 25 through 30, 2026.
+The renderer and shared-texture adapter were tested from September 25 through October 12, 2026.
 The environment table lists the Windows setup; Linux setups are listed with their results.
 
 ## Environment
@@ -202,7 +202,7 @@ Three defects were found and corrected:
 
 - `native/gltf_prepare.cpp` used `std::exchange` without `<utility>`; libstdc++ does not include it
   transitively.
-- The first `OffscreenTarget.read()` after a render hung. Filament's frame-info thread waits on a
+- The first `RenderTarget.read()` after a render hung. Filament's frame-info thread waits on a
   fence with `FENCE_WAIT_FOR_EVER`; with glibc 2.28, libstdc++ converts the maximum deadline to
   the system clock, it overflows, and the thread spins on the fence mutex. The SDK tool now adds
   an untimed wait for that case. See [design](../explanation/design.md#dependencies).

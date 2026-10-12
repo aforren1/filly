@@ -34,7 +34,7 @@ first glTF animation and shows the file stem in the upper-left label. Custom ass
 unless `--spin` is supplied. Without a path, the demo shows the horse in `examples/assets` from a
 three-quarter view, spins it at 30 degrees per second, and plays its spring animation. Press Escape to stop.
 
-If the asset has exactly one camera, the demo uses it. Useful options:
+If the asset has cameras, the demo uses the first one. Useful options:
 
 | Option | Effect |
 | --- | --- |
@@ -68,7 +68,7 @@ Use these options to inspect an asset:
 | `--environment-intensity 30000` | Set environment intensity in lux. |
 | `--spin 20` | Rotate the whole model at 20 degrees per second. |
 
-The demo enables glass refraction and FXAA. ChronographWatch needs refraction to show its dial
+The demo enables FXAA. Glass refracts in every scene. ChronographWatch shows its dial
 through the glass. DiffuseTransmissionPlant uses animated point-light nodes and diffuse
 transmission. Its dim authored lights need a lower camera EV100 than the watch's studio lighting.
 Auto lighting selects EV100 0 for authored lights and EV100 15 for studio lighting. These are
@@ -77,11 +77,11 @@ preview defaults; adjust exposure for your stimulus. Animation clip names and va
 For MosquitoInAmber, use a perspective camera and a brighter background:
 
 ```powershell
-uv run --no-sync python examples/psychopy_shared.py path/to/MosquitoInAmber.glb --background 0.5 0.5 0.5
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py path/to/MosquitoInAmber.glb --background 0.5 0.5 0.5
 ```
 
 The environment lights the object. Add `--show-environment` to display it as an opaque skybox,
-and `--environment-rotation 45` to rotate it. Glass samples
+and `--environment-rotation-deg 45` to rotate it. Glass samples
 the scene behind it, so the default dark background can hide interior details. The volume-distance
 filter restores interior detail with `--projection orthographic`. See the
 [Khronos sample audit](../reference/sample-assets.md) for the current limits.
@@ -104,24 +104,24 @@ change pyglet, and `TextBox2` does not use that path.
 ```python
 from psychopy import core, event, visual
 import filly
-from filly.integrations.psychopy import SharedTarget, create_renderer
+from filly.integrations.psychopy import HostTarget, create_renderer
 
 filly.set_log_level("warning")
 win = visual.Window(size=(960, 640), units="pix", winType="pyglet", useFBO=False)
 renderer = create_renderer(win)
 scene = renderer.create_scene()
-scene.refraction = True
 scene.antialiasing = "fxaa"
-camera = scene.create_camera()
+camera = renderer.create_camera()
 # Without an aspect, the projection follows the render target.
-camera.set_perspective(fov_y=45, near=0.1, far=100)
+camera.set_perspective(fov_y_deg=45)
 camera.position = (0, 0, 5)
 camera.look_at((0, 0, 0))
 scene.camera = camera
 scene.add_directional_light(direction=(-1, -1, -1))
 model = scene.load("stimulus.glb")
-target = SharedTarget(renderer, win, 960, 640)
-stimulus = target.as_psychopy_texture(win)
+# The size defaults to the window's framebuffer size.
+target = HostTarget(renderer, win)
+stimulus = target.create_image_stim()
 
 clock = core.Clock()
 clips = model.animations
@@ -134,8 +134,7 @@ for frame in range(120):
     stimulus.draw()
     win.flip()
 
-target.close()
-renderer.close()
+renderer.close()  # Also closes the target.
 win.close()
 core.quit()
 ```
@@ -154,8 +153,8 @@ earlier result was a display failure or only a readback artifact is not settled.
 The shared texture does not require PsychoPy's extra FBO. The adapter leaves the host window's
 setting unchanged.
 
-`target.as_psychopy_texture()` accepts `size`, `pos`, and `units`. Size defaults to the texture's
-dimensions in pixels. The returned stimulus supports normal ImageStim position, size, and
+`target.create_image_stim()` accepts `size`, `pos`, and `units`. Size defaults to the texture's
+dimensions in pixels, which needs the default `units="pix"`; with other units, `size` is required. The returned stimulus supports normal ImageStim position, size, and
 orientation controls. Its image cannot be replaced. It can draw the last frame again without
 a new render.
 Opacity and masks are supported with the window's default `blendMode="avg"`.
@@ -171,20 +170,26 @@ with target.acquire():
     right.draw()
 ```
 
-`target.draw(x=0, y=0, width=None, height=None)` draws the texture with an internal stimulus.
-`x` and `y` are window pixels from the lower-left corner, as in the
-[pyglet, moderngl, and zengl integrations](gl-hosts.md).
+`target.draw(*, viewport=None, blend=True)` draws the texture with an internal stimulus, as in
+the [pyglet, moderngl, and zengl integrations](gl-hosts.md). `viewport` is `(x, y, width,
+height)` in window pixels from the lower-left corner, as in `renderer.render()`. It defaults to
+the texture size at (0, 0). `blend=False` copies the texture: it disables blending for the draw
+and samples with the window's own ImageStim shader, so the window gets Filament's premultiplied
+RGBA unchanged. `target.texture` is the GL texture name (`int`), 0 after close.
 
-`SharedTarget` accepts any integer type for the width and height, including the `numpy`
-integers in `win.size`. It also accepts floats with no fractional part, such as `960.0`.
-It rejects a fractional size, such as `960.5`, with `ValueError`, because a truncated texture
-does not match the window's pixel size. Sizes must be from 1 through 8192.
+`HostTarget(renderer, win, *, width=None, height=None)` defaults to `win.frameBufferSize`. It
+accepts any integer type for the width and height, including the `numpy` integers in
+`win.size`. It also accepts floats with no fractional part, such as `960.0`. It rejects a
+fractional size, such as `960.5`, with `ValueError`, because a truncated texture does not match
+the window's pixel size. Sizes must be from 1 through 8192.
 
-Close targets first, then the renderer, then the window. The host window must remain alive for
-all shared drawing. With the window open, Filament fences host work in the window's OpenGL
-context before it releases a target. If you close the window first, `target.close()` and
-`renderer.close()` still succeed and release everything. They make no PsychoPy OpenGL calls, and
-Filament waits for its own GPU work only; the host's last GPU work is not fenced.
+Close the renderer, then the window. `renderer.close()` closes the renderer's targets first and
+deletes their textures; their stimuli then raise `InteropError` when they draw. You can also
+close a target earlier with `target.close()`. The host window must remain alive for all shared
+drawing. With the window open, Filament fences host work in the window's OpenGL context before
+it releases a target. If you close the window first, `target.close()` and `renderer.close()`
+still succeed and release everything. They make no PsychoPy OpenGL calls, and Filament waits
+for its own GPU work only; the host's last GPU work is not fenced.
 Context managers are optional; the example uses explicit cleanup.
 
 On Windows, pyglet 1.4.11, which PsychoPy pins, can crash when a program closes a window and then opens another.
@@ -204,10 +209,13 @@ Keep `scene.environment_visible` false when the PsychoPy underlay must remain vi
 
 Set `scene.background = (0, 0, 0, 0)` and `scene.transparent = True`. Draw regular stimuli
 first, then the shared stimulus,
-then any overlays. The adapter converts premultiplied texture color for ImageStim's blending.
+then any overlays. The adapter converts premultiplied texture color for ImageStim's blending,
+which requires the window's default `blendMode="avg"`. The result is premultiplied source-over,
+as `draw()` gives in the other integrations. PsychoPy has its own drawing pipeline, so this
+conversion is the one difference.
 
 ```powershell
-uv run --no-sync python examples/psychopy_shared.py --transparent --frames 300
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py --transparent --frames 300
 ```
 
 This draws the horse over a regular PsychoPy grating, with the text label above both.
@@ -220,9 +228,9 @@ Enable shadows on the scene and on each light that needs them:
 ```python
 scene.shadows = True
 light.casts_shadows = True
-light.set_shadow_options(map_size=512, constant_bias=0.001, normal_bias=1.0)
+light.shadow_map_size = 512
 scene.environment_visible = True
-scene.environment_rotation = 45  # Requires a loaded environment.
+scene.environment_rotation_deg = 45  # Kept without an environment; applies to any environment set later.
 ```
 
 Point lights use six shadow faces. A smaller map reduces their rendering cost. Shadow resolution
@@ -234,7 +242,7 @@ lighting and the skybox. For asset lights, the demo uses a dim environment inten
 To run the cached TrafficCone asset with point shadows and the studio skybox:
 
 ```powershell
-uv run --no-sync python examples/psychopy_shared.py .deps/sample-audit/assets/Models/TrafficCone/glTF/TrafficCone.gltf --shadows --shadow-map-size 512 --show-environment --environment-rotation 45 --frames 90 --warmup 10 --profile lighting.csv
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py .deps/sample-audit/assets/Models/TrafficCone/glTF/TrafficCone.gltf --shadows --shadow-map-size 512 --show-environment --environment-rotation-deg 45 --frames 90 --warmup 10 --profile lighting.csv
 ```
 
 ## Inspect dielectric iridescence
@@ -243,7 +251,7 @@ To inspect `IridescenceDielectricSpheres`, use an angled camera and environment 
 The front view overlaps the sphere rows. The default directional light can wash out the film colors.
 
 ```powershell
-uv run --no-sync python examples/psychopy_shared.py .deps/sample-audit/assets/Models/IridescenceDielectricSpheres/glTF/IridescenceDielectricSpheres.gltf --lighting environment --projection orthographic --view 35 22 --spin 0 --frames 600
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py .deps/sample-audit/assets/Models/IridescenceDielectricSpheres/glTF/IridescenceDielectricSpheres.gltf --lighting environment --projection orthographic --view 35 22 --spin 0 --frames 600
 ```
 
 This improves the preview. Filament's remaining thin-film shading approximation is described in
@@ -252,7 +260,7 @@ the [sample audit](../reference/sample-assets.md#dielectric-iridescence).
 ## Record frame timing
 
 ```powershell
-uv run --no-sync python examples/psychopy_shared.py --frames 600 --profile timing.csv --warmup 60
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py --frames 600 --profile timing.csv --warmup 60
 ```
 
 The CSV records every frame. The printed p50, p95, and p99 summary excludes warmup frames.

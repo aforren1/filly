@@ -101,6 +101,8 @@ struct NodeSource {
     // Authored morph weights, or zeros; empty for nodes without morph targets.
     std::vector<float> weights;
     size_t camera = SIZE_MAX, light = SIZE_MAX;
+    // A spot light's authored inner and outer cone angles in radians.
+    std::array<float, 2> spot_cone = {};
     // A point or spot light without an authored range, which gltfio gives a finite range.
     bool automatic_range = false;
 };
@@ -162,6 +164,8 @@ struct PreparedAsset {
     struct DecodedTexture { const AssetTexture* source; bool srgb; filament::Texture* texture; };
     mutable std::vector<DecodedTexture> decoded;
     bool masked = false;
+    // Whether a material uses a screen-space refraction entry: transmission or volume.
+    bool refractive = false;
 };
 
 // The accessors of the rest animation. gltfio's animator keeps a node's translation, rotation,
@@ -206,7 +210,7 @@ struct SourcePatches {
 };
 
 struct PrepareOptions {
-    bool strict = false, refraction = false;
+    bool strict = false;
 };
 
 struct Prepared {

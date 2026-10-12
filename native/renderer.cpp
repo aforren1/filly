@@ -24,6 +24,7 @@
 #include <math/norm.h>
 #include <filament/LightManager.h>
 #include <filament/MaterialInstance.h>
+#include <filament/MorphTargetBuffer.h>
 #include <filament/Material.h>
 #include <filament/RenderableManager.h>
 #include <utils/tribool.h>
@@ -54,11 +55,13 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <exception>
 #include <string_view>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 extern "C" {
@@ -231,7 +234,7 @@ struct State {
 
 struct Resource {
     // The resource types that code looks up from a Resource pointer.
-    enum class Kind { other, scene, model, light };
+    enum class Kind { other, scene, model, light, target, environment };
     std::shared_ptr<State> state;
     explicit Resource(std::shared_ptr<State> owner) : state(std::move(owner)) {}
     virtual Kind kind() const noexcept { return Kind::other; }
@@ -256,8 +259,22 @@ struct CameraData : Resource {
     // A fitted projection follows the render target's aspect; FIXED keeps the caller's.
     enum class Fit : uint8_t { FIXED, PERSPECTIVE, LENS, ORTHOGRAPHIC } fit = Fit::FIXED;
     double size = 0, center_x = 0, center_y = 0, near = 0, far = 0;
+    // Planes that the caller gave, until the next projection call. frame() computes the others.
+    bool fixed_near = false, fixed_far = false;
     // Aspect of the current fitted projection. It is 1 until the first render.
     double aspect = 1;
+    // The last frame() of a camera that follows the target aspect, without an explicit aspect.
+    // A render into a target of another aspect frames again, so that a framing made before the
+    // first render, or for another target, still fills `fill` of the view. A pose or projection
+    // change ends it.
+    struct Framing {
+        m::double3 center, forward, up;
+        double radius = 0, fill = 0, aspect = 0;
+        std::array<m::double3, 8> corners;
+        bool sphere = true;
+        std::optional<double> near, far;
+    };
+    std::optional<Framing> framing;
     // Depth-of-field f-number. Filament's own aperture sets exposure and stays unchanged.
     float aperture = 16;
     void check() const;
@@ -297,6 +314,8 @@ struct SceneData : Resource {
     f::Scene* scene = nullptr;
     f::View* view = nullptr;
     std::shared_ptr<CameraData> active_camera;
+    // Why the scene lost its camera, for the error of the next render; null if it did not.
+    const char* lost_camera = nullptr;
     std::vector<std::shared_ptr<Resource>> children;
     // Skinned models whose node transforms changed since the last render.
     std::vector<std::shared_ptr<ModelData>> dirty_bones;
@@ -306,25 +325,17 @@ struct SceneData : Resource {
     bool channel_mixing = false;
     // Filament's color grading writes sRGB values, so the encode pass stores them as they are.
     bool filament_encodes = false;
-    f::IndirectLight* environment = nullptr;
-    f::Texture* reflections = nullptr;
-    f::Texture* irradiance = nullptr;
-    // Level 0 of a KTX environment's IBL, kept until a material needs `irradiance`.
-    struct PendingIrradiance {
-        std::vector<uint8_t> faces;
-        uint32_t size = 0;
-        f::Texture::InternalFormat format{};
-        f::Texture::Format pixels{};
-        f::Texture::Type type{};
-    };
-    std::unique_ptr<PendingIrradiance> pending_irradiance;
-    f::Texture* skybox_texture = nullptr;
+    std::shared_ptr<EnvironmentData> environment;
+    // This scene's light and skybox from the environment's shared textures. They are per scene
+    // because Filament keeps the intensity and rotation in the IndirectLight.
+    f::IndirectLight* environment_light = nullptr;
     f::Skybox* skybox = nullptr;
     bool environment_visible = false;
-    float environment_rotation = 0;
+    // Filament's default IndirectLight intensity.
+    float environment_intensity = 30000, environment_rotation_deg = 0;
     std::string encoding = "srgb", tone_mapping = "linear", antialiasing = "none";
     int msaa = 1;
-    bool shadows = false, refraction = false, transparent = false, dithering = false, ssao = false, bloom = false;
+    bool shadows = false, transparent = false, dithering = false, ssao = false, bloom = false;
     bool fog = false, depth_of_field = false, vignette = false;
     Vec3 fog_color = {1, 1, 1};
     float fog_density = 0.1f, fog_start = 0;
@@ -338,6 +349,9 @@ struct SceneData : Resource {
     // Live models with MASK materials. Filament writes their sharpened edge alpha to the target,
     // and only the encode pass stores alpha one for an opaque view.
     size_t masked = 0;
+    // Live models with screen-space refraction materials (transmission or volume), which only
+    // the exact path renders.
+    size_t refractive = 0;
     void check() const {
         state->check();
         if (!scene) throw FillyError("Scene is closed");
@@ -347,19 +361,16 @@ struct SceneData : Resource {
             if (view) state->engine->destroy(view);
             if (scene) state->engine->destroy(scene);
             if (grading) state->engine->destroy(grading);
-            if (environment) state->engine->destroy(environment);
+            if (environment_light) state->engine->destroy(environment_light);
             if (skybox) state->engine->destroy(skybox);
-            if (skybox_texture) state->engine->destroy(skybox_texture);
-            if (reflections) state->engine->destroy(reflections);
-            if (irradiance) state->engine->destroy(irradiance);
         }
         view = nullptr;
         scene = nullptr;
         grading = nullptr;
-        environment = nullptr;
-        skybox = nullptr; skybox_texture = nullptr;
-        reflections = irradiance = nullptr;
-        pending_irradiance.reset();
+        environment_light = nullptr;
+        skybox = nullptr;
+        // Can destroy the environment, which looks for scenes that use it; this one is closed.
+        environment.reset();
         active_camera.reset();
         children.clear();
         dirty_bones.clear();
@@ -371,7 +382,8 @@ struct SceneData : Resource {
 // options: Filament's postprocessing (tone mapping other than the linear clamp, bloom, depth of
 // field, vignette), filly's passes (FXAA, dithering, premultiplying after encoding for
 // transparent views, which hosts that blend in encoded space expect), and, by its original
-// contract, MSAA, refraction, and SSAO. Returns the conflicting settings, or an empty string.
+// contract, MSAA and SSAO. Refraction materials conflict too; set_output_path() checks the
+// models. Returns the conflicting settings, or an empty string.
 std::string direct_conflicts(const SceneData& scene) {
     std::string names;
     auto add = [&](bool conflict, const char* name) {
@@ -380,7 +392,6 @@ std::string direct_conflicts(const SceneData& scene) {
     add(scene.tone_mapping != "linear", "tone_mapping");
     add(scene.antialiasing != "none", "antialiasing");
     add(scene.msaa != 1, "msaa");
-    add(scene.refraction, "refraction");
     add(scene.transparent, "transparent");
     add(scene.dithering, "dithering");
     add(scene.ssao, "ssao");
@@ -416,9 +427,18 @@ void detach_closed_cameras(State& state) noexcept {
         auto scene = resource_cast<SceneData>(entry.lock());
         if (scene && scene->active_camera && !scene->active_camera->camera) {
             if (scene->view) scene->view->setCamera(nullptr);
+            scene->lost_camera = scene->active_camera->imported
+                ? "its camera was imported from a model that closed" : "its camera was closed";
             scene->active_camera.reset();
         }
     }
+}
+// The error for a scene without a camera names how it lost one, because a model's close
+// detaches its imported cameras far from the render that fails.
+FillyError no_camera(const SceneData& scene) {
+    return FillyError(std::string("Scene has no camera") + (scene.lost_camera ? ": " : "")
+                      + (scene.lost_camera ? scene.lost_camera : "")
+                      + ". Set scene.camera, or pass camera= to render()");
 }
 
 struct PropertyTarget {
@@ -491,7 +511,7 @@ struct Staging {
     }
 };
 
-// Geometry of a generated mesh. Clones share it, so an update changes every instance.
+// Geometry of a generated mesh, which its one model shows.
 struct MeshGeometry {
     f::VertexBuffer* vertices = nullptr;
     f::IndexBuffer* indices = nullptr;
@@ -503,7 +523,7 @@ struct MeshGeometry {
     std::vector<m::uint3> triangles;
     Staging position_upload, tangent_upload, uv_upload, color_upload;
     m::float3 low, high;
-    // Renderables of every instance, so bounds updates reach clones.
+    // The renderables that show it, for bounds updates. Empty once the model closes.
     std::vector<utils::Entity> renderables;
     void release(f::Engine& engine) noexcept {
         for (const auto* ring : {&position_upload, &tangent_upload, &uv_upload, &color_upload})
@@ -515,14 +535,16 @@ struct MeshGeometry {
     }
 };
 
-// One glTF asset and the preparation tables that each instance needs. A model and its clones
-// share it; the last one to close destroys the asset.
+// One glTF asset and the preparation tables that each instance needs. Its models and its open
+// Asset handle share it; the last one to close destroys the asset.
 struct AssetData : Resource {
     using Resource::Resource;
     g::FilamentAsset* asset = nullptr;
-    // False once the source data and instance tables are released after the first instance.
-    bool clonable = false;
-    bool masked = false;
+    // Whether the source data and instance tables that new instances read are kept.
+    bool has_source = false;
+    // Whether an open Asset handle holds this asset; it does not count as a model.
+    bool open = false;
+    bool masked = false, refractive = false;
     // Node names stay for every asset: name lookups need them, and they are small.
     std::shared_ptr<PreparedAsset> prepared;
     // Buffer memory that gltfio's parse points into, until its source data is released.
@@ -537,6 +559,16 @@ struct AssetData : Resource {
     uint64_t source_bytes = 0;
     // Instances created, each of which keeps per-instance buffers until the asset goes.
     size_t instances = 0;
+    // The instance that loading creates before ResourceLoader runs, for the first Scene::add().
+    // gltfio fills an instance's morph target buffers only in ResourceLoader::loadResources(), so
+    // an asset loaded without instances would give every model empty morph targets.
+    struct Spare {
+        g::FilamentInstance* instance = nullptr;
+        std::vector<MaterialBinding> bindings;
+        std::vector<MaterialRecord> records;
+        std::vector<std::pair<uint32_t, uint32_t>> nodes;
+    };
+    std::optional<Spare> spare;
     // Set for generated meshes, whose renderables use these buffers instead of the asset's.
     std::unique_ptr<MeshGeometry> mesh;
     void release() noexcept override {
@@ -551,14 +583,55 @@ struct AssetData : Resource {
         loaded_textures.clear();
         if (prepared) prepared->decoded.clear();
         mesh.reset();
+        spare.reset();
     }
     ~AssetData() override { release(); }
+};
+
+// Releases what only AssetLoader::createInstance() reads: gltfio's source data (about the file
+// size), the buffers that its parse points into, and the instance tables. Existing instances
+// keep working; no new instance can be made.
+void release_source(AssetData& shared) noexcept {
+    if (!shared.has_source) return;
+    if (shared.asset) shared.asset->releaseSourceData();
+    shared.buffers.reset();
+    auto& kept = *shared.prepared;
+    kept.diffuse = {};
+    kept.surfaces = {};
+    kept.plans = {};
+    kept.textures = {};
+    kept.animations = {};
+    kept.cameras = {};
+    kept.materials = {};
+    kept.decoded = {};
+    shared.source_bytes = 0;
+    shared.has_source = false;
+}
+
+// The state behind an Asset handle. close() drops its hold on the asset, so that the asset goes
+// with its last model.
+struct AssetRef : Resource {
+    using Resource::Resource;
+    std::shared_ptr<AssetData> asset;
+    void check() const {
+        state->check();
+        if (!asset) throw FillyError("Asset is closed");
+    }
+    void release() noexcept override {
+        if (!asset) return;
+        release_source(*asset);
+        asset->open = false;
+        asset.reset();
+    }
+    ~AssetRef() override { release(); }
 };
 
 // Runtime textures of one material handle: base color (0) and emissive (1).
 struct Assignment {
     std::array<std::shared_ptr<TextureData>, 2> textures;
     std::array<m::mat3f, 2> transforms;
+    // The inputs of `transforms`, which Material::texture_transform() returns.
+    std::array<UvTransform, 2> uv;
     bool any() const { return textures[0] || textures[1]; }
 };
 
@@ -597,6 +670,9 @@ struct ModelData : Resource, std::enable_shared_from_this<ModelData> {
     std::vector<std::pair<uint32_t, uint32_t>> node_indices;
     // Light and camera nodes in glTF node order.
     std::vector<utils::Entity> lights, camera_entities;
+    // Inner and outer half-angles in degrees of each light in `lights`, for spots; see
+    // Light::cone_deg().
+    std::vector<std::array<float, 2>> spot_cones;
     std::vector<std::shared_ptr<CameraData>> camera_handles;
     std::vector<AnimationClip> animations;
     std::vector<CameraProjection> cameras;
@@ -621,6 +697,7 @@ struct ModelData : Resource, std::enable_shared_from_this<ModelData> {
                 owner->scene->removeEntities(instance->getEntities(), instance->getEntityCount());
                 owner->scene->remove(instance->getRoot());
                 if (shared->masked) --owner->masked;
+                if (shared->refractive) --owner->refractive;
             }
             // The instance's renderables outlive this model until the shared asset goes.
             auto& rm = state->engine->getRenderableManager();
@@ -659,6 +736,7 @@ struct ModelData : Resource, std::enable_shared_from_this<ModelData> {
         nodes.clear();
         node_indices.clear();
         lights.clear();
+        spot_cones.clear();
         camera_entities.clear();
         shared.reset();
     }
@@ -728,8 +806,7 @@ void CameraData::check() const {
     state->check();
     if (imported) {
         auto owner = model.lock();
-        if (!owner) throw FillyError("Camera is closed");
-        owner->check();
+        if (!owner || !owner->asset) throw FillyError("Camera is closed: imported cameras close with their model");
     }
     if (!camera) throw FillyError("Camera is closed");
 }
@@ -740,6 +817,8 @@ struct LightData : Resource {
     Kind kind() const noexcept override { return tag; }
     std::weak_ptr<SceneData> scene;
     utils::Entity entity;
+    // A spot light's inner and outer half-angles in degrees; see Light::cone_deg().
+    std::array<float, 2> cone_deg = {};
     void release() noexcept override {
         if (entity && state->engine) {
             if (auto owner = scene.lock(); owner && owner->scene) owner->scene->remove(entity);
@@ -762,6 +841,8 @@ std::shared_ptr<LightData> own_light(const std::shared_ptr<SceneData>& scene, ut
 
 struct TargetData : Resource {
     using Resource::Resource;
+    static constexpr Kind tag = Kind::target;
+    Kind kind() const noexcept override { return tag; }
     f::Texture* color = nullptr;
     f::Texture* depth = nullptr;
     f::RenderTarget* target = nullptr;
@@ -776,6 +857,8 @@ struct TargetData : Resource {
     // renders into the host texture itself, which is mutable and has no view.
     uint32_t host_view = 0;
     SyncPoint ready;
+    // See Renderer::import_gl_target().
+    std::function<void()> on_renderer_close;
     // The exact output path, created on its first render: the scene renders scene-linear color
     // into `linear` (with the target's depth, or `linear_depth` if the target has none), and
     // filly's encode pass writes `color` through `output`. With FXAA, the encode pass writes
@@ -814,6 +897,7 @@ struct TargetData : Resource {
         target = linear_target = graded_target = output = ldr_target = nullptr;
         color = depth = linear = graded = linear_depth = ldr = nullptr;
         held = 0;
+        on_renderer_close = nullptr;
     }
     ~TargetData() override { release(); }
 };
@@ -852,8 +936,121 @@ struct TextureData : Resource {
     ~TextureData() override { release(); }
 };
 
+// An environment's textures, which every scene that uses it shares. Filtering a panorama costs
+// tens of milliseconds, so it runs once per environment, not once per scene.
+struct EnvironmentData : Resource {
+    using Resource::Resource;
+    static constexpr Kind tag = Kind::environment;
+    Kind kind() const noexcept override { return tag; }
+    f::Texture* reflections = nullptr;
+    // The irradiance cubemap. KTX environments light diffuse surfaces with `bands` instead, and
+    // build this only for diffuse-transmission materials, from `pending_irradiance`.
+    f::Texture* irradiance = nullptr;
+    std::optional<std::array<m::float3, 9>> bands;
+    // Level 0 of a KTX environment's IBL, kept until a material needs `irradiance`.
+    struct PendingIrradiance {
+        std::vector<uint8_t> faces;
+        uint32_t size = 0;
+        f::Texture::InternalFormat format{};
+        f::Texture::Format pixels{};
+        f::Texture::Type type{};
+    };
+    std::unique_ptr<PendingIrradiance> pending_irradiance;
+    // Null for a KTX environment without a skybox file: its sharpest IBL level is the skybox.
+    f::Texture* skybox = nullptr;
+    void check() const {
+        state->check();
+        if (!reflections) throw FillyError("Environment is closed");
+    }
+    // Removes the environment from the scenes that use it first.
+    void release() noexcept override;
+    ~EnvironmentData() override { release(); }
+};
+
 #include "animation.inc"
 #include "slots.inc"
+
+// Places the camera for `framing` at framing.aspect and sets its planes and projection. Returns
+// the distance from the camera to the target's center.
+double place_framing(CameraData& data, const CameraData::Framing& framing) {
+    auto* camera = data.camera;
+    const auto& forward = framing.forward;
+    const auto right = normalize(cross(forward, framing.up));
+    const auto upward = cross(right, forward);
+
+    // Filament's projection holds the field of view, and the aspect that the last render applied.
+    const m::mat4 projection = camera->getProjectionMatrix();
+    const bool orthographic = projection[2][3] == 0;
+    const double fixed_aspect = projection[1][1] / projection[0][0];
+    const double aspect = framing.aspect, fill = framing.fill, radius = framing.radius;
+    const double tan_v = 1 / projection[1][1], tan_h = tan_v * aspect;
+
+    // Corner coordinates relative to the center along the camera's right, up, and forward axes.
+    double extent_x = 0, extent_y = 0, z_min = 0, z_max = 0;
+    std::array<m::double3, 8> local;
+    for (size_t k = 0; k < 8; ++k) {
+        const auto q = framing.corners[k] - framing.center;
+        local[k] = {dot(q, right), dot(q, upward), dot(q, forward)};
+        extent_x = std::max(extent_x, std::abs(local[k].x));
+        extent_y = std::max(extent_y, std::abs(local[k].y));
+        z_min = std::min(z_min, local[k].z);
+        z_max = std::max(z_max, local[k].z);
+    }
+    if (framing.sphere) {
+        extent_x = extent_y = radius;
+        z_min = -radius;
+        z_max = radius;
+    }
+    // A flat target has no depth; the margins scale with its size instead.
+    const double depth = std::max(z_max - z_min, radius);
+
+    double distance = 0, height = 0;
+    if (!orthographic) {
+        if (framing.sphere) {
+            // The sphere's silhouette spans `fill` of the narrower view axis: the tangent of its
+            // angular radius is `fill` times the tangent of that axis's half-angle.
+            const double t = fill * std::min(tan_v, tan_h);
+            distance = radius * std::sqrt(1 + 1 / (t * t));
+        } else {
+            // Every corner projects within `fill` of the half-extent on both axes.
+            for (const auto& q : local)
+                distance = std::max(distance, std::max(std::abs(q.x) / (fill * tan_h), std::abs(q.y) / (fill * tan_v)) - q.z);
+            // Keep every corner in front of the camera.
+            distance = std::max(distance, -z_min + 0.05 * depth);
+        }
+    } else {
+        height = framing.sphere ? 2 * radius / (fill * std::min(1.0, aspect))
+                                : std::max(2 * extent_y / fill, 2 * extent_x / (fill * aspect));
+        // Far enough that the near plane has room in front of the target.
+        distance = -z_min + 0.1 * depth;
+    }
+    // Planes from frame() win, then planes that the caller gave the projection.
+    const double margin = 0.05 * depth;
+    const double near = framing.near ? *framing.near : data.fixed_near ? data.near
+                      : std::max(distance + z_min - margin, 0.5 * (distance + z_min));
+    const double far = framing.far ? *framing.far : data.fixed_far ? data.far : distance + z_max + margin;
+    clipping(near, far);
+
+    const m::double3 eye = framing.center - forward * distance;
+    data.set_world_transform(m::mat4::lookAt(eye, framing.center, upward));
+    using Fit = CameraData::Fit;
+    data.near = near;
+    data.far = far;
+    if (orthographic) {
+        if (data.fit != Fit::ORTHOGRAPHIC) data.aspect = aspect;
+        data.fit = Fit::ORTHOGRAPHIC;
+        data.size = height;
+        data.center_x = data.center_y = 0;
+        data.apply_fit();
+    } else if (data.fit == Fit::PERSPECTIVE || data.fit == Fit::LENS) {
+        data.apply_fit();
+    } else {
+        // A fixed projection keeps its field of view and aspect.
+        const double fov_y = 2 * std::atan(tan_v) * 180 / 3.141592653589793;
+        camera->setProjection(fov_y, fixed_aspect, near, far, f::Camera::Fov::VERTICAL);
+    }
+    return distance;
+}
 
 void CameraData::fit_aspect(double target) {
     if (imported) {
@@ -865,6 +1062,11 @@ void CameraData::fit_aspect(double target) {
         apply_projection(*state->engine, p);
         return;
     }
+    if (framing && framing->aspect != target) {
+        framing->aspect = aspect = target;
+        place_framing(*this, *framing);
+        return;
+    }
     if (fit == Fit::FIXED || aspect == target) return;
     aspect = target;
     apply_fit();
@@ -873,9 +1075,9 @@ void CameraData::fit_aspect(double target) {
 // Prefilters a KTX environment's irradiance cubemap. The IBL file has fewer mip levels than the
 // irradiance filter needs, so its level 0 goes into a texture with a full mip chain, in the
 // same face layout as the KTX upload.
-void build_pending_irradiance(SceneData& scene) {
-    auto pending = std::move(scene.pending_irradiance);
-    auto& engine = *scene.state->engine;
+void build_pending_irradiance(EnvironmentData& environment) {
+    auto pending = std::move(environment.pending_irradiance);
+    auto& engine = *environment.state->engine;
     auto* faces = new std::vector<uint8_t>(std::move(pending->faces));
     auto* source = f::Texture::Builder().width(pending->size).height(pending->size).levels(0xff)
         .sampler(f::Texture::Sampler::SAMPLER_CUBEMAP).format(pending->format)
@@ -885,18 +1087,19 @@ void build_pending_irradiance(SceneData& scene) {
         f::Texture::PixelBufferDescriptor(faces->data(), faces->size(), pending->pixels, pending->type,
             [](void*, size_t, void* user) { delete static_cast<std::vector<uint8_t>*>(user); }, faces));
     source->generateMipmaps(engine);
-    auto& prefilter = scene.state->prefilter;
+    auto& prefilter = environment.state->prefilter;
     if (!prefilter) prefilter = std::make_unique<State::Prefilter>(engine);
     IBLPrefilterContext::IrradianceFilter::Options options;
     options.generateMipmap = false;
-    scene.irradiance = prefilter->irradiance()(options, source);
+    environment.irradiance = prefilter->irradiance()(options, source);
     engine.destroy(source);
     // Loading, not the first frame, pays for the filter's GPU work.
     flush_and_wait(engine);
 }
 
 void update_diffuse_environment(SceneData& scene) {
-    if (scene.pending_irradiance) {
+    auto* environment = scene.environment.get();
+    if (environment && environment->pending_irradiance) {
         bool needed = false;
         auto needs = [](const f::MaterialInstance* instance) { return instance->getMaterial()->hasParameter("backlightIntensity"); };
         for (const auto& child : scene.children) {
@@ -906,23 +1109,55 @@ void update_diffuse_environment(SceneData& scene) {
                 needed = needed || needs(model->instance->getMaterialInstances()[i]);
             for (const auto& local : model->locals) needed = needed || needs(local.copy);
         }
-        if (needed) build_pending_irradiance(scene);
+        if (needed) build_pending_irradiance(*environment);
     }
-    const float intensity = scene.environment ? scene.environment->getIntensity() : 0;
+    auto* irradiance = environment ? environment->irradiance : nullptr;
+    const float intensity = environment ? scene.environment_intensity : 0;
     for (const auto& child : scene.children) {
         auto model = resource_cast<ModelData>(child);
         if (!model || !model->asset) continue;
         auto* instance = model->instance;
         for (size_t i=0; i<instance->getMaterialInstanceCount(); ++i)
             configure_diffuse_environment(scene.state->materials, instance->getMaterialInstances()[i],
-                scene.irradiance, intensity, scene.environment_rotation);
+                irradiance, intensity, scene.environment_rotation_deg);
         for (const auto& local : model->locals)
-            configure_diffuse_environment(scene.state->materials, local.copy, scene.irradiance,
-                intensity, scene.environment_rotation);
+            configure_diffuse_environment(scene.state->materials, local.copy, irradiance,
+                intensity, scene.environment_rotation_deg);
     }
 }
 
-// Builds the per-instance tables and restores authored state. Shared by loading and cloning.
+// Removes the scene's light and skybox. The caller updates the diffuse environment.
+void detach_environment(SceneData& scene) noexcept {
+    if (scene.scene) {
+        scene.scene->setIndirectLight(nullptr);
+        scene.scene->setSkybox(nullptr);
+    }
+    if (scene.state->engine) {
+        if (scene.environment_light) scene.state->engine->destroy(scene.environment_light);
+        if (scene.skybox) scene.state->engine->destroy(scene.skybox);
+    }
+    scene.environment_light = nullptr;
+    scene.skybox = nullptr;
+    scene.environment.reset();
+}
+
+void EnvironmentData::release() noexcept {
+    if (state->engine) {
+        for (const auto& entry : state->resources) {
+            auto scene = resource_cast<SceneData>(entry.lock());
+            if (!scene || scene->environment.get() != this) continue;
+            detach_environment(*scene);
+            // Without an environment the update only clears material parameters.
+            try { update_diffuse_environment(*scene); } catch (...) {}
+        }
+        for (auto* texture : {reflections, irradiance, skybox}) if (texture) state->engine->destroy(texture);
+    }
+    reflections = irradiance = skybox = nullptr;
+    bands.reset();
+    pending_irradiance.reset();
+}
+
+// Builds the per-instance tables and restores authored state, for every new instance.
 // model.node_indices must be set.
 void initialize_model(ModelData& model, const std::vector<MaterialBinding>& bindings) {
     auto& engine = *model.state->engine;
@@ -937,7 +1172,13 @@ void initialize_model(ModelData& model, const std::vector<MaterialBinding>& bind
         if (index < model.nodes.size()) model.nodes[index] = utils::Entity::import(entity);
     for (const auto entity : model.nodes) {
         if (!entity) continue;
-        if (light_manager.hasComponent(entity)) model.lights.push_back(entity);
+        if (light_manager.hasComponent(entity)) {
+            model.lights.push_back(entity);
+            const auto* source = node_source(model, entity);
+            auto cone = source ? source->spot_cone : std::array<float, 2>{};
+            for (auto& angle : cone) angle *= float(180.0 / 3.141592653589793);
+            model.spot_cones.push_back(cone);
+        }
         if (engine.getCameraComponent(entity)) model.camera_entities.push_back(entity);
     }
     model.camera_handles.resize(model.camera_entities.size());
@@ -976,6 +1217,87 @@ void initialize_model(ModelData& model, const std::vector<MaterialBinding>& bind
         }
     }
     model.animator->updateBoneMatrices();
+}
+
+}  // namespace detail
+}  // namespace filly
+
+// gltfio's tangent-frame helper (libs/gltfio/src/TangentsJob.h in Filament 1.77.1), which the
+// SDK's gltfio_core library contains but whose header it does not ship. The layout must match
+// the pinned SDK; review it when upgrading.
+namespace filament::gltfio {
+struct TangentsJob {
+    struct InputParams {
+        const cgltf_primitive* prim;
+        const int morphTargetIndex;
+    };
+    struct Context {
+        VertexBuffer* const vb;
+        MorphTargetBuffer* const tb;
+        uint32_t const offset;
+        const uint8_t slot;
+    };
+    struct OutputParams {
+        cgltf_size vertexCount;
+        math::short4* results;
+    };
+    struct Params {
+        InputParams in;
+        Context context;
+        OutputParams out;
+    };
+    static void run(Params* params);
+};
+}
+
+namespace filly {
+namespace detail {
+// gltfio fills morph target buffers only in ResourceLoader::loadResources(), which runs once per
+// asset, so an instance created later has empty ones; ResourceLoader.cpp says so for tangents.
+// This fills them as loadResources() does for the first instance: positions from each target's
+// POSITION accessor, and tangent frames from gltfio's own TangentsJob, for the same targets.
+void fill_morph_targets(ModelData& model) {
+    auto& engine = *model.state->engine;
+    auto& renderables = engine.getRenderableManager();
+    const auto* source = static_cast<const cgltf_data*>(model.shared->asset->getSourceAsset());
+    if (!source) throw FillyError("Asset source data was released");
+    for (const auto& [id, index] : model.node_indices) {
+        const auto renderable = renderables.getInstance(utils::Entity::import(id));
+        if (!renderable) continue;
+        auto* buffer = renderables.getMorphTargetBuffer(renderable);
+        const auto* mesh = index < source->nodes_count ? source->nodes[index].mesh : nullptr;
+        if (!buffer || !mesh) continue;
+        uint32_t offset = 0;
+        for (cgltf_size p = 0; p < mesh->primitives_count; ++p) {
+            const auto& primitive = mesh->primitives[p];
+            cgltf_size vertices = 0;
+            for (cgltf_size a = 0; a < primitive.attributes_count; ++a)
+                if (primitive.attributes[a].type == cgltf_attribute_type_position) vertices = primitive.attributes[a].data->count;
+            const size_t targets = std::min<size_t>(primitive.targets_count, buffer->getCount());
+            for (size_t t = 0; t < targets; ++t) {
+                const auto& target = primitive.targets[t];
+                bool tangents = false;
+                for (cgltf_size a = 0; a < target.attributes_count; ++a) {
+                    const auto& attribute = target.attributes[a];
+                    tangents = tangents || attribute.type == cgltf_attribute_type_tangent;
+                    if (attribute.type != cgltf_attribute_type_position || attribute.data->count != vertices) continue;
+                    std::vector<m::float3> positions(vertices);
+                    cgltf_accessor_unpack_floats(attribute.data, &positions[0].x, vertices * 3);
+                    buffer->setPositionsAt(engine, t, positions.data(), vertices, offset);
+                }
+                // gltfio's condition, including its requirement of default mesh weights.
+                const bool lit = primitive.material && !primitive.material->unlit;
+                if (primitive.type != cgltf_primitive_type_triangles || !mesh->weights_count || !(tangents || lit))
+                    continue;
+                g::TangentsJob::Params params{{&primitive, int(t)}, {nullptr, buffer, offset, uint8_t(p)}, {}};
+                g::TangentsJob::run(&params);
+                if (!params.out.results) continue;
+                buffer->setTangentsAt(engine, t, params.out.results, params.out.vertexCount, offset);
+                std::free(params.out.results);
+            }
+            offset += uint32_t(vertices);
+        }
+    }
 }
 
 // gltfio builds entities and material instances from its own parse and exposes no map back to
@@ -1327,7 +1649,10 @@ Scene Renderer::create_scene() {
     quality.hdrColorBuffer = f::QualityLevel::HIGH;
     data->view->setRenderQuality(quality);
     data->view->setShadowingEnabled(false);
-    data->view->setScreenSpaceRefractionEnabled(false);
+    // Always on: transmission and volume materials sample the refraction pass, and without it
+    // they render as flat white. Filament adds that pass only in frames that draw such a
+    // material, so other scenes render the same pixels at the same cost.
+    data->view->setScreenSpaceRefractionEnabled(true);
     data->view->setAntiAliasing(f::View::AntiAliasing::NONE);
     data->view->setDithering(f::View::Dithering::NONE);
     data->view->setSampleCount(1);
@@ -1346,6 +1671,20 @@ Scene Renderer::create_scene() {
     Scene scene(data);
     scene.set_tone_mapping(data->tone_mapping);
     return scene;
+}
+Camera Renderer::create_camera() {
+    state_->check();
+    auto camera = state_->track(std::make_shared<detail::CameraData>(state_));
+    camera->entity = utils::EntityManager::get().create();
+    camera->camera = state_->engine->createCamera(camera->entity);
+    camera->camera->setExposure(16.0f, 1.0f / 125.0f, 100.0f);
+    // Usable without a projection call: perspective, following the target aspect.
+    camera->fit = detail::CameraData::Fit::PERSPECTIVE;
+    camera->size = default_fov_y_deg;
+    camera->near = default_near;
+    camera->far = default_far;
+    camera->apply_fit();
+    return Camera(camera);
 }
 
 namespace {
@@ -1370,8 +1709,8 @@ void attach(detail::TargetData& data, f::Engine& engine, bool depth) {
     if (!data.target) throw FillyError("Could not create render target");
 }
 }
-OffscreenTarget Renderer::create_render_target(int64_t width, int64_t height,
-                                               const std::string& format, bool depth) {
+RenderTarget Renderer::create_render_target(int64_t width, int64_t height,
+                                            const std::string& format, bool depth) {
     state_->check();
     check_target(width, height, format);
     auto data = state_->track(std::make_shared<detail::TargetData>(state_));
@@ -1391,11 +1730,12 @@ OffscreenTarget Renderer::create_render_target(int64_t width, int64_t height,
         .usage(T::Usage::COLOR_ATTACHMENT | T::Usage::SAMPLEABLE | T::Usage::BLIT_SRC)
         .build(*state_->engine);
     attach(*data, *state_->engine, depth);
-    return OffscreenTarget(data);
+    return RenderTarget(data);
 }
 
-ImportedTarget Renderer::import_gl_texture(uint32_t texture, int64_t width, int64_t height,
-                                           const std::string& format, bool depth) {
+ImportedTarget Renderer::import_gl_target(uint32_t texture, int64_t width, int64_t height,
+                                          const std::string& format, bool depth,
+                                          std::function<void()> on_renderer_close) {
     state_->check();
     if (!state_->interop->shared()) throw InteropError("Create the renderer with shared_context first");
     check_target(width, height, format);
@@ -1418,10 +1758,11 @@ ImportedTarget Renderer::import_gl_texture(uint32_t texture, int64_t width, int6
         .usage(T::Usage::COLOR_ATTACHMENT | T::Usage::SAMPLEABLE | T::Usage::BLIT_SRC)
         .import(view).build(*state_->engine);
     attach(*data, *state_->engine, depth);
+    data->on_renderer_close = std::move(on_renderer_close);
     return ImportedTarget(data);
 }
 
-void Renderer::render(const Scene& scene, const OffscreenTarget& target, const RenderOptions& options) {
+void Renderer::render(const Scene& scene, const RenderTarget& target, const RenderOptions& options) {
     state_->check();
     if (target.data_->state != state_) throw std::invalid_argument("Scene and target must belong to this renderer");
     target.data_->check();
@@ -1437,7 +1778,7 @@ void Renderer::render(const Scene& scene, const ImportedTarget& target, const Re
         throw InteropError("Release the target (leave acquire()) before rendering to it again");
     const auto& settings = *scene.data_;
     if (settings.direct && settings.encoding == "srgb" && !data.host_view)
-        throw InteropError("output_path 'direct' with sRGB encoding needs an imported texture with "
+        throw InteropError("output_path 'direct' with sRGB encoding needs an imported target whose texture has "
                            "immutable storage from glTexStorage2D; this texture was allocated with "
                            "glTexImage2D. Use output_path 'exact' or allocate it with glTexStorage2D");
     const auto start = std::chrono::steady_clock::now();
@@ -1456,7 +1797,7 @@ namespace {
 // it out makes the fog color the output color of fully fogged pixels.
 void apply_fog(detail::SceneData& data, const f::Camera& camera) {
     // Without an IBL, Filament uses its default IBL at FIndirectLight::DEFAULT_INTENSITY (30000 lux).
-    const float intensity = data.environment ? data.environment->getIntensity() : 30000.0f;
+    const float intensity = data.environment ? data.environment_intensity : 30000.0f;
     const float luminance = intensity * f::Exposure::exposure(camera);
     const float scale = luminance > 0 && std::isfinite(luminance) ? 1 / luminance : 0;
     const m::float3 color{data.fog_color[0] * scale, data.fog_color[1] * scale, data.fog_color[2] * scale};
@@ -1506,7 +1847,7 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
         camera = options.camera->data_.get();
         if (camera->state != state_) throw std::invalid_argument("Camera must belong to this renderer");
     }
-    if (!camera) throw FillyError("Set scene.camera or pass camera= before rendering");
+    if (!camera) throw detail::no_camera(data);
     camera->check();
     uint32_t x = 0, y = 0, width = target.width, height = target.height;
     if (options.has_viewport) {
@@ -1725,10 +2066,26 @@ void Renderer::reset_gl_state() {
 }
 void Renderer::close() {
     state_->check_thread();
+    if (!state_->engine) return;
+    // Collected first: a callback can create or close resources, which changes the registry.
+    std::vector<std::function<void()>> callbacks;
+    for (auto it = state_->resources.rbegin(); it != state_->resources.rend(); ++it) {
+        auto target = detail::resource_cast<detail::TargetData>(it->lock());
+        if (target && target->target && target->on_renderer_close)
+            callbacks.push_back(std::exchange(target->on_renderer_close, nullptr));
+    }
+    // Every resource must still be released, so the first error waits until the end.
+    std::exception_ptr error;
+    for (auto& callback : callbacks) {
+        try { callback(); }
+        catch (...) { if (!error) error = std::current_exception(); }
+    }
+    callbacks.clear();
     // A closed host window takes its context with it. Filament's own work is still fenced by
     // State::close(); host work that sampled shared textures can no longer be fenced.
     if (state_->engine && state_->interop->shared() && state_->interop->host_current()) state_->interop->finish_host();
     state_->close();
+    if (error) std::rethrow_exception(error);
 }
 uintptr_t Renderer::shared_context() const {
     state_->check_thread();
@@ -1761,25 +2118,14 @@ bool Scene::closed() const { data_->state->check_thread(); return !data_->scene 
 void Scene::close() {
     data_->state->check_thread();
     if (!data_->scene || !data_->state->engine) return;
-    // Models detach cameras that they own; scene-created cameras are detached below.
+    // Models detach the cameras that they own from every scene. Renderer cameras stay open.
     for (auto& child : data_->children) child->release();
-    detail::detach_closed_cameras(*data_->state);
     data_->release();
     data_->state->engine->flush();
 }
-Camera Scene::create_camera() {
-    data_->check();
-    auto state = data_->state;
-    auto camera = state->track(std::make_shared<detail::CameraData>(state));
-    camera->entity = utils::EntityManager::get().create();
-    camera->camera = state->engine->createCamera(camera->entity);
-    camera->camera->setExposure(16.0f, 1.0f / 125.0f, 100.0f);
-    data_->children.push_back(camera);
-    return Camera(camera);
-}
 Camera Scene::camera() const {
     data_->check();
-    if (!data_->active_camera) throw FillyError("Scene has no active camera");
+    if (!data_->active_camera) throw detail::no_camera(*data_);
     return Camera(data_->active_camera);
 }
 void Scene::set_camera(const Camera& camera) {
@@ -1788,6 +2134,7 @@ void Scene::set_camera(const Camera& camera) {
     if (camera.data_->state != data_->state)
         throw std::invalid_argument("Camera must belong to the same renderer");
     data_->active_camera = camera.data_;
+    data_->lost_camera = nullptr;
     data_->view->setCamera(camera.data_->camera);
 }
 
@@ -1849,44 +2196,30 @@ std::filesystem::path utf8_path(const std::string& value) {
     const auto* first = reinterpret_cast<const char8_t*>(value.data());
     return std::filesystem::path(std::u8string(first, first + value.size()));
 }
-}
-
-Model Scene::load(const std::string& path, bool strict, bool clonable, std::vector<std::string>& warnings) {
-    data_->check();
+// The document at a UTF-8 path, and its absolute UTF-8 path, which resolves its resources.
+std::vector<uint8_t> read_document(const std::string& path, std::string& absolute) {
     std::error_code error;
     const auto file = std::filesystem::absolute(utf8_path(path), error);
     if (error) throw AssetError("Could not open asset: " + path);
     const auto utf8 = file.u8string();
-    const std::string absolute(reinterpret_cast<const char*>(utf8.data()), utf8.size());
-    std::vector<uint8_t> bytes;
+    absolute.assign(reinterpret_cast<const char*>(utf8.data()), utf8.size());
     try {
-        bytes = detail::read_file(file);
+        return detail::read_file(file);
     } catch (const AssetError&) {
         throw AssetError("Could not open asset: " + absolute);
     }
-    return load_document(std::move(bytes), absolute, strict, clonable, warnings);
-}
-Model Scene::load(const uint8_t* bytes, size_t size, bool strict, bool clonable, std::vector<std::string>& warnings) {
-    data_->check();
-    return load_document(std::vector<uint8_t>(bytes, bytes + size), std::string(), strict, clonable, warnings);
 }
 
-Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, bool strict, bool clonable,
-                           std::vector<std::string>& warnings) {
-    auto state = data_->state;
-    auto prepared = detail::prepare_asset(std::move(bytes), path,
-        {strict, data_->refraction}, warnings);
+// An asset with its resources loaded, its source data kept, and its spare instance.
+std::shared_ptr<detail::AssetData> load_asset_data(const std::shared_ptr<detail::State>& state,
+        std::vector<uint8_t> bytes, const std::string& path, bool strict, std::vector<std::string>& warnings) {
+    auto prepared = detail::prepare_asset(std::move(bytes), path, {strict}, warnings);
     const auto& tables = *prepared.tables;
-    if (tables.masked && data_->direct)
-        throw AssetError("Asset has alphaMode MASK materials, which need the exact output path, but "
-                         "output_path is 'direct'; set output_path = 'exact' first");
     auto shared = state->track(std::make_shared<detail::AssetData>(state));
     shared->prepared = prepared.tables;
     shared->buffers = prepared.buffers;
     shared->masked = tables.masked;
-    ProviderResults results;
-    std::vector<std::pair<uint32_t, uint32_t>> node_indices;
-    g::FilamentInstance* instance = nullptr;
+    shared->refractive = tables.refractive;
     try {
         // With no instances, gltfio parses the document and builds vertex buffers but creates no
         // material instances, so its parse can be patched and read before createInstance().
@@ -1894,19 +2227,30 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
         g::FilamentInstance* none = nullptr;
         shared->asset = state->loader->createInstancedAsset(prepared.bytes.data(), uint32_t(prepared.bytes.size()), &none, 0);
         detail::set_prepared_asset(state->materials, nullptr);
-        if (!shared->asset) throw AssetError("Could not decode glTF/GLB asset");
-        auto* source = static_cast<cgltf_data*>(const_cast<void*>(shared->asset->getSourceAsset()));
-        detail::patch_source(source, prepared);
-        instance = detail::create_instance(*state, *shared, node_indices);
-        results.take(state->materials, *shared);
     } catch (...) {
         detail::set_prepared_asset(state->materials, nullptr);
-        results.take(state->materials, *shared);
         throw;
     }
-    if (!instance) throw AssetError("Could not create an instance of this asset");
+    if (!shared->asset) throw AssetError("Could not decode glTF/GLB asset");
     auto* asset = shared->asset;
-    const auto* source = static_cast<const cgltf_data*>(asset->getSourceAsset());
+    auto* source = static_cast<cgltf_data*>(const_cast<void*>(asset->getSourceAsset()));
+    detail::patch_source(source, prepared);
+    {
+        detail::AssetData::Spare spare;
+        ProviderResults results;
+        try {
+            spare.instance = detail::create_instance(*state, *shared, spare.nodes);
+        } catch (...) {
+            results.take(state->materials, *shared);
+            throw;
+        }
+        results.take(state->materials, *shared);
+        if (!spare.instance) throw AssetError("Could not create an instance of this asset");
+        spare.bindings = std::move(results.bindings);
+        spare.records = std::move(results.records);
+        shared->spare = std::move(spare);
+        shared->instances = 1;
+    }
     // Buffers are already in gltfio's parse. Images still load through ResourceLoader, which
     // would open files with narrow paths, so their bytes are read here.
     std::vector<std::pair<std::string, std::filesystem::path>> image_files;
@@ -1925,15 +2269,16 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
     RecordingProvider decoder(stb.get(), shared->loaded_textures), ktx(ktx2.get(), shared->loaded_textures),
         webp(webp_decoder.get(), shared->loaded_textures);
     {
+        // Instances created after this load get the textures as gltfio creates them.
         g::ResourceLoader resources({state->engine, path.empty() ? nullptr : path.c_str(), true});
         for (const auto& [uri, file] : image_files) {
-            std::unique_ptr<std::vector<uint8_t>> bytes;
+            std::unique_ptr<std::vector<uint8_t>> image;
             try {
-                bytes = std::make_unique<std::vector<uint8_t>>(detail::read_file(file));
+                image = std::make_unique<std::vector<uint8_t>>(detail::read_file(file));
             } catch (const AssetError&) {
                 throw AssetError("Could not read glTF resource: " + uri);
             }
-            auto* payload = bytes.release();
+            auto* payload = image.release();
             resources.addResourceData(uri.c_str(), g::ResourceLoader::BufferDescriptor(
                 payload->data(), payload->size(), [](void*, size_t, void* user) {
                     delete static_cast<std::vector<uint8_t>*>(user);
@@ -1947,42 +2292,108 @@ Model Scene::load_document(std::vector<uint8_t> bytes, const std::string& path, 
         // Upload lifetimes do not need this wait. It keeps the upload out of the first trial frame.
         detail::flush_and_wait(*state->engine);
     }
-    auto model = state->track(std::make_shared<detail::ModelData>(state));
-    model->scene = data_;
-    model->shared = shared;
-    model->asset = asset;
-    model->instance = instance;
-    model->records = std::move(results.records);
-    model->node_indices = std::move(node_indices);
-    detail::initialize_model(*model, results.bindings);
-    if (tables.masked) ++data_->masked;
-    // Only AssetLoader::createInstance() reads the source data (about the file size), the
-    // buffers it points into, and the instance tables after this point, so they are kept only
-    // for assets that clone() may copy.
-    shared->clonable = clonable;
-    shared->instances = 1;
-    if (clonable) {
-        // gltfio keeps its own copy of the document, and the parse points into it and into the
-        // buffers that preparation loaded.
-        shared->source_bytes = prepared.bytes.size() + parse_bytes(*source);
-        for (const auto& storage : shared->buffers->storage) shared->source_bytes += storage.size();
+    // gltfio keeps its own copy of the document, and the parse points into it and into the
+    // buffers that preparation loaded.
+    shared->has_source = true;
+    shared->source_bytes = prepared.bytes.size() + parse_bytes(*source);
+    for (const auto& storage : shared->buffers->storage) shared->source_bytes += storage.size();
+    return shared;
+}
+
+// A new instance of the asset in the scene.
+std::shared_ptr<detail::ModelData> add_instance(const std::shared_ptr<detail::SceneData>& scene,
+                                                const std::shared_ptr<detail::AssetData>& shared) {
+    const auto& state = scene->state;
+    if (shared->masked && scene->direct)
+        throw AssetError("Asset has alphaMode MASK materials, which need the exact output path, but "
+                         "output_path is 'direct'; set output_path = 'exact' first");
+    if (shared->refractive && scene->direct)
+        throw AssetError("Asset has transmission or volume materials, whose screen-space refraction "
+                         "needs the exact output path, but output_path is 'direct'; set "
+                         "output_path = 'exact' first");
+    detail::AssetData::Spare taken;
+    const bool spare = shared->spare.has_value();
+    if (spare) {
+        taken = std::move(*shared->spare);
+        shared->spare.reset();
     } else {
-        asset->releaseSourceData();
-        shared->buffers.reset();
-        auto& kept = *shared->prepared;
-        kept.diffuse = {};
-        kept.surfaces = {};
-        kept.plans = {};
-        kept.textures = {};
-        kept.animations = {};
-        kept.cameras = {};
-        kept.materials = {};
-        kept.decoded = {};
+        ProviderResults results;
+        try {
+            taken.instance = detail::create_instance(*state, *shared, taken.nodes);
+        } catch (...) {
+            results.take(state->materials, *shared);
+            throw;
+        }
+        results.take(state->materials, *shared);
+        if (!taken.instance) throw AssetError("Could not create an instance of this asset");
+        taken.bindings = std::move(results.bindings);
+        taken.records = std::move(results.records);
+        ++shared->instances;
     }
-    data_->children.push_back(model);
+    auto model = state->track(std::make_shared<detail::ModelData>(state));
+    model->scene = scene;
+    model->shared = shared;
+    model->asset = shared->asset;
+    model->instance = taken.instance;
+    model->records = std::move(taken.records);
+    model->node_indices = std::move(taken.nodes);
+    if (!spare) detail::fill_morph_targets(*model);
+    detail::initialize_model(*model, taken.bindings);
+    if (shared->mesh) detail::attach_geometry(*model);
+    if (shared->masked) ++scene->masked;
+    if (shared->refractive) ++scene->refractive;
+    scene->children.push_back(model);
     detail::update_visibility(*model);
-    detail::update_diffuse_environment(*data_);
-    return Model(model);
+    detail::update_diffuse_environment(*scene);
+    state->engine->flush();
+    return model;
+}
+
+// The one instance that Scene::load() and create_mesh() make. No handle can add the asset
+// again, so its source data goes.
+Model add_once(const std::shared_ptr<detail::SceneData>& scene, const std::shared_ptr<detail::AssetData>& shared) {
+    Model model(add_instance(scene, shared));
+    detail::release_source(*shared);
+    return model;
+}
+}
+
+Asset Renderer::load_asset(const std::string& path, bool strict, std::vector<std::string>& warnings) {
+    state_->check();
+    std::string absolute;
+    auto bytes = read_document(path, absolute);
+    auto ref = state_->track(std::make_shared<detail::AssetRef>(state_));
+    ref->asset = load_asset_data(state_, std::move(bytes), absolute, strict, warnings);
+    ref->asset->open = true;
+    return Asset(ref);
+}
+Asset Renderer::load_asset(const uint8_t* bytes, size_t size, bool strict, std::vector<std::string>& warnings) {
+    state_->check();
+    auto ref = state_->track(std::make_shared<detail::AssetRef>(state_));
+    ref->asset = load_asset_data(state_, std::vector<uint8_t>(bytes, bytes + size), std::string(), strict, warnings);
+    ref->asset->open = true;
+    return Asset(ref);
+}
+
+Model Scene::load(const std::string& path, bool strict, std::vector<std::string>& warnings) {
+    data_->check();
+    std::string absolute;
+    auto bytes = read_document(path, absolute);
+    return add_once(data_, load_asset_data(data_->state, std::move(bytes), absolute, strict, warnings));
+}
+Model Scene::load(const uint8_t* bytes, size_t size, bool strict, std::vector<std::string>& warnings) {
+    data_->check();
+    return add_once(data_, load_asset_data(data_->state, std::vector<uint8_t>(bytes, bytes + size), std::string(),
+                                           strict, warnings));
+}
+
+Model Scene::add(const Asset& asset) {
+    data_->check();
+    const auto& ref = *asset.data_;
+    // Assets belong to the renderer, not to a scene, so any scene of it can add one.
+    if (ref.state != data_->state) throw std::invalid_argument("Asset must belong to the same renderer");
+    ref.check();
+    return Model(add_instance(data_, ref.asset));
 }
 
 Model Scene::create_mesh(const MeshArrays& arrays, const MeshMaterial& material) {
@@ -2003,7 +2414,7 @@ Model Scene::create_mesh(const MeshArrays& arrays, const MeshMaterial& material)
     }
     auto document = detail::mesh_placeholder(low, high, arrays.colors != nullptr, material);
     std::vector<std::string> warnings;
-    Model model = load_document(std::move(document), std::string(), true, true, warnings);
+    Model model = add_once(data_, load_asset_data(data_->state, std::move(document), std::string(), true, warnings));
     try {
         model.attach_mesh(arrays);
     } catch (...) {
@@ -2013,48 +2424,13 @@ Model Scene::create_mesh(const MeshArrays& arrays, const MeshMaterial& material)
     return model;
 }
 
-Model Model::clone(const Scene* into) {
-    data_->check();
-    auto state = data_->state;
-    // The asset belongs to the renderer, not to a scene, so a clone can go into any scene of it.
-    // Each model holds the asset, so a scene that closes takes only its own models with it.
-    auto scene = into ? into->data_ : data_->scene.lock();
-    if (!scene || !scene->scene) throw FillyError("Scene is closed");
-    if (scene->state != state) throw std::invalid_argument("Clone into a scene of the same renderer");
-    auto& shared = *data_->shared;
-    if (!shared.clonable)
-        throw FillyError("This asset released its source data after loading; "
-                            "load it with scene.load(source, clonable=True) to clone it");
-    if (shared.masked && scene->direct)
-        throw AssetError("Asset has alphaMode MASK materials, which need the exact output path, but "
-                         "the scene's output_path is 'direct'; set output_path = 'exact' first");
-    ProviderResults results;
-    std::vector<std::pair<uint32_t, uint32_t>> node_indices;
-    g::FilamentInstance* instance = nullptr;
-    try {
-        instance = detail::create_instance(*state, shared, node_indices);
-    } catch (...) {
-        results.take(state->materials, shared);
-        throw;
-    }
-    results.take(state->materials, shared);
-    if (!instance) throw AssetError("Could not create another instance of this asset");
-    auto model = state->track(std::make_shared<detail::ModelData>(state));
-    model->scene = scene;
-    model->shared = data_->shared;
-    model->asset = shared.asset;
-    model->instance = instance;
-    model->records = std::move(results.records);
-    model->node_indices = std::move(node_indices);
-    detail::initialize_model(*model, results.bindings);
-    ++shared.instances;
-    if (shared.mesh) detail::attach_geometry(*model);
-    if (shared.masked) ++scene->masked;
-    scene->children.push_back(model);
-    detail::update_visibility(*model);
-    detail::update_diffuse_environment(*scene);
-    state->engine->flush();
-    return Model(model);
+Asset::Asset(std::shared_ptr<detail::AssetRef> data) : data_(std::move(data)) {}
+bool Asset::closed() const { data_->state->check_thread(); return !data_->asset || !data_->state->engine; }
+void Asset::close() {
+    data_->state->check_thread();
+    if (!data_->asset || !data_->state->engine) return;
+    data_->release();
+    data_->state->engine->flush();
 }
 
 Light Scene::add_directional_light(Vec3 direction, float intensity, Vec3 color) {
@@ -2091,60 +2467,89 @@ Node Camera::node() const {
     if (!data_->imported) throw FillyError("Only imported cameras have a node");
     return Node(data_->model.lock(), data_->entity.getId());
 }
+void Camera::close() {
+    data_->state->check_thread();
+    if (data_->imported) throw FillyError("Imported cameras close with their model");
+    if (!data_->camera || !data_->state->engine) return;
+    data_->release();
+    detail::detach_closed_cameras(*data_->state);
+}
+// A model's release clears its imported cameras too.
+bool Camera::closed() const { data_->state->check_thread(); return !data_->camera || !data_->state->engine; }
 namespace {
 void owned_projection(const detail::CameraData& data, const char* what) {
     if (data.imported)
         throw FillyError(std::string("Imported cameras keep their glTF projection; ") + what
-                            + " applies to cameras from scene.create_camera()");
+                            + " applies to cameras from renderer.create_camera()");
+}
+// Planes that a projection call is not given keep their value, which frame() may change.
+std::pair<double, double> planes(const detail::CameraData& data, std::optional<double> near,
+                                 std::optional<double> far) {
+    const std::pair<double, double> values{near.value_or(data.near), far.value_or(data.far)};
+    clipping(values.first, values.second);
+    return values;
+}
+void set_planes(detail::CameraData& data, std::pair<double, double> values, std::optional<double> near,
+                std::optional<double> far) {
+    std::tie(data.near, data.far) = values;
+    data.fixed_near = near.has_value();
+    data.fixed_far = far.has_value();
+    data.framing.reset();
 }
 }
-void Camera::set_perspective(double fov_y, double aspect, double near, double far) {
+void Camera::set_perspective(double fov_y_deg, double aspect, std::optional<double> near, std::optional<double> far) {
     data_->check(); owned_projection(*data_, "set_perspective()");
-    clipping(near, far); finite(fov_y); finite(aspect);
-    if (!(fov_y > 0 && fov_y < 180 && aspect >= 0))
-        throw std::invalid_argument("Require 0 < fov_y < 180 degrees and aspect > 0");
-    data_->size = fov_y; data_->near = near; data_->far = far;
+    const auto values = planes(*data_, near, far);
+    finite(fov_y_deg); finite(aspect);
+    if (!(fov_y_deg > 0 && fov_y_deg < 180 && aspect >= 0))
+        throw std::invalid_argument("Require 0 < fov_y_deg < 180 and aspect > 0");
+    set_planes(*data_, values, near, far);
+    data_->size = fov_y_deg;
     if (aspect > 0) {
         data_->fit = detail::CameraData::Fit::FIXED;
-        data_->camera->setProjection(fov_y, aspect, near, far, f::Camera::Fov::VERTICAL);
+        data_->camera->setProjection(fov_y_deg, aspect, data_->near, data_->far, f::Camera::Fov::VERTICAL);
     } else {
         data_->fit = detail::CameraData::Fit::PERSPECTIVE;
         data_->apply_fit();
     }
 }
-void Camera::set_lens_projection(double focal_length, double aspect, double near, double far) {
+void Camera::set_lens_projection(double focal_length, double aspect, std::optional<double> near,
+                                 std::optional<double> far) {
     data_->check(); owned_projection(*data_, "set_lens_projection()");
-    clipping(near, far); finite(focal_length); finite(aspect);
+    const auto values = planes(*data_, near, far);
+    finite(focal_length); finite(aspect);
     if (!(focal_length > 0 && aspect >= 0))
         throw std::invalid_argument("Require focal_length_mm > 0 and aspect > 0");
-    data_->size = focal_length; data_->near = near; data_->far = far;
+    set_planes(*data_, values, near, far);
+    data_->size = focal_length;
     if (aspect > 0) {
         data_->fit = detail::CameraData::Fit::FIXED;
-        data_->camera->setLensProjection(focal_length, aspect, near, far);
+        data_->camera->setLensProjection(focal_length, aspect, data_->near, data_->far);
     } else {
         data_->fit = detail::CameraData::Fit::LENS;
         data_->apply_fit();
     }
 }
 void Camera::set_orthographic(double left, double right, double bottom, double top,
-                               double near, double far) {
+                              std::optional<double> near, std::optional<double> far) {
     data_->check(); owned_projection(*data_, "set_orthographic()");
-    clipping(near, far);
+    const auto values = planes(*data_, near, far);
     finite(left); finite(right); finite(bottom); finite(top);
     if (!(left < right && bottom < top))
         throw std::invalid_argument("Require left < right and bottom < top");
+    set_planes(*data_, values, near, far);
     data_->fit = detail::CameraData::Fit::FIXED;
-    data_->camera->setProjection(f::Camera::Projection::ORTHO, left, right, bottom, top, near, far);
+    data_->camera->setProjection(f::Camera::Projection::ORTHO, left, right, bottom, top, data_->near, data_->far);
 }
 void Camera::set_orthographic_height(double height, double center_x, double center_y,
-                                      double near, double far) {
+                                     std::optional<double> near, std::optional<double> far) {
     data_->check(); owned_projection(*data_, "set_orthographic()");
-    clipping(near, far);
+    const auto values = planes(*data_, near, far);
     finite(height); finite(center_x); finite(center_y);
     if (!(height > 0)) throw std::invalid_argument("Require height > 0");
+    set_planes(*data_, values, near, far);
     data_->fit = detail::CameraData::Fit::ORTHOGRAPHIC;
     data_->size = height; data_->center_x = center_x; data_->center_y = center_y;
-    data_->near = near; data_->far = far;
     data_->apply_fit();
 }
 namespace {
@@ -2190,8 +2595,7 @@ double frame_camera(detail::CameraData& data, const FrameTarget& target, const F
     if (options.far) finite(*options.far);
     if (options.aspect && !(std::isfinite(*options.aspect) && *options.aspect > 0))
         throw std::invalid_argument("aspect must be finite and positive");
-    auto* camera = data.camera;
-    m::double3 forward = camera->getForwardVector();
+    m::double3 forward = data.camera->getForwardVector();
     if (options.direction) {
         finite(*options.direction);
         forward = {(*options.direction)[0], (*options.direction)[1], (*options.direction)[2]};
@@ -2202,81 +2606,28 @@ double frame_camera(detail::CameraData& data, const FrameTarget& target, const F
     const m::double3 up{options.up[0], options.up[1], options.up[2]};
     if (!(length(up) > 1e-12) || length(cross(forward, normalize(up))) < 1e-6)
         throw std::invalid_argument("up must be nonzero and not parallel to the viewing direction");
-    const auto right = normalize(cross(forward, up));
-    const auto upward = cross(right, forward);
 
-    // Filament's projection holds the field of view and the aspect that the last render applied
-    // (1 before the first render of a camera that follows its target).
-    const m::mat4 projection = camera->getProjectionMatrix();
-    const bool orthographic = projection[2][3] == 0;
-    const double fixed_aspect = projection[1][1] / projection[0][0];
-    const double aspect = options.aspect.value_or(fixed_aspect);
-    const double tan_v = 1 / projection[1][1], tan_h = tan_v * aspect;
-
-    // Corner coordinates relative to the center along the camera's right, up, and forward axes.
-    double extent_x = 0, extent_y = 0, z_min = 0, z_max = 0;
-    std::array<m::double3, 8> local;
-    for (size_t k = 0; k < 8; ++k) {
-        const auto q = target.corners[k] - target.center;
-        local[k] = {dot(q, right), dot(q, upward), dot(q, forward)};
-        extent_x = std::max(extent_x, std::abs(local[k].x));
-        extent_y = std::max(extent_y, std::abs(local[k].y));
-        z_min = std::min(z_min, local[k].z);
-        z_max = std::max(z_max, local[k].z);
-    }
-    if (sphere) {
-        extent_x = extent_y = target.radius;
-        z_min = -target.radius;
-        z_max = target.radius;
-    }
-    // A flat target has no depth; the margins scale with its size instead.
-    const double depth = std::max(z_max - z_min, target.radius);
-
-    double distance = 0, height = 0;
-    if (!orthographic) {
-        if (sphere) {
-            // The sphere's silhouette spans `fill` of the narrower view axis: the tangent of its
-            // angular radius is `fill` times the tangent of that axis's half-angle.
-            const double t = fill * std::min(tan_v, tan_h);
-            distance = target.radius * std::sqrt(1 + 1 / (t * t));
-        } else {
-            // Every corner projects within `fill` of the half-extent on both axes.
-            for (const auto& q : local)
-                distance = std::max(distance, std::max(std::abs(q.x) / (fill * tan_h), std::abs(q.y) / (fill * tan_v)) - q.z);
-            // Keep every corner in front of the camera.
-            distance = std::max(distance, -z_min + 0.05 * depth);
-        }
-    } else {
-        height = sphere ? 2 * target.radius / (fill * std::min(1.0, aspect))
-                        : std::max(2 * extent_y / fill, 2 * extent_x / (fill * aspect));
-        // Far enough that the near plane has room in front of the target.
-        distance = -z_min + 0.1 * depth;
-    }
-    const double margin = 0.05 * depth;
-    const double near = options.near.value_or(std::max(distance + z_min - margin, 0.5 * (distance + z_min)));
-    const double far = options.far.value_or(distance + z_max + margin);
-    clipping(near, far);
-
-    const m::double3 eye = target.center - forward * distance;
-    data.set_world_transform(m::mat4::lookAt(eye, target.center, upward));
-    using Fit = detail::CameraData::Fit;
-    if (orthographic) {
-        if (data.fit != Fit::ORTHOGRAPHIC) data.aspect = aspect;
-        data.fit = Fit::ORTHOGRAPHIC;
-        data.size = height;
-        data.center_x = data.center_y = 0;
-        data.near = near;
-        data.far = far;
-        data.apply_fit();
-    } else if (data.fit == Fit::PERSPECTIVE || data.fit == Fit::LENS) {
-        data.near = near;
-        data.far = far;
-        data.apply_fit();
-    } else {
-        // A fixed projection keeps its field of view and aspect.
-        const double fov_y = 2 * std::atan(tan_v) * 180 / 3.141592653589793;
-        camera->setProjection(fov_y, fixed_aspect, near, far, f::Camera::Fov::VERTICAL);
-    }
+    detail::CameraData::Framing framing;
+    framing.center = target.center;
+    framing.radius = target.radius;
+    framing.corners = target.corners;
+    framing.forward = forward;
+    framing.up = up;
+    framing.fill = fill;
+    framing.sphere = sphere;
+    framing.near = options.near;
+    framing.far = options.far;
+    // Without an explicit aspect: the current projection's. For a camera that follows the
+    // target, that is the last render's (1 before the first), and a render with another aspect
+    // frames again.
+    const m::mat4 projection = data.camera->getProjectionMatrix();
+    framing.aspect = options.aspect.value_or(projection[1][1] / projection[0][0]);
+    data.framing.reset();
+    const double distance = detail::place_framing(data, framing);
+    // Given planes stay, as planes given to a projection call do.
+    data.fixed_near = data.fixed_near || options.near;
+    data.fixed_far = data.fixed_far || options.far;
+    if (!options.aspect && data.fit != detail::CameraData::Fit::FIXED) data.framing = framing;
     return distance;
 }
 
@@ -2305,6 +2656,7 @@ void Camera::set_position(Vec3 value) {
     auto transform = data_->camera->getModelMatrix();
     transform[3] = {value[0], value[1], value[2], 1};
     data_->set_world_transform(transform);
+    data_->framing.reset();
 }
 void Camera::look_at(Vec3 target, Vec3 up) {
     data_->check(); finite(target); finite(up);
@@ -2314,10 +2666,12 @@ void Camera::look_at(Vec3 target, Vec3 up) {
         length(cross(normalize(direction), normalize(vec(up)))) < 1e-6f)
         throw std::invalid_argument("Look-at requires distinct eye/target and a nonparallel up vector");
     data_->set_world_transform(m::mat4::lookAt(eye, vec(target), vec(up)));
+    data_->framing.reset();
 }
 Matrix Camera::transform() const { data_->check(); return matrix(data_->camera->getModelMatrix()); }
 void Camera::set_transform(const Matrix& value) {
     data_->check(); data_->set_world_transform(m::mat4(matrix(value)));
+    data_->framing.reset();
 }
 Matrix Camera::view_matrix() const { data_->check(); return matrix(data_->camera->getViewMatrix()); }
 Matrix Camera::projection() const { data_->check(); return matrix(data_->camera->getProjectionMatrix()); }
@@ -2548,29 +2902,23 @@ void Node::set_quaternion(Vec4 value) {
     auto trs = decompose(transform());
     set_transform(matrix(g::composeMatrix(trs.position, q, trs.scale)));
 }
-Vec3 Node::rotation_euler_rad() const {
+Vec3 Node::rotation_euler_deg() const {
     auto trs = decompose(transform());
     auto r = matrix(g::composeMatrix({0, 0, 0}, trs.rotation, {1, 1, 1}));
     float y = std::asin(std::clamp(-r[8], -1.0f, 1.0f));
-    if (std::abs(std::cos(y)) < 1e-6f) return {std::atan2(-r[6], r[5]), y, 0};
-    return {std::atan2(r[9], r[10]), y, std::atan2(r[4], r[0])};
-}
-void Node::set_rotation_euler_rad(Vec3 value) {
-    finite(value);
-    double x = value[0] / 2.0, y = value[1] / 2.0, z = value[2] / 2.0;
-    double cx = std::cos(x), sx = std::sin(x), cy = std::cos(y), sy = std::sin(y);
-    double cz = std::cos(z), sz = std::sin(z);
-    set_quaternion({float(sx*cy*cz - cx*sy*sz), float(cx*sy*cz + sx*cy*sz),
-                    float(cx*cy*sz - sx*sy*cz), float(cx*cy*cz + sx*sy*sz)});
-}
-Vec3 Node::rotation_euler_deg() const {
-    auto angles = rotation_euler_rad();
+    Vec3 angles = std::abs(std::cos(y)) < 1e-6f ? Vec3{std::atan2(-r[6], r[5]), y, 0}
+                                                : Vec3{std::atan2(r[9], r[10]), y, std::atan2(r[4], r[0])};
     for (auto& angle : angles) angle *= float(180.0 / 3.141592653589793);
     return angles;
 }
 void Node::set_rotation_euler_deg(Vec3 value) {
-    for (auto& angle : value) angle *= float(3.141592653589793 / 180.0);
-    set_rotation_euler_rad(value);
+    finite(value);
+    constexpr double half = 3.141592653589793 / 360.0;
+    double x = value[0] * half, y = value[1] * half, z = value[2] * half;
+    double cx = std::cos(x), sx = std::sin(x), cy = std::cos(y), sy = std::sin(y);
+    double cz = std::cos(z), sz = std::sin(z);
+    set_quaternion({float(sx*cy*cz - cx*sy*sz), float(cx*sy*cz + sx*cy*sz),
+                    float(cx*cy*sz - sx*sy*cz), float(cx*cy*cz + sx*sy*sz)});
 }
 Material Node::material(size_t slot) const {
     data_->check();
@@ -2623,11 +2971,11 @@ void Material::set_roughness(float value) {
     material_instance(data_, index_, "roughnessFactor")->setParameter("roughnessFactor", value);
 }
 
-OffscreenTarget::OffscreenTarget(std::shared_ptr<detail::TargetData> data) : data_(std::move(data)) {}
-uint32_t OffscreenTarget::width() const { data_->check(); return data_->width; }
-uint32_t OffscreenTarget::height() const { data_->check(); return data_->height; }
-bool OffscreenTarget::closed() const { data_->state->check_thread(); return !data_->target || !data_->state->engine; }
-void OffscreenTarget::close() {
+RenderTarget::RenderTarget(std::shared_ptr<detail::TargetData> data) : data_(std::move(data)) {}
+uint32_t RenderTarget::width() const { data_->check(); return data_->width; }
+uint32_t RenderTarget::height() const { data_->check(); return data_->height; }
+bool RenderTarget::closed() const { data_->state->check_thread(); return !data_->target || !data_->state->engine; }
+void RenderTarget::close() {
     data_->state->check_thread();
     if (!data_->target || !data_->state->engine) return;
     data_->release();
@@ -2641,7 +2989,7 @@ struct ReadbackData {
     std::chrono::steady_clock::time_point start;
 };
 }
-Readback OffscreenTarget::begin_read() const {
+Readback RenderTarget::begin_read() const {
     auto state = data_->state;
     data_->check();
     if (!data_->rendered) throw FillyError("Render to the target before reading it");
@@ -2689,7 +3037,7 @@ std::vector<uint8_t> Readback::take() {
     auto pixels = take_pixels(*data_);
     return std::vector<uint8_t>(pixels.data.get(), pixels.data.get() + pixels.size);
 }
-PixelBuffer OffscreenTarget::read() const {
+PixelBuffer RenderTarget::read() const {
     auto readback = begin_read();
 #if defined(__EMSCRIPTEN__)
     if (!readback.ready())

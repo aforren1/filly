@@ -33,9 +33,11 @@ def main():
         scene.background = (*background, 1)
         if args.fog:
             scene.fog = True
-            scene.set_fog_options(color=background, density=0.08, start=2)
-        camera = scene.create_camera()
-        camera.set_perspective(fov_y=40, near=0.1, far=50)
+            scene.fog_color = background
+            scene.fog_density = 0.08
+            scene.fog_start = 2
+        camera = renderer.create_camera()
+        camera.set_perspective(fov_y_deg=40)
         camera.position = (0, 1.6, 4.5)
         camera.look_at((0, 0.2, 0))
         scene.camera = camera

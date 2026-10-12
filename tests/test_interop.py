@@ -70,13 +70,13 @@ def test_shared_texture_roundtrip_and_ownership(host, triangle_glb):
     window, texture, gl = host
     with filly.Renderer(shared_context=filly.current_gl_context()) as renderer:
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
         scene.camera = camera
         model = scene.load(triangle_glb)
-        target = renderer.import_gl_texture(texture.value, width=64, height=64)
+        target = renderer.import_gl_target(texture.value, width=64, height=64)
         assert isinstance(target, filly.ImportedTarget) and not hasattr(target, "read")
         for color in [(1, 0, 0, 1), (0, 1, 0, 1), (0, 0, 1, 1)] * 4:
             model.material("red").base_color = color
@@ -106,12 +106,12 @@ def test_shared_texture_holds_srgb_bytes(host, triangle_glb):
     window, texture, gl = host
     with filly.Renderer(shared_context=filly.current_gl_context()) as renderer:
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(height=2, near=0.1, far=10)
         camera.position = (0, 0, 3)
         scene.camera = camera
         model = scene.load(triangle_glb)
-        target = renderer.import_gl_texture(texture.value, width=64, height=64)
+        target = renderer.import_gl_target(texture.value, width=64, height=64)
         for encoding, expected in (("srgb", 188), ("linear", 128)):
             scene.encoding = encoding
             model.material("red").base_color = (0.5, 0.5, 0.5, 1)
@@ -130,14 +130,14 @@ def test_shared_texture_matches_transfer_function(host, triangle_glb, encoding, 
     window, texture, gl = host
     with filly.Renderer(shared_context=filly.current_gl_context()) as renderer:
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(height=2, near=0.1, far=10)
         camera.position = (0, 0, 3)
         scene.camera = camera
         scene.encoding = encoding
         scene.output_path = path
         material = scene.load(triangle_glb).material("red")
-        target = renderer.import_gl_texture(texture.value, width=64, height=64)
+        target = renderer.import_gl_target(texture.value, width=64, height=64)
         actual = []
         for value in SWEEP:
             material.base_color = (value, value, value, 1)
@@ -174,7 +174,7 @@ def mutable(host):
 
 def grey_scene(renderer, triangle_glb):
     scene = renderer.create_scene()
-    camera = scene.create_camera()
+    camera = renderer.create_camera()
     camera.set_orthographic(height=2, near=0.1, far=10)
     camera.position = (0, 0, 3)
     scene.camera = camera
@@ -186,7 +186,7 @@ def test_mutable_texture_imports_on_the_default_path(mutable, triangle_glb):
     texture, gl = mutable
     with filly.Renderer(shared_context=filly.current_gl_context()) as renderer:
         scene = grey_scene(renderer, triangle_glb)
-        target = renderer.import_gl_texture(texture.value, width=64, height=64)
+        target = renderer.import_gl_target(texture.value, width=64, height=64)
         for encoding, path, expected in (("srgb", "exact", 188), ("linear", "exact", 128),
                                          ("linear", "direct", 128)):
             scene.encoding = encoding
@@ -204,7 +204,7 @@ def test_direct_srgb_output_rejects_a_mutable_texture(mutable, triangle_glb):
     with filly.Renderer(shared_context=filly.current_gl_context()) as renderer:
         scene = grey_scene(renderer, triangle_glb)
         scene.output_path = "direct"
-        target = renderer.import_gl_texture(texture.value, width=64, height=64)
+        target = renderer.import_gl_target(texture.value, width=64, height=64)
         with pytest.raises(filly.InteropError, match="output_path 'direct'.*glTexStorage2D"):
             renderer.render(scene, target)
         # The failed call changed nothing: the target still renders on the default path.
@@ -223,19 +223,19 @@ def test_import_validation(host):
         filly.Renderer(shared_context=0)
     with filly.Renderer(shared_context=filly.current_gl_context()) as renderer:
         with pytest.raises(filly.InteropError):
-            renderer.import_gl_texture(0, width=64, height=64)
+            renderer.import_gl_target(0, width=64, height=64)
         with pytest.raises(filly.InteropError):
-            renderer.import_gl_texture(texture.value, width=63, height=64)
+            renderer.import_gl_target(texture.value, width=63, height=64)
         with pytest.raises(ValueError, match="whole number"):
-            renderer.import_gl_texture(texture.value, width=64.5, height=64)
+            renderer.import_gl_target(texture.value, width=64.5, height=64)
         with pytest.raises(ValueError, match="from 1 through 8192, got 0x64"):
-            renderer.import_gl_texture(texture.value, width=0, height=64)
+            renderer.import_gl_target(texture.value, width=0, height=64)
         with pytest.raises(ValueError, match="format must be 'rgba8'"):
-            renderer.import_gl_texture(texture.value, width=64, height=64, format="rgb8")
-        numeric = renderer.import_gl_texture(texture.value, width=np.int64(64), height=64.0)
+            renderer.import_gl_target(texture.value, width=64, height=64, format="rgb8")
+        numeric = renderer.import_gl_target(texture.value, width=np.int64(64), height=64.0)
         assert (numeric.width, numeric.height) == (64, 64)
         numeric.close()
-        target = renderer.import_gl_texture(texture.value, width=64, height=64)
+        target = renderer.import_gl_target(texture.value, width=64, height=64)
         with pytest.raises(filly.InteropError, match="Render to the target"):
             with target.acquire():
                 pass
@@ -261,13 +261,13 @@ def test_queued_host_sampling_before_texture_reuse(host, triangle_glb, source):
     try:
         with filly.Renderer(shared_context=filly.current_gl_context()) as renderer:
             scene = renderer.create_scene()
-            camera = scene.create_camera()
+            camera = renderer.create_camera()
             camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
             camera.position = (0, 0, 3)
             camera.look_at((0, 0, 0))
             scene.camera = camera
             material = scene.load(triangle_glb).material("red") if source == "material" else None
-            target = renderer.import_gl_texture(texture.value, width=64, height=64)
+            target = renderer.import_gl_target(texture.value, width=64, height=64)
             gl.glUseProgram(0)
             gl.glDisable(gl.GL_DEPTH_TEST)
             gl.glDisable(gl.GL_BLEND)

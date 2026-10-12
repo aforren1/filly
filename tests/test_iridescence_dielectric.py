@@ -20,12 +20,13 @@ def test_dielectric_thin_film_palette(triangle_glb):
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
         scene.tone_mapping = "aces_legacy"
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
         scene.camera = camera
-        scene.set_environment(np.ones((16, 32, 3), dtype=np.float32), intensity=30000)
+        scene.environment = renderer.create_environment(np.ones((16, 32, 3), dtype=np.float32))
+        scene.environment_intensity = 30000
         target = renderer.create_render_target(width=32, height=32)
 
         def sample(thickness, factor):

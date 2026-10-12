@@ -21,7 +21,7 @@ def render(renderer, scene, width, height):
 def test_perspective_follows_target_aspect(renderer, scene, kind):
     camera = scene.camera
     if kind == "perspective":
-        camera.set_perspective(fov_y=45, near=0.1, far=10)
+        camera.set_perspective(fov_y_deg=45, near=0.1, far=10)
     else:
         camera.set_lens_projection(focal_length_mm=28, near=0.1, far=10)
     # Before any render the fitted projection uses aspect 1.
@@ -35,7 +35,7 @@ def test_perspective_follows_target_aspect(renderer, scene, kind):
     assert tall[0, 0] == pytest.approx(tall[1, 1] * 3)
     # An explicit aspect wins over the target.
     if kind == "perspective":
-        camera.set_perspective(fov_y=45, aspect=1, near=0.1, far=10)
+        camera.set_perspective(fov_y_deg=45, aspect=1, near=0.1, far=10)
     else:
         camera.set_lens_projection(focal_length_mm=28, aspect=1, near=0.1, far=10)
     render(renderer, scene, 64, 32)
@@ -80,7 +80,7 @@ def test_orthographic_arguments(scene, arguments, message):
 @pytest.mark.parametrize("aspect", [0, -1, float("nan")])
 def test_explicit_aspect_must_be_positive(scene, aspect):
     with pytest.raises(ValueError, match="aspect"):
-        scene.camera.set_perspective(fov_y=45, aspect=aspect, near=0.1, far=10)
+        scene.camera.set_perspective(fov_y_deg=45, aspect=aspect, near=0.1, far=10)
 
 
 @pytest.mark.parametrize("authored", [None, 1.0])
@@ -101,4 +101,4 @@ def test_imported_camera_without_aspect_follows_target(renderer, triangle_glb, a
     expected = 1.0 if authored else 0.5
     assert projection[0, 0] == pytest.approx(projection[1, 1] * expected)
     with pytest.raises(filly.FillyError, match="glTF projection"):
-        camera.set_perspective(fov_y=45, near=0.1, far=10)
+        camera.set_perspective(fov_y_deg=45, near=0.1, far=10)

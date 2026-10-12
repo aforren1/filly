@@ -132,16 +132,19 @@ def test_pointer_uses_material_index_and_reaches_node_local_copy(triangle_glb):
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("clone", [False, True])
-def test_node_local_copy_edits_follow_the_animation_rule(renderer, scene, triangle_glb, clone):
+@pytest.mark.parametrize("second", [False, True])
+def test_node_local_copy_edits_follow_the_animation_rule(renderer, scene, triangle_glb, second):
     """Animated properties overwrite edits to a copy; edits to other properties persist."""
     doc, binary = unpack(triangle_glb)
     lit(doc)
     doc["materials"][0]["pbrMetallicRoughness"].update(baseColorFactor=[1, 0, 0, 1], metallicFactor=0.2, roughnessFactor=0.9)
     add_clip(doc, binary, "/materials/0/pbrMetallicRoughness/baseColorFactor", [1, 0, 0, 1, 0, 0, 1, 1], kind="VEC4")
     add_clip(doc, binary, "/materials/0/pbrMetallicRoughness/metallicFactor", [0.4, 0.8])
-    source = scene.load(pack(doc, binary), strict=True, clonable=clone)
-    model = source.clone() if clone else source
+    if second:
+        asset = renderer.load_asset(pack(doc, binary), strict=True)
+        source, model = scene.add(asset), scene.add(asset)
+    else:
+        source = model = scene.load(pack(doc, binary), strict=True)
     shared = model.material("red")
     local = model.node("triangle").material()
     local.base_color = (1, 1, 0, 1)
@@ -164,8 +167,8 @@ def test_node_local_copy_edits_follow_the_animation_rule(renderer, scene, triang
     np.testing.assert_allclose(local.base_color, [1, 0, 0, 1])
     assert local.metallic == pytest.approx(0.2)
     assert local.roughness == pytest.approx(0.3)
-    if clone:
-        # The source instance and its own materials are separate.
+    if second:
+        # The first model and its own materials are separate.
         np.testing.assert_allclose(source.material("red").base_color, [1, 0, 0, 1])
         assert source.material("red").metallic == pytest.approx(0.2)
 
@@ -233,7 +236,6 @@ def test_extended_material_tracks(renderer, scene, triangle_glb, path, start, en
     extensions = doc["materials"][0].get("extensions", {})
     if any(key in path for key in ("transmission", "volume", "dispersion")) and "diffuse" not in path:
         extensions.setdefault("KHR_materials_transmission", {"transmissionFactor": 0.5})
-        scene.refraction = True
         scene.tone_mapping = "aces_legacy"
     if "dispersion" in path:
         extensions["KHR_materials_volume"] = {"thicknessFactor": 1}

@@ -114,7 +114,7 @@ def _plane_scene(renderer, texture=None, base_color=(1, 1, 1, 1)):
     model = scene.create_mesh(**filly.shapes.plane(2, 2), unlit=True, base_color=base_color)
     if texture is not None:
         model.material("mesh").base_color_texture = texture
-    camera = scene.create_camera()
+    camera = renderer.create_camera()
     camera.set_orthographic(height=2, near=0.1, far=10)
     camera.position = (0, 0, 1)
     camera.look_at((0, 0, 0))
@@ -176,7 +176,7 @@ def test_single_channel_texture(page_results):
     assert not entry["ok"] and "swizzle" in entry["error"].lower(), entry
 
 
-def test_host_textures(page_results):
+def test_imported_textures(page_results):
     # 128 stored linear is sRGB level 188; 128 stored as sRGB is level 128.
     assert _value(page_results, "host_linear") == {"center": [188, 188, 188, 255], "isHost": True,
                                                    "colorSpace": "linear"}
@@ -184,7 +184,9 @@ def test_host_textures(page_results):
 
 
 def test_material_texture_slots(page_results):
-    assert _value(page_results, "material_texture_slots") == {"base": True, "emissive": None, "cleared": None}
+    assert _value(page_results, "material_texture_slots") == {
+        "base": True, "emissive": None, "offset": [0.5, 0], "scale": [0.5, 1], "rotationDeg": 0,
+        "emissiveOffset": None, "cleared": None, "clearedOffset": None}
 
 
 def test_mesh_update(page_results):
@@ -214,13 +216,14 @@ def test_lit_box_matches_desktop(page_results):
         scene.background = (0.1, 0.2, 0.3, 1)
         model = scene.create_mesh(**filly.shapes.box(), base_color=(0.8, 0.5, 0.2, 1), roughness=0.6)
         model.rotation_euler_deg = (20, 35, 0)
-        camera = scene.create_camera()
-        camera.set_perspective(fov_y=35, near=0.5, far=10)
+        camera = renderer.create_camera()
+        camera.set_perspective(fov_y_deg=35, near=0.5, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
         scene.camera = camera
         scene.add_directional_light(direction=(-1, -2, -1), intensity=80000)
-        scene.set_environment(np.ones((8, 16, 3), np.float32), intensity=15000)
+        scene.environment = renderer.create_environment(np.ones((8, 16, 3), np.float32))
+        scene.environment_intensity = 15000
         desktop = _render(renderer, scene, 160, 120)
     # Flat 3 x 3 neighborhoods match within one level; edges rasterize differently.
     padded = np.pad(desktop, ((1, 1), (1, 1), (0, 0)), mode="edge")
@@ -232,7 +235,7 @@ def test_lit_box_matches_desktop(page_results):
     assert (difference > 1).mean() < 0.05
 
 
-def test_model_tree_and_clone(page_results):
+def test_model_tree_and_asset(page_results):
     value = _value(page_results, "model_tree")
     assert value["names"] == ["root", "triangle", "front"]
     assert value["indices"] == [0, 1, 2]
@@ -243,9 +246,9 @@ def test_model_tree_and_clone(page_results):
     assert value["sameNode"] is True and value["differentNode"] is False
     assert value["cameraNode"] == "front" and value["sceneCameraNode"] is None
     assert value["morphTargets"] == 0
-    assert value["rotationEulerRad"] == [0, 0, 0]
-    assert value["cloneLiveModels"] == value["liveModels"] + 1
-    assert value["clonePosition"] == [1, 0, 0] and value["originalPosition"] == [0, 0, 0]
+    assert value["rotationEulerDeg"] == [0, 0, 0]
+    assert value["addedLiveModels"] == value["liveModels"] + 1
+    assert value["addedPosition"] == [1, 0, 0] and value["originalPosition"] == [0, 0, 0]
     assert value["afterCloseLiveModels"] == value["liveModels"]
 
 
@@ -258,6 +261,13 @@ def test_scene_effects(page_results):
     for name in ("ssao", "bloom", "fog", "depthOfField", "vignette"):
         assert value[name] is True, name
     assert value["focusDistance"] == 2.5 and value["aperture"] == 4
+    assert value["fogColor"] == [1, 0, 0] and value["fogDensity"] == 0.5 and value["fogStart"] == 0
+    assert value["vignetteMidpoint"] == 0.25 and value["vignetteColor"] == [0, 0, 0]
+    assert (value["vignetteRoundness"], value["vignetteFeather"]) == (0.5, 0.5)
+    assert value["environmentIntensity"] == 30000 and value["environmentRotationDeg"] == 0
+    assert value["lights"] == {"pointDirection": None, "pointRange": 10, "sunPosition": None, "sunRange": None,
+                               "sunCone": None, "spotCone": [15, 30], "spotShadow": [1024, 0.5],
+                               "spotConeAfter": [10, 20]}
     # Dense red fog covers the box at the center.
     red, green, blue, alpha = value["center"]
     assert red > 200 and green < 60 and blue < 60 and alpha == 255
@@ -266,9 +276,21 @@ def test_scene_effects(page_results):
 def test_errors(page_results):
     value = _value(page_results, "errors")
     assert value["caught"] == {"badBytes": "AssetError", "badFill": "RangeError", "badMesh": "RangeError",
-                               "badSlot": "RangeError", "badUpdate": "RangeError", "missingUrl": "AssetError"}
+                               "noTexture": "FillyError", "lightLacks": "RangeError", "badUpdate": "RangeError",
+                               "missingUrl": "AssetError"}
     assert value["assetIsFilly"] is True
     assert value["unknownMaterial"] == "Unknown material 'wood'; the model has: 'mesh'"
+
+
+def test_camera_defaults(page_results):
+    value = _value(page_results, "camera_defaults")
+    # fill 0.5 of the 64-pixel height, although frame() ran before the first render.
+    assert abs(value["across"] - 32) <= 1 and abs(value["down"] - 32) <= 1, value
+    assert value["keptNear"] == pytest.approx(0.5, rel=1e-4)
+    assert value["errors"] == {
+        "none": "Scene has no camera. Set scene.camera, or pass camera= to render()",
+        "closed": "Scene has no camera: its camera was closed. Set scene.camera, or pass camera= to render()",
+    }
 
 
 def test_handover(handover_results):
@@ -294,17 +316,31 @@ def test_handover(handover_results):
 def test_model_cache(page_results):
     value = _value(page_results, "model_cache")
     size = len(tree_glb())
-    assert value["decided"] == size and value["fetchedBytes"] == size
-    memory = value["memory"]
-    assert memory["models"] == 2 and memory["gpuTextureBytes"] == 0
+    assert value["fetchedBytes"] == size
+    kept, memory = value["kept"], value["memory"]
+    assert kept["models"] == 0 and memory["models"] == 2 and memory["gpuTextureBytes"] == 0
     assert memory["gpuBytes"] == memory["gpuTextureBytes"] + memory["gpuGeometryBytes"] > 0
-    # The clonable asset keeps its document.
+    # The open asset keeps its document.
     assert memory["cpuBytes"] >= size
     with filly.Renderer() as renderer:
-        desktop = renderer.create_scene().load(tree_glb(), clonable=True).memory
+        asset = renderer.load_asset(tree_glb())
+        scene = renderer.create_scene()
+        scene.add(asset)
+        scene.add(asset)
+        desktop = asset.memory
     # The parse's size differs: WebAssembly has 4-byte pointers.
     assert memory["gpuBytes"] == desktop.gpu_bytes
-    # Closing the prototype's scene keeps the clone in the other scene.
-    assert value["prototypeClosed"] is True and value["cloneClosed"] is False
+    # Closing one scene keeps the asset and the model in the other scene.
+    assert value["firstClosed"] is True
     assert value["modelsAfterClose"] == 1 and value["againModels"] == 2
+    # Closing the asset releases its source data; its models stay.
+    assert value["assetClosed"] is True
+    assert value["afterAssetClose"]["models"] == 2 and value["afterAssetClose"]["cpuBytes"] < size
     assert value["liveAfter"] == value["liveModels"] - 2
+
+
+def test_environment(page_results):
+    value = _value(page_results, "environment")
+    assert value["defaults"] == {"environment": None, "intensity": 30000, "rotationDeg": 0}
+    assert value["shared"] is True and value["intensities"] == [30000, 15000]
+    assert value["afterClose"] == [None, None, True]

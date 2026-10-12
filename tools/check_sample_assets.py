@@ -107,7 +107,6 @@ def worker(path, output, mode, *, lighting="auto", view=None, projection=None, h
             with filly.Renderer() as renderer:
                 scene = renderer.create_scene()
                 scene.background = (0.15, 0.15, 0.15, 1)
-                scene.refraction = True
                 scene.antialiasing = "fxaa"
                 scene.tone_mapping = "aces_legacy"
                 model = scene.load(path)
@@ -123,7 +122,7 @@ def worker(path, output, mode, *, lighting="auto", view=None, projection=None, h
                     camera = next((c for c in cameras if c.node.name and names.count(c.node.name) == 1), cameras[0])
                     camera_name = camera.node.name or f"camera node {camera.node.index}"
                 else:
-                    camera, camera_name = scene.create_camera(), None
+                    camera, camera_name = renderer.create_camera(), None
                 aspect = 1
                 if imported:
                     node = document["nodes"][camera.node.index]
@@ -134,9 +133,9 @@ def worker(path, output, mode, *, lighting="auto", view=None, projection=None, h
                         aspect = camera_projection["orthographic"]["xmag"] / camera_projection["orthographic"]["ymag"]
                 elif projection == "orthographic":
                     # frame() sets the height and the clipping planes for each view.
-                    camera.set_orthographic(height=1, near=1, far=2)
+                    camera.set_orthographic(height=1)
                 else:
-                    camera.set_perspective(fov_y=45, near=1, far=2)
+                    camera.set_perspective(fov_y_deg=45)
                 result["camera"] = camera_name if imported else "fitted"
                 scene.camera = camera
                 asset_lights = bool(model.lights) and lighting == "auto"
@@ -153,7 +152,8 @@ def worker(path, output, mode, *, lighting="auto", view=None, projection=None, h
                 panorama[6:20, 42:50] = (1.5, 1.8, 2.2)
                 # Authored lighting tests can depend on darkness away from their lights.
                 if not asset_lights:
-                    scene.set_environment(panorama, intensity=30000)
+                    scene.environment = renderer.create_environment(panorama)
+                    scene.environment_intensity = 30000
                 target = renderer.create_render_target(width=max(1, round(height*aspect)), height=height)
                 result["animations"] = [{"name": a.name, "duration": a.duration} for a in model.animations]
                 result["variants"] = model.variants
@@ -171,7 +171,7 @@ def worker(path, output, mode, *, lighting="auto", view=None, projection=None, h
                         # The fills of the earlier fits: a 2.3-radius orthographic height, and a
                         # 45-degree view from 3 radii.
                         fill = 1 / 1.15 if projection == "orthographic" else math.tan(math.asin(1 / 3)) / math.tan(math.radians(22.5))
-                        camera.frame(model, fill=fill, direction=-direction, aspect=aspect)
+                        camera.frame(model, fill=fill, direction=-direction)
                     renderer.render(scene, target)
                     pixels = target.read()
                     image = output / f"view-{index}.png"

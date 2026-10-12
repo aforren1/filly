@@ -50,6 +50,10 @@ void commit_properties(ModelData& model) {
         lights.setSpotLightCone(instance, cone.value[0], cone.value[1]);
         // glTF keeps candela constant when the cone changes, not total luminous flux.
         lights.setIntensityCandela(instance, intensity);
+        const auto found = std::find(model.lights.begin(), model.lights.end(), cone.entity);
+        if (found == model.lights.end()) continue;
+        auto& degrees = model.spot_cones[size_t(found - model.lights.begin())];
+        for (size_t k = 0; k < 2; ++k) degrees[k] = cone.value[k] * float(180.0 / 3.141592653589793);
     }
 }
 

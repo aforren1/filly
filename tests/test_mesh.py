@@ -28,8 +28,8 @@ def render(renderer, scene, size=SIZE):
 
 def perspective_scene(renderer):
     scene = renderer.create_scene()
-    camera = scene.create_camera()
-    camera.set_perspective(fov_y=45, near=0.1, far=20)
+    camera = renderer.create_camera()
+    camera.set_perspective(fov_y_deg=45, near=0.1, far=20)
     camera.position = (0, 0, 3)
     camera.look_at((0, 0, 0))
     scene.camera = camera
@@ -188,26 +188,6 @@ def test_lit_update_with_same_arrays_is_identical(renderer):
         sphere.update_mesh(positions=shape["positions"])
         np.testing.assert_array_equal(render(renderer, scene), first)
         sphere.close()
-
-
-def test_clones_share_geometry(renderer, scene):
-    shape = filly.shapes.plane(0.5, 0.5)
-    plane = scene.create_mesh(**shape, unlit=True, alpha_mode="blend", base_color=(0, 1, 0, 1))
-    clone = plane.clone()
-    clone.position = (0.5, 0, 0)
-    image = render(renderer, scene)
-    assert image[16, 16, 1] == 255 and image[16, 24, 1] == 255 and image[16, 8, 1] == 0
-    plane.update_mesh(positions=shape["positions"] - np.float32([0.5, 0, 0]))
-    image = render(renderer, scene)
-    # Both instances moved left by 0.5 units, 8 pixels.
-    assert image[16, 8, 1] == 255 and image[16, 16, 1] == 255 and image[16, 24, 1] == 0
-    clone.material("mesh").base_color = (1, 0, 0, 1)
-    image = render(renderer, scene)
-    np.testing.assert_array_equal(image[16, 8], [0, 255, 0, 255])
-    np.testing.assert_array_equal(image[16, 16], [255, 0, 0, 255])
-    plane.close()
-    assert clone.node("mesh").mesh_name == "mesh"
-    np.testing.assert_array_equal(render(renderer, scene)[16, 16], [255, 0, 0, 255])
 
 
 def test_invalid_meshes(scene):

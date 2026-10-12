@@ -1,14 +1,13 @@
 """Shared-texture integration for a plain pyglet window on Windows/WGL and Linux/GLX."""
 
-import ctypes
-
 from pyglet import gl
 
 from .. import InteropError, current_gl_context
-from .._native import _create_host_texture, _delete_host_texture
-from ._host import HostTarget, shared_renderer
+from .._native import (_create_host_quad, _create_host_texture, _delete_host_quad, _delete_host_texture,
+                       _draw_host_quad)
+from ._host import HostTargetBase, shared_renderer
 
-__all__ = ["SharedTarget", "create_renderer"]
+__all__ = ["HostTarget", "create_renderer"]
 
 
 def _is_open(window):
@@ -28,17 +27,17 @@ def create_renderer(window):
     return shared_renderer("pyglet")
 
 
-class SharedTarget(HostTarget):
+class HostTarget(HostTargetBase):
     """A pyglet-window RGBA8 texture that Filament renders into.
 
-    ``draw()`` blits into the bound draw framebuffer. The blit copies premultiplied
-    RGBA without blending, obeys the scissor test, and cannot write to a multisampled
-    framebuffer.
+    ``texture`` is the GL texture name (int), 0 after close. The size defaults to the
+    window's framebuffer size. ``draw()`` draws a quad into the bound draw framebuffer.
     """
 
-    texture = _framebuffer = gl.GLuint()
+    texture = 0
+    _quad = None
 
-    def __init__(self, renderer, window, width, height):
+    def __init__(self, renderer, window, *, width=None, height=None):
         self._window = window
         super().__init__(renderer, width, height)
 
@@ -53,35 +52,20 @@ class SharedTarget(HostTarget):
             return
         _current(self._window)
 
-    def _create_host_texture(self, width, height):
-        self.texture = gl.GLuint(_create_host_texture(width, height))
-        # Framebuffer objects are per context, so the host needs its own to blit from.
-        self._framebuffer, read = gl.GLuint(), gl.GLint()
-        gl.glGetIntegerv(gl.GL_READ_FRAMEBUFFER_BINDING, ctypes.byref(read))
-        gl.glGenFramebuffers(1, ctypes.byref(self._framebuffer))
-        try:
-            gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, self._framebuffer)
-            gl.glFramebufferTexture2D(gl.GL_READ_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0,
-                                      gl.GL_TEXTURE_2D, self.texture, 0)
-        finally:
-            gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, read.value)
-        return self.texture.value
+    def _default_size(self):
+        return self._window.get_framebuffer_size()
 
-    def _draw(self, x, y, width, height):
-        source = self.width, self.height
-        read = gl.GLint()
-        gl.glGetIntegerv(gl.GL_READ_FRAMEBUFFER_BINDING, ctypes.byref(read))
-        try:
-            gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, self._framebuffer)
-            scaled = (width, height) != source
-            gl.glBlitFramebuffer(0, 0, source[0], source[1], x, y, x + width, y + height,
-                                 gl.GL_COLOR_BUFFER_BIT, gl.GL_LINEAR if scaled else gl.GL_NEAREST)
-        finally:
-            gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, read.value)
+    def _create_host_texture(self, width, height):
+        self.texture = _create_host_texture(width, height)
+        self._quad = _create_host_quad()
+        return self.texture
+
+    def _draw(self, x, y, width, height, blend):
+        _draw_host_quad(self._quad, self.texture, x, y, width, height, blend)
 
     def _release_host_resources(self, host_open):
-        if host_open and self._framebuffer.value:
-            gl.glDeleteFramebuffers(1, ctypes.byref(self._framebuffer))
         if host_open:
-            _delete_host_texture(self.texture.value)
-        self._framebuffer, self.texture = gl.GLuint(), gl.GLuint()
+            if self._quad is not None:
+                _delete_host_quad(self._quad)
+            _delete_host_texture(self.texture)
+        self.texture, self._quad = 0, None

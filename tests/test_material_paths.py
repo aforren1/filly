@@ -31,7 +31,7 @@ def render_sphere(asset, size=96):
     """Sun, IBL, and a curved surface: every lobe contributes to some pixel."""
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
@@ -39,7 +39,8 @@ def render_sphere(asset, size=96):
         scene.add_directional_light(direction=(-0.5, -0.6, -1), intensity=80000)
         panorama = np.linspace(0.2, 1.5, 16, dtype=np.float32)[:, None, None] * np.ones((16, 32, 3), np.float32)
         panorama[3:7, 4:12] = (3, 2.5, 2)
-        scene.set_environment(panorama, intensity=20000)
+        scene.environment = renderer.create_environment(panorama)
+        scene.environment_intensity = 20000
         model = scene.load(asset, strict=True)
         target = renderer.create_render_target(width=size, height=size)
         renderer.render(scene, target)
@@ -68,7 +69,7 @@ def render_rim(asset, size=64):
     """A point light behind the sphere: specular highlights at grazing angles, where F90 matters."""
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
@@ -129,7 +130,7 @@ def emissive_triangle(extensions):
 def render_center(asset):
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
@@ -163,32 +164,35 @@ def emissive_only(factor, strength=None):
     return pack(doc, binary)
 
 
-def render_emission(asset, clone=False):
+def render_emission(document, second=False):
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         camera.look_at((0, 0, 0))
         scene.camera = camera
-        model = scene.load(asset, strict=True, clonable=clone)
-        if clone:
-            model.visible = False
-            model.clone()
+        if second:
+            # The second model of an asset initializes its materials again.
+            asset = renderer.load_asset(document, strict=True)
+            scene.add(asset).visible = False
+            scene.add(asset)
+        else:
+            scene.load(document, strict=True)
         target = renderer.create_render_target(width=16, height=16)
         renderer.render(scene, target)
         return target.read()[8, 8].astype(int)
 
 
-@pytest.mark.parametrize("clone", [False, True])
-def test_emissive_strength_applies_once(clone):
+@pytest.mark.parametrize("second", [False, True])
+def test_emissive_strength_applies_once(second):
     """KHR_materials_emissive_strength scales emissiveFactor once, as the extension specifies.
 
     gltfio 1.77.1 applies it twice (factor 0.05 with strength 4 rendered like 0.8); gltf_viewer
     shows the same squared result, so this is an intended divergence from it.
     """
-    scaled = render_emission(emissive_only((0.05, 0.1, 0.02), strength=4), clone=clone)
-    plain = render_emission(emissive_only((0.2, 0.4, 0.08)), clone=clone)
+    scaled = render_emission(emissive_only((0.05, 0.1, 0.02), strength=4), second=second)
+    plain = render_emission(emissive_only((0.2, 0.4, 0.08)), second=second)
     np.testing.assert_allclose(scaled, plain, atol=1)
     assert scaled[1] > scaled[2] + 20
 

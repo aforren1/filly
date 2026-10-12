@@ -120,7 +120,7 @@ def test_direct_path_matches_transfer_function(renderer, scene, triangle_glb, en
 
 # Options that do not change a flat unlit image. Each one alone must leave every stored level
 # of the sweep unchanged: the same encode pass writes every configuration.
-UNRELATED = [("antialiasing", "fxaa"), ("msaa", 4), ("refraction", True), ("shadows", True),
+UNRELATED = [("antialiasing", "fxaa"), ("msaa", 4), ("shadows", True),
              ("ssao", True), ("transparent", True), ("tone_mapping", "linear")]
 
 
@@ -130,7 +130,7 @@ def test_sweep_is_identical_with_other_options(renderer, triangle_glb, encoding,
     images = []
     for enabled in (False, True):
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         scene.camera = camera
@@ -186,7 +186,7 @@ def render_image(renderer, scene, size=SIZE):
 def flat_scene(renderer, color):
     """A plane that fills the view: a flat field with no edge."""
     scene = renderer.create_scene()
-    camera = scene.create_camera()
+    camera = renderer.create_camera()
     camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
     camera.position = (0, 0, 3)
     scene.camera = camera
@@ -215,7 +215,7 @@ def test_shadows_do_not_change_an_unshadowed_lit_scene(renderer, triangle_glb):
     images = []
     for shadows in (False, True):
         scene = renderer.create_scene()
-        camera = scene.create_camera()
+        camera = renderer.create_camera()
         camera.set_orthographic(left=-1, right=1, bottom=-1, top=1, near=0.1, far=10)
         camera.position = (0, 0, 3)
         scene.camera = camera
@@ -298,13 +298,31 @@ def test_direct_output_rejects_mask(renderer, scene, triangle_glb):
     with pytest.raises(ValueError, match="MASK"):
         scene.output_path = "direct"
     assert scene.output_path == "exact"
+
+
+def test_direct_output_rejects_refraction_materials(renderer, scene):
+    """Transmission and volume materials sample Filament's refraction pass."""
+    from test_refraction import striped_glass
+    glass = striped_glass(volume=True)
+    asset = renderer.load_asset(glass)
+    scene.output_path = "direct"
+    with pytest.raises(filly.AssetError, match="refraction.*output_path is 'direct'"):
+        scene.load(glass)
+    with pytest.raises(filly.AssetError, match="refraction"):
+        scene.add(asset)
+    scene.output_path = "exact"
+    model = scene.add(asset)
+    with pytest.raises(ValueError, match="refraction"):
+        scene.output_path = "direct"
+    model.close()
+    scene.output_path = "direct"
     model.close()
     scene.output_path = "direct"
 
 
 # Every scene option that the direct path cannot render, with a value that turns it on.
 EXACT_OPTIONS = [("tone_mapping", "aces"), ("antialiasing", "fxaa"), ("msaa", 4),
-                 ("refraction", True), ("transparent", True), ("dithering", True), ("ssao", True),
+                 ("transparent", True), ("dithering", True), ("ssao", True),
                  ("bloom", True), ("depth_of_field", True), ("vignette", True)]
 
 
@@ -403,7 +421,7 @@ def render_chart(renderer, tone_mapping="aces_legacy", alpha=1.0, **options):
     scene.tone_mapping = tone_mapping
     for name, value in options.items():
         setattr(scene, name, value)
-    camera = scene.create_camera()
+    camera = renderer.create_camera()
     camera.set_orthographic(left=-CHART_COLUMNS / 2, right=CHART_COLUMNS / 2,
                             bottom=-CHART_ROWS / 2, top=CHART_ROWS / 2, near=0.1, far=10)
     camera.position = (0, 0, 3)

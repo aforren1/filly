@@ -149,9 +149,9 @@ void Texture::commit_update() {
     upload(*data_, slot->bytes.get(), &detail::Staging::done, slot);
 }
 
-HostTexture Renderer::import_gl_input(uint32_t texture, int64_t width, int64_t height,
-                                      const std::string& space, const std::string& filter,
-                                      const std::string& wrap) {
+ImportedTexture Renderer::import_gl_texture(uint32_t texture, int64_t width, int64_t height,
+                                            const std::string& space, const std::string& filter,
+                                            const std::string& wrap) {
     state_->check();
     if (!state_->interop->shared()) throw InteropError("Create the renderer with shared_context first");
     check_target(width, height, "rgba8");
@@ -179,19 +179,19 @@ HostTexture Renderer::import_gl_input(uint32_t texture, int64_t width, int64_t h
         .usage(T::Usage::SAMPLEABLE).import(name).build(*state_->engine);
     if (!data->texture) throw FillyError("Could not import the host texture");
     state_->host_inputs.push_back(data.get());
-    return HostTexture(data);
+    return ImportedTexture(data);
 }
 
-bool is_host_texture(const std::shared_ptr<detail::TextureData>& data) { return data && data->host; }
-HostTexture::HostTexture(std::shared_ptr<detail::TextureData> data) : data_(std::move(data)) {}
-uint32_t HostTexture::width() const { data_->check(); return data_->width; }
-uint32_t HostTexture::height() const { data_->check(); return data_->height; }
-std::string HostTexture::color_space() const { data_->check(); return data_->srgb ? "srgb" : "linear"; }
-bool HostTexture::writing() const { data_->state->check_thread(); return data_->writing; }
-bool HostTexture::same(const HostTexture& other) const { return data_ == other.data_; }
-uintptr_t HostTexture::key() const { return reinterpret_cast<uintptr_t>(data_.get()); }
-bool HostTexture::closed() const { data_->state->check_thread(); return !data_->texture || !data_->state->engine; }
-void HostTexture::begin_write() {
+bool is_imported_texture(const std::shared_ptr<detail::TextureData>& data) { return data && data->host; }
+ImportedTexture::ImportedTexture(std::shared_ptr<detail::TextureData> data) : data_(std::move(data)) {}
+uint32_t ImportedTexture::width() const { data_->check(); return data_->width; }
+uint32_t ImportedTexture::height() const { data_->check(); return data_->height; }
+std::string ImportedTexture::color_space() const { data_->check(); return data_->srgb ? "srgb" : "linear"; }
+bool ImportedTexture::writing() const { data_->state->check_thread(); return data_->writing; }
+bool ImportedTexture::same(const ImportedTexture& other) const { return data_ == other.data_; }
+uintptr_t ImportedTexture::key() const { return reinterpret_cast<uintptr_t>(data_.get()); }
+bool ImportedTexture::closed() const { data_->state->check_thread(); return !data_->texture || !data_->state->engine; }
+void ImportedTexture::begin_write() {
     data_->check();
     auto& interop = *data_->state->interop;
     interop.require_host();
@@ -203,7 +203,7 @@ void HostTexture::begin_write() {
     }
     data_->writing = true;
 }
-void HostTexture::end_write() {
+void ImportedTexture::end_write() {
     data_->check();
     if (!data_->writing) throw InteropError("end_write() requires a matching begin_write()");
     auto& interop = *data_->state->interop;
@@ -213,7 +213,7 @@ void HostTexture::end_write() {
     data_->host_done = interop.host_fence();
     data_->writing = false;
 }
-void HostTexture::close() {
+void ImportedTexture::close() {
     data_->state->check_thread();
     if (!data_->texture || !data_->state->engine) return;
     if (data_->state->interop->host_current()) data_->state->interop->finish_host();
@@ -266,17 +266,26 @@ void Material::set_texture(int slot, std::shared_ptr<detail::TextureData> textur
     }
     detail::assign_texture(*data_, index_, slot, std::move(texture));
 }
-void Material::set_texture_transform(int slot, std::array<float, 2> offset, std::array<float, 2> scale, float rotation) {
+std::optional<UvTransform> Material::texture_transform(int slot) const {
     data_->check();
     texture_slot(slot);
-    finite(offset); finite(scale); finite(rotation);
+    const auto* assignment = assignment_of(*data_, index_);
+    if (!assignment || !assignment->textures[slot]) return std::nullopt;
+    return assignment->uv[slot];
+}
+void Material::set_texture_transform(int slot, const UvTransform& value) {
+    data_->check();
+    texture_slot(slot);
+    finite(value.offset); finite(value.scale); finite(value.rotation_deg);
     auto* assignment = assignment_of(*data_, index_);
     if (!assignment || !assignment->textures[slot])
         throw FillyError("Assign a texture to this slot before setting its transform");
-    const auto matrix = g::matrixFromUvTransform(offset.data(), rotation, scale.data());
+    const float radians = value.rotation_deg * float(3.141592653589793 / 180.0);
+    const auto matrix = g::matrixFromUvTransform(value.offset.data(), radians, value.scale.data());
     auto* instance = material_instance(data_, index_, detail::texture_maps[slot]);
     instance->setParameter(detail::texture_matrices[slot], matrix);
     assignment->transforms[slot] = matrix;
+    assignment->uv[slot] = value;
 }
 
 bool Model::is_mesh() const { data_->check(); return bool(data_->shared->mesh); }

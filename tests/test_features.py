@@ -155,10 +155,11 @@ def test_environment_lights_metal(renderer, scene, triangle_glb):
     scene.load(pack(doc,binary))
     target=renderer.create_render_target(width=32,height=32)
     renderer.render(scene,target); dark=target.read()
-    scene.set_environment(np.ones((8,16,3),dtype="f"),intensity=50000)
+    scene.environment = renderer.create_environment(np.ones((8,16,3),dtype="f"))
+    scene.environment_intensity = 50000
     renderer.render(scene,target); bright=target.read()
     assert bright[16,16,0]>dark[16,16,0]+20
-    scene.clear_environment()
+    scene.environment = None
     renderer.render(scene,target)
     np.testing.assert_array_equal(dark,target.read())
 
@@ -192,7 +193,8 @@ def test_diffuse_material_occlusion_texture(renderer, scene, triangle_glb):
     Image.new("RGB", (2, 2), (0, 255, 255)).save(stream, format="PNG")
     doc["images"] = [{"uri": "data:image/png;base64," + base64.b64encode(stream.getvalue()).decode()}]
     doc["textures"] = [{"source": 0}]
-    scene.set_environment(np.ones((8, 16, 3), dtype="f"), intensity=50000)
+    scene.environment = renderer.create_environment(np.ones((8, 16, 3), dtype="f"))
+    scene.environment_intensity = 50000
     target = renderer.create_render_target(width=32, height=32)
     dark_model = scene.load(pack(doc, binary))
     renderer.render(scene, target)
@@ -343,7 +345,6 @@ def test_texture_pixels(renderer,scene,triangle_glb,encoding):
 
 @pytest.mark.parametrize("msaa,aa,tone", [(1,"none","linear"), (1,"fxaa","aces_legacy"), (4,"fxaa","aces")])
 def test_postprocessing_pixels_and_history(renderer, scene, triangle_glb, msaa, aa, tone):
-    scene.refraction = True
     scene.msaa = msaa
     scene.antialiasing = aa
     scene.tone_mapping = tone
@@ -369,10 +370,10 @@ def test_glass_reveals_geometry(renderer, scene, triangle_glb):
     doc["meshes"].append({"primitives":[{"attributes":{"POSITION":0}, "material":1}]})
     doc["nodes"].append({"mesh":1,"translation":[0,0,0.2]})
     doc["scenes"][0]["nodes"].append(1)
-    scene.refraction = True
     scene.tone_mapping = "linear"
     scene.load(pack(doc,binary))
-    scene.set_environment(np.ones((8,16,3), dtype="f"), intensity=30000)
+    scene.environment = renderer.create_environment(np.ones((8,16,3), dtype="f"))
+    scene.environment_intensity = 30000
     target = renderer.create_render_target(width=64,height=64)
     renderer.render(scene,target)
     pixel = target.read()[32,32]
@@ -441,11 +442,12 @@ def test_diffuse_transmission_environment(renderer, scene, triangle_glb):
         "diffuseTransmissionFactor":1,"diffuseTransmissionColorFactor":[1,0,0]}}
     model = scene.load(pack(doc,binary))
     target = renderer.create_render_target(width=32,height=32)
-    scene.set_environment(np.ones((8,16,3),dtype="f"),intensity=50000)
+    scene.environment = renderer.create_environment(np.ones((8,16,3),dtype="f"))
+    scene.environment_intensity = 50000
     model.node("triangle").material()
     renderer.render(scene,target); pixel = target.read()[16,16]
     assert pixel[0] > pixel[1]+20 and pixel[1] == pixel[2], pixel
-    scene.clear_environment()
+    scene.environment = None
     renderer.render(scene,target)
     assert target.read()[16,16,:3].max() == 0
 
@@ -455,7 +457,8 @@ def test_hdr_environment_file(renderer, scene, triangle_glb, tmp_path):
     scene.load(pack(doc,binary))
     path = tmp_path / "constant.hdr"
     path.write_bytes(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 4\n" + bytes([128,128,128,129])*8)
-    scene.load_environment(path,intensity=50000)
+    scene.environment = renderer.load_environment(path)
+    scene.environment_intensity = 50000
     target = renderer.create_render_target(width=32,height=32)
     renderer.render(scene,target)
     assert target.read()[16,16,0] > 20
@@ -543,7 +546,6 @@ def test_clearcoat_with_transmission_loads_strictly(triangle_glb):
     # Filament's own archive dropped transmission for clearcoat; filly's refraction entries keep both.
     with filly.Renderer() as renderer:
         scene = renderer.create_scene()
-        scene.refraction = True
         scene.tone_mapping = "aces_legacy"
         assert scene.load(pack(doc,binary),strict=True).material_names == ["red"]
 
@@ -562,7 +564,9 @@ def test_uniform_environment_matches_prefiltered(renderer, scene, triangle_glb, 
     images = []
     for nudge in (0, 1e-4):
         panorama[0, 0, 0] += nudge
-        scene.set_environment(panorama, intensity=20000, rotation_deg=30)
+        scene.environment = renderer.create_environment(panorama)
+        scene.environment_intensity = 20000
+        scene.environment_rotation_deg = 30
         renderer.render(scene, target)
         images.append(target.read().astype(int))
     uniform, prefiltered = images

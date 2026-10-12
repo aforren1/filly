@@ -60,7 +60,7 @@ class HostPainter:
 
 def textured_scene(renderer, texture):
     scene = renderer.create_scene()
-    camera = scene.create_camera()
+    camera = renderer.create_camera()
     camera.set_orthographic(height=2, near=0.1, far=10)
     camera.position = (0, 0, 3)
     camera.look_at((0, 0, 0))
@@ -75,7 +75,7 @@ def test_host_writes_reach_the_next_frame(window, path):
     renderer = create_renderer(window)
     painter = HostPainter(4)
     try:
-        texture = renderer.import_gl_input(painter.texture, width=4, height=4, color_space="srgb", filter="nearest")
+        texture = renderer.import_gl_texture(painter.texture, width=4, height=4, color_space="srgb", filter="nearest")
         scene, plane = textured_scene(renderer, texture)
         scene.msaa = 4 if path == "grading" else 1
         target = renderer.create_render_target(width=SIZE, height=SIZE)
@@ -107,7 +107,7 @@ def test_linear_host_texture_is_sampled_raw(window):
     renderer = create_renderer(window)
     painter = HostPainter(4)
     try:
-        texture = renderer.import_gl_input(painter.texture, width=4, height=4, color_space="linear")
+        texture = renderer.import_gl_texture(painter.texture, width=4, height=4, color_space="linear")
         scene, _ = textured_scene(renderer, texture)
         target = renderer.create_render_target(width=SIZE, height=SIZE)
         with texture.write():
@@ -132,7 +132,7 @@ def test_linear_host_texture_is_sampled_raw(window):
 def test_import_requires_a_shared_renderer_and_storage(window):
     with filly.Renderer() as offscreen:
         with pytest.raises(filly.InteropError, match="shared_context"):
-            offscreen.import_gl_input(1, width=4, height=4, color_space="srgb")
+            offscreen.import_gl_texture(1, width=4, height=4, color_space="srgb")
     with create_renderer(window) as renderer:
         from pyglet import gl
         mutable = gl.GLuint()
@@ -141,8 +141,13 @@ def test_import_requires_a_shared_renderer_and_storage(window):
         gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, 4, 4, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, None)
         # Sampling sRGB data needs an sRGB view, and a view needs immutable storage.
         with pytest.raises(filly.InteropError, match="immutable"):
-            renderer.import_gl_input(mutable.value, width=4, height=4, color_space="srgb")
-        renderer.import_gl_input(mutable.value, width=4, height=4, color_space="linear").close()
+            renderer.import_gl_texture(mutable.value, width=4, height=4, color_space="srgb")
+        with renderer.import_gl_texture(mutable.value, width=4, height=4, color_space="linear") as texture:
+            assert not texture.closed
+        assert texture.closed
+        with pytest.raises(filly.FillyError, match="closed"):
+            with texture:
+                pass
         with pytest.raises(ValueError, match="color_space"):
-            renderer.import_gl_input(mutable.value, width=4, height=4, color_space="rgb")
+            renderer.import_gl_texture(mutable.value, width=4, height=4, color_space="rgb")
         gl.glDeleteTextures(1, ctypes.byref(mutable))

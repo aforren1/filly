@@ -8,7 +8,8 @@ headless EGL platform in `native/egl_platform.cpp`.
 ## Ownership
 
 Every native resource retains the engine state. The engine tracks resources through weak references.
-This prevents ownership cycles. A scene retains its models, cameras, and added lights.
+This prevents ownership cycles. A scene retains its models, its added lights, and its current
+camera. Cameras belong to the renderer.
 Objects can keep the engine alive after the Python `Renderer` reference is deleted.
 
 `renderer.close()` waits for outstanding work and destroys resources before the engine.
@@ -18,31 +19,46 @@ Model and light `close()` release scene ownership and queue native destruction. 
 handles invalidate their nodes, node-local materials, and imported lights. A removed imported light
 keeps its transform entity so animation can continue. Added lights use a separate owner whose
 closed state prevents old handles from referring to a replacement light. `Scene.close()` releases
-the scene's children, detaches its cameras from other scenes, and then destroys its view,
-Filament scene, color grading, and environment.
+the scene's children (a closing model detaches its imported cameras from every scene), and then
+destroys its view, Filament scene, color grading, and the scene's environment light and skybox. Renderer cameras, assets, and
+environments stay open for other scenes.
 
-A loaded glTF asset is a shared native object. The first model and each `clone()` are gltfio
-instances of it: `AssetLoader::createInstance()` adds entities, material instances, lights,
-skins, and an animator, and reuses vertex buffers, textures, and materials. gltfio 1.77.1 has no
-way to destroy one instance, so closing a model only removes its entities from the scene; the
-asset and all its instances are destroyed when the last model closes. `createInstance()` needs
-the asset's source data, about the file size in CPU memory, and each instance needs the
-preparation tables for the custom materials, property animation, cameras, and morph weights. Cloning is
-therefore opt-in: `scene.load(..., clonable=True)` keeps them, and the default calls
-`releaseSourceData()` and drops the tables after the first instance. For DamagedHelmet
-(3.6 MiB file) this saves 3.7 MiB of private bytes per loaded asset. The process grows by
-113 MiB per loaded DamagedHelmet on the tested Intel GPU, most of it texture memory that the
-integrated GPU allocates in system memory, so the saving is small for textured assets. Name
-lookups use each instance's own node table, because gltfio's name and entity lists cover all
-instances.
+A loaded glTF asset is a shared native object that the renderer owns, as Filament's engine owns
+its textures and buffers. Each model is a gltfio instance of it:
+`AssetLoader::createInstance()` adds entities, material instances, lights, skins, and an
+animator, and reuses vertex buffers, textures, and materials. gltfio 1.77.1 has no way to destroy
+one instance, so closing a model only removes its entities from the scene; the asset and all
+its instances are destroyed when the asset handle and the last model close.
+`createInstance()` needs the asset's source data, about the file size in CPU memory, and each
+instance needs the preparation tables for the custom materials, property animation, cameras, and
+morph weights. An open `Asset` keeps them; `Asset.close()` calls `releaseSourceData()` and drops
+the tables. `scene.load()` is a load, one `add()`, and that release, so a model that nothing
+adds again costs no source data. For DamagedHelmet (3.6 MiB file) the release saves 3.7 MiB of
+private bytes. The process grows by 113 MiB per loaded DamagedHelmet on the tested Intel GPU,
+most of it texture memory that the integrated GPU allocates in system memory, so the saving is
+small for textured assets. Name lookups use each instance's own node table, because gltfio's
+name and entity lists cover all instances.
 
-The asset belongs to the renderer; each model holds it. A clone can therefore go into another
-scene of the same renderer, and closing a scene closes only its own models. Textures that the
-material provider decodes for filly's custom materials are kept by source in the asset's tables,
-so clones share them as they share gltfio's textures. Before, each clone decoded them again and
-kept the copies until the asset closed.
+An asset handle replaced `scene.load(source, clonable=True)` and `model.clone(scene=...)`. With
+those, an asset could only be created through a scene: keeping a prototype needed a hidden model
+in some scene, and closing that scene closed the prototype. A clone also copied nothing that a
+new instance lacks: it started from the asset's authored state, as an added model does. The
+asset belongs to the renderer and each model holds it, so any scene of the renderer can add it,
+and closing a scene closes only its own models. Textures that the material provider decodes for
+filly's custom materials are kept by source in the asset's tables, so models share them as they
+share gltfio's textures. Before, each instance decoded them again and kept the copies until the
+asset closed.
 
-`Model.memory` estimates what the asset holds. gltfio lists no textures or buffers, so the
+Loading creates the first instance before `ResourceLoader::loadResources()`, and the first
+`add()` uses it. gltfio uploads morph target data only in `loadResources()`, which runs once per
+asset, and only for the instances that exist then; an asset loaded without instances gave every
+model empty morph targets. Later instances get their
+morph target positions from the source data and their morph tangent frames from gltfio's own
+`TangentsJob`, under the same conditions as `loadResources()`, so every model of an asset
+morphs the same. A test compares the lit, morphed first and second models pixel by pixel.
+Before, clones had empty morph targets.
+
+`Asset.memory` and `Model.memory` estimate what the asset holds. gltfio lists no textures or buffers, so the
 estimate collects them itself: a texture provider wrapper records the textures that gltfio's
 providers create, and each is sized from its internal format, dimensions, and mip levels. Vertex,
 index, morph target, and bone buffers are sized at preparation from the glTF accessors with the
@@ -88,8 +104,13 @@ the warning, and Filament has no other switch. A 60 Hz loop, or a 1 ms sleep per
 log it. In embedded mode, the host owns the window and every
 display-buffer swap. See [tested assumptions](assumptions.md).
 
-Shadows, refraction, FXAA, MSAA, SSAO, bloom, dithering, fog, depth of field, and vignette are
-scene properties and disabled by default. The PsychoPy demo enables refraction and FXAA.
+Shadows, FXAA, MSAA, SSAO, bloom, dithering, fog, depth of field, and vignette are
+scene properties and disabled by default. The PsychoPy demo enables FXAA. Screen-space
+refraction is not an option. Every scene has it on: transmission and volume materials render as
+flat white without it, and Filament runs the pass only in frames that draw such a material.
+Until October 2026 it was a scene property. That property looked like a render option, but no
+material depended on it; only a load-time warning did, which gave the rule "set it before
+loading glass".
 Temporal antialiasing, TAA upscaling, screen-space reflections, and dynamic resolution are not
 exposed. In Filament 1.77.1 `PostProcessManager`, TAA and screen-space reflections import the
 previous frame's history buffer (`FrameHistory::getPrevious()`), and dynamic resolution scales
@@ -149,7 +170,7 @@ the UV sets of the glTF textures. Nothing is compiled.
 A generated mesh is loaded as a one-triangle glTF with the requested material and attributes,
 then its renderable gets the mesh's own vertex and index buffers (`setGeometryAt()`). The loader
 therefore gives it the same material as a glTF file with those factors, and the model gets
-nodes, material handles, clones, and closing without a second code path. The placeholder's
+nodes, material handles, and closing without a second code path. The placeholder's
 accessor bounds are the mesh bounds. Positions, tangent frames, UVs, and colors are separate
 vertex buffers, so an update uploads only what changed. A mesh without colors gets a white
 `UBYTE4` color buffer, and `UV1` reads the `UV0` buffer: archive entries serve every material,
@@ -159,12 +180,13 @@ its method that writes into the staging buffer; a test checks that both give the
 Missing normals are area-weighted vertex normals, because shared vertices of an indexed mesh
 should be smooth; flat faces need their own vertices.
 
-A host texture input uses the same fences as a shared render target, in the other direction.
+An imported texture (`ImportedTexture`) uses the same fences as a shared render target, in the
+other direction.
 Leaving `write()` places a host fence, and the next render of a scene whose models sample the
 texture queues a Filament-side wait on it before the frame. After such a render, Filament places
-one fence, which the texture shares with the target and with the other sampled host textures,
+one fence, which the texture shares with the target and with the other sampled imported textures,
 and entering `write()` queues a host-side wait on it. Each Filament fence costs a `glFlush()` on
-Filament's thread, so a render places at most one. A scene that does not sample a host texture
+Filament's thread, so a render places at most one. A scene that does not sample an imported texture
 neither waits for its writes nor fences it. Neither side waits on the CPU.
 
 Two kinds of per-frame work run only when something changed. A camera whose projection follows
@@ -182,7 +204,7 @@ from the bind frame moves it away from the geometry. Preparation computes the bo
 asset: accessor boxes through node transforms for rigid meshes, and every vertex skinned with the
 rest pose for skinned meshes. A 1,000,000-vertex skinned mesh loaded in 120 ms against 65 ms
 for the same mesh without a skin; the difference also includes gltfio's own skin work and the
-joint and weight uploads (Iris Xe laptop, September 30, 2026). Clones share the box, and
+joint and weight uploads (Iris Xe laptop, September 30, 2026). Models of an asset share the box, and
 frames do no bounds work. The same rest-pose box, in the mesh node's frame, replaces gltfio's
 culling box for skinned renderables, which had the same fault and could cull a visible mesh.
 
@@ -211,7 +233,7 @@ value is encoded:
 | --- | --- | --- |
 | None (default) | The scene view, rendering straight into the RGBA16F buffer | No |
 | MSAA | Filament's multisampled RGB16F buffer, resolved and copied into the RGBA16F buffer | No |
-| Refraction, SSAO, shadows, fog | Their passes; the color pass as without them | No |
+| Refraction materials (transmission, volume), SSAO, shadows, fog | Their passes; the color pass as without them | No |
 | Transparent view | Filament's RGBA16F color buffer, blended into the RGBA16F buffer | No |
 | FXAA | Nothing: filly's FXAA pass runs after the encode pass, on the encoded image | No |
 | Dithering | Nothing: the encode pass adds the noise after the transfer function | No |
@@ -394,7 +416,23 @@ waited for it; its release replaces the unconsumed host fence.
 This orders both producer and consumer GPU work. Normal frames do not use `glFinish()` or CPU
 framebuffer copies. Explicit shutdown and image readback can block for completion.
 
-The PsychoPy adapter uses `ImageStim`'s texture-provider interface and owns the host texture.
+The adapters own OpenGL objects that the renderer does not know: the host texture, a draw
+program, and PsychoPy stimuli. An imported target therefore takes an optional callback, which
+`Renderer.close()` calls before it releases anything else, while the host context can still be
+made current. Each adapter passes a callback that closes its target. The callback holds the
+target weakly: the renderer holds the callback, and a strong reference would form a cycle
+through native objects that Python's garbage collector cannot see. The callbacks run in
+`Renderer.close()` only, not when the renderer's state is destroyed: each target holds that
+state, so no target exists then. Thus the renderer's close leaves no host objects behind, and
+only the window must close last.
+
+`draw()` blends premultiplied source-over by default in every adapter, because that is what
+Filament writes. The pyglet and moderngl adapters draw a quad in native code that saves and
+restores the OpenGL state that it changes. moderngl cannot read its blend state back, and
+libraries that cache OpenGL state need it restored. A blit, which the pyglet adapter used
+before, cannot blend.
+
+The PsychoPy adapter draws with `ImageStim` and owns the host texture.
 Its draw method runs inside `acquire()`. PsychoPy remains responsible for
 `win.flip()`. PsychoPy skips a context switch when it believes its window is current, which is
 wrong after other code switched contexts through pyglet, so the adapter also checks pyglet's
@@ -483,7 +521,7 @@ A load has these steps:
 7. `AssetLoader::createInstance()` with index markers (below), then `ResourceLoader`.
 
 The loaded buffer memory lives with the asset until gltfio releases its source data, which is
-after the first instance unless `clonable=True`.
+until the `Asset` closes; `scene.load()` releases it after its one model.
 
 gltfio identifies nothing by glTF index. Its `MaterialProvider` callbacks get a key, a UV map, a
 label (the material name), and the extras text, and its entity lists are not in node order. While
@@ -540,15 +578,18 @@ the pinned SDK implements this path despite older wording in its LightManager he
 map size and bias settings use the same options for authored and imported lights. Shadows remain
 explicit opt-in at both scene and light levels.
 
-The scene retains the source environment cubemap and a Skybox object alongside the filtered IBL
-textures. Visibility attaches or detaches the skybox without changing lighting. IndirectLight's
+An `Environment` holds the source environment cubemap and the filtered IBL textures, and the
+renderer owns it. Each scene that uses it builds its own IndirectLight and Skybox from those
+textures, because the IndirectLight holds the intensity and rotation, which are scene settings.
+Building them took 0.03 to 0.3 ms per scene, where filtering the panorama again took 54 to 83 ms.
+Visibility attaches or detaches the skybox without changing lighting. IndirectLight's
 rotation controls both the skybox and native IBL; custom diffuse backlighting receives the same
-rotation update. Clearing or replacing the environment detaches the skybox before destroying its
-texture. A visible skybox writes opaque background pixels even in a transparent view.
+rotation update. Removing or replacing a scene's environment destroys only that scene's light and
+skybox; closing the environment removes it from every scene first, then destroys its
+textures. A visible skybox writes opaque background pixels even in a transparent view.
 
-Python normalizes modern meshopt buffers and expands instance attributes before animation
-decoding and native loading. A namespaced meshoptimizer 1.0 decoder avoids symbol collisions
-with the SDK's older decoder. Instance children share mesh resources, but this path does not
+Native [glTF preparation](#gltf-preparation) decodes meshopt buffers and expands
+`EXT_mesh_gpu_instancing` before gltfio loads the document. Instance children share mesh resources, but this path does not
 reduce draw calls with explicit GPU batching. Node visibility is evaluated in parent-first order
 without per-frame allocation and controls scene membership for meshes and lights.
 
@@ -587,14 +628,15 @@ cubemap is used as is, and the spherical harmonics in its metadata supply diffus
 comes from the roughest reflection level. Filament's KTX parser and upload abort on malformed
 input, so the wrapper checks the file structure first. The custom diffuse-transmission material
 needs an irradiance cubemap; it is filtered from a full-mip copy of the IBL's sharpest level.
-The filter runs only when a model with that material is in the scene, at the environment load or
-at the model load, whichever comes later: it cost about 60 ms per environment, plus about 35 ms
+The filter runs only when a model with that material is in a scene that uses the environment,
+when the scene gets the environment or the model, whichever comes later, and once per
+environment: it cost about 60 ms, plus about 35 ms
 to build the filter once per renderer (256-pixel IBL, desktop). It performs GPU work and a
 completion wait during setup. Each prefilter object builds its material on first use. Shader
 compilation in the driver on first use, image decoding, and environment filtering belong outside
 a trial's frame loop.
 The renderer creates Filament's IBL prefilter objects once and reuses them. When they were
-destroyed after each call, models loaded after `set_environment()` could render black on
+destroyed after each call, models loaded after an environment could render black on
 Intel and NVIDIA. The cause inside Filament is not isolated.
 
 glTF animation restores authored transforms and morph weights before evaluating a clip, which
@@ -620,7 +662,8 @@ the scan over a model's copies allocates nothing.
 Camera projection and UV transform tracks update grouped values, then rebuild each matrix once
 after channel evaluation. This prevents channel order from producing invalid intermediate clip
 planes or overwriting another UV channel. Imported camera handles borrow glTF-owned components.
-Closing an asset detaches its active cameras from every scene before destroying those components.
+`Asset.close()` releases only the source data. Closing a model closes its imported cameras and
+detaches them from every scene; the components stay until the asset goes.
 
 The build follows [nanobind's packaging interface](https://nanobind.readthedocs.io/en/latest/packaging.html)
 with CMake and scikit-build-core. Windows links the pinned release SDK. Linux builds the same
@@ -662,7 +705,7 @@ UBO fence reclamation while the driver waits for more commands. A wait without a
 (`FENCE_WAIT_FOR_EVER`, a `time_point::max()` deadline) uses an untimed wait. The converted
 deadline overflows, so `wait_until()` returns at once; Filament's frame-info thread then spins on
 the fence mutex and starves the driver thread that would signal the fence. The first
-`OffscreenTarget.read()` after a render hung this way. The corrections preserve asynchronous
+`RenderTarget.read()` after a render hung this way. The corrections preserve asynchronous
 rendering and do not add GPU completion waits.
 
 Shared GLX contexts use the host's X display connection. Opening a separate connection can

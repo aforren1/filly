@@ -60,8 +60,8 @@ def perspective_scene(renderer, **options):
     scene = renderer.create_scene()
     for name, value in options.items():
         setattr(scene, name, value)
-    camera = scene.create_camera()
-    camera.set_perspective(fov_y=45, near=0.1, far=20)
+    camera = renderer.create_camera()
+    camera.set_perspective(fov_y_deg=45, near=0.1, far=20)
     camera.position = (0, 0, 3)
     camera.look_at((0, 0, 0))
     scene.camera = camera
@@ -83,7 +83,6 @@ OPTIONS = {
     "antialiasing": ("none", "fxaa", "taa"),
     "msaa": (1, 4, 3),
     "shadows": (False, True, None),
-    "refraction": (False, True, None),
     "transparent": (False, True, None),
     "dithering": (False, True, None),
     "ssao": (False, True, None),
@@ -103,6 +102,8 @@ def test_option_defaults_and_independent_assignment(renderer):
             expected = OPTIONS[check][1] if other <= position else OPTIONS[check][0]
             assert getattr(scene, check) == expected, (name, check)
     assert not hasattr(scene, "postprocessing") and not hasattr(scene, "set_rendering_options")
+    # Screen-space refraction is always on; Filament runs it only in frames that draw glass.
+    assert not hasattr(scene, "refraction")
 
 
 @pytest.mark.parametrize("name", [name for name, values in OPTIONS.items() if values[2] is not None])
@@ -153,7 +154,8 @@ def test_postprocessing_effects_are_opt_in(renderer, effect):
         scene = perspective_scene(renderer, tone_mapping="aces_legacy", **options)
         scene.background = (0.2, 0.2, 0.2, 1)
         scene.load(sphere_glb(roughness=0.2, backdrop=True))
-        scene.set_environment(np.full((8, 16, 3), 0.5, dtype="f"), intensity=20000)
+        scene.environment = renderer.create_environment(np.full((8, 16, 3), 0.5, dtype="f"))
+        scene.environment_intensity = 20000
         # A light far above the display range gives bloom a highlight to spread.
         scene.add_directional_light(direction=(0.2, -0.3, -1), intensity=1e6 if effect == "bloom" else 30000)
         return render(renderer, scene, 96).astype(int)
@@ -188,7 +190,8 @@ def test_sun_disc_appears_in_skybox(renderer):
     images = {}
     for kind in ("directional", "sun"):
         scene = perspective_scene(renderer, tone_mapping="aces_legacy")
-        scene.set_environment(np.full((8, 16, 3), 0.05, dtype="f"), intensity=10000)
+        scene.environment = renderer.create_environment(np.full((8, 16, 3), 0.05, dtype="f"))
+        scene.environment_intensity = 10000
         scene.environment_visible = True
         # Light travels toward +z: the source lies straight ahead of the camera.
         add = scene.add_sun_light if kind == "sun" else scene.add_directional_light
@@ -201,7 +204,7 @@ def test_sun_disc_appears_in_skybox(renderer):
 def test_sun_light_options(scene):
     light = scene.add_sun_light(direction=(0, -1, 0), intensity=1000, angular_radius_deg=2, halo_size=4, halo_falloff=20)
     assert light.type == "sun" and light.intensity == pytest.approx(1000)
-    with pytest.raises(ValueError, match="Range requires"):
+    with pytest.raises(ValueError, match="Range applies only"):
         light.range = 5
     for bad in ({"angular_radius_deg": 0.1}, {"angular_radius_deg": 25}, {"halo_size": -1}, {"direction": (0, 0, 0)}):
         with pytest.raises(ValueError):
@@ -213,7 +216,7 @@ def test_lens_projection_matches_filament_lens_model(scene):
     camera.set_lens_projection(focal_length_mm=28, aspect=1.5, near=0.1, far=100)
     lens = camera.projection
     # Filament's lens model uses a 24 mm sensor height.
-    camera.set_perspective(fov_y=math.degrees(2 * math.atan(12 / 28)), aspect=1.5, near=0.1, far=100)
+    camera.set_perspective(fov_y_deg=math.degrees(2 * math.atan(12 / 28)), aspect=1.5, near=0.1, far=100)
     np.testing.assert_allclose(lens, camera.projection, rtol=1e-5)
     for bad in ({"focal_length_mm": 0}, {"aspect": -1}, {"near": 2, "far": 1}):
         with pytest.raises(ValueError):
@@ -248,12 +251,12 @@ def lit_triangle(triangle_glb):
 
 def test_ktx_environment_uses_spherical_harmonics(renderer, scene, triangle_glb, tmp_path):
     scene.load(lit_triangle(triangle_glb))
-    scene.load_environment_ktx(ktx_cubemap(tmp_path / "ibl.ktx"), intensity=30000)
+    scene.environment = renderer.load_environment_ktx(ktx_cubemap(tmp_path / "ibl.ktx"))
     assert scene.environment_intensity == pytest.approx(30000)
     pixel = render(renderer, scene)[32, 32].astype(int)
     # The cubemap is gray and SH band 0 is warm, so a warm diffuse result shows SH irradiance.
     assert pixel[0] > pixel[1] > pixel[2] > 5, pixel
-    scene.load_environment_ktx(ktx_cubemap(tmp_path / "blue.ktx", sh=(0.2, 0.4, 1.0)))
+    scene.environment = renderer.load_environment_ktx(ktx_cubemap(tmp_path / "blue.ktx", sh=(0.2, 0.4, 1.0)))
     pixel = render(renderer, scene)[32, 32].astype(int)
     assert pixel[2] > pixel[1] > pixel[0], pixel
 
@@ -269,10 +272,10 @@ def test_ktx_environment_irradiance_follows_diffuse_transmission(renderer, scene
     asset = pack(doc, binary)
     ibl = ktx_cubemap(tmp_path / "ibl.ktx", size=16, levels=5, sh=(1.0, 1.0, 1.0))
     model = scene.load(asset)
-    scene.load_environment_ktx(ibl, intensity=30000)
+    scene.environment = renderer.load_environment_ktx(ibl)
     before = render(renderer, scene)
     model.close()
-    scene.load_environment_ktx(ibl, intensity=30000)
+    scene.environment = renderer.load_environment_ktx(ibl)
     scene.load(asset)
     after = render(renderer, scene)
     np.testing.assert_array_equal(before, after)
@@ -281,33 +284,33 @@ def test_ktx_environment_irradiance_follows_diffuse_transmission(renderer, scene
     assert pixel[0] > pixel[1] + 20, pixel
 
 
-def test_ktx_environment_errors(scene, tmp_path):
+def test_ktx_environment_errors(renderer, tmp_path):
     with pytest.raises(filly.AssetError, match="no 'sh' metadata"):
-        scene.load_environment_ktx(ktx_cubemap(tmp_path / "plain.ktx", sh=None))
+        renderer.load_environment_ktx(ktx_cubemap(tmp_path / "plain.ktx", sh=None))
     (tmp_path / "text.ktx").write_text("not a texture")
     with pytest.raises(filly.AssetError, match="not a KTX 1 file"):
-        scene.load_environment_ktx(tmp_path / "text.ktx")
+        renderer.load_environment_ktx(tmp_path / "text.ktx")
     with pytest.raises(filly.AssetError, match="Could not open"):
-        scene.load_environment_ktx(tmp_path / "missing.ktx")
+        renderer.load_environment_ktx(tmp_path / "missing.ktx")
     truncated = ktx_cubemap(tmp_path / "cut.ktx").read_bytes()[:-40]
     (tmp_path / "cut.ktx").write_bytes(truncated)
     with pytest.raises(filly.AssetError):
-        scene.load_environment_ktx(tmp_path / "cut.ktx")
+        renderer.load_environment_ktx(tmp_path / "cut.ktx")
     with pytest.raises(filly.AssetError, match="Skybox"):
-        scene.load_environment_ktx(ktx_cubemap(tmp_path / "ibl.ktx"), tmp_path / "text.ktx")
+        renderer.load_environment_ktx(ktx_cubemap(tmp_path / "ibl.ktx"), tmp_path / "text.ktx")
 
 
 @pytest.mark.skipif(not LIGHTROOM.is_dir(), reason="Filament SDK sample IBL is not in .deps")
 def test_cmgen_environment_and_skybox(renderer, scene, triangle_glb):
     scene.load(lit_triangle(triangle_glb))
-    scene.load_environment_ktx(LIGHTROOM / "lightroom_14b_ibl.ktx", LIGHTROOM / "lightroom_14b_skybox.ktx")
+    scene.environment = renderer.load_environment_ktx(LIGHTROOM / "lightroom_14b_ibl.ktx", LIGHTROOM / "lightroom_14b_skybox.ktx")
     scene.environment_visible = True
     first = render(renderer, scene)
     assert first[32, 32, :3].min() > 20 and first[2, 2, :3].max() > 20
-    scene.environment_rotation = 90
+    scene.environment_rotation_deg = 90
     rotated = render(renderer, scene)
     assert np.abs(rotated[:8].astype(int) - first[:8]).max() > 10
     # Without a skybox file, the IBL's sharpest level is the background.
-    scene.load_environment_ktx(LIGHTROOM / "lightroom_14b_ibl.ktx")
+    scene.environment = renderer.load_environment_ktx(LIGHTROOM / "lightroom_14b_ibl.ktx")
     assert render(renderer, scene)[2, 2, :3].max() > 20
-    scene.clear_environment()
+    scene.environment = None
