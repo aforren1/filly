@@ -19,12 +19,14 @@ Documentation = "https://github.com/aforren1/filly#readme"
 Issues = "https://github.com/aforren1/filly/issues"
 
 [project.optional-dependencies]
-examples = ["Pillow>=10"]
+# Floors are the oldest versions with the APIs filly uses: Image.Resampling (Pillow 9.1),
+# Context.external_texture (moderngl 5.7), zengl 2's API (2.0 was never released).
+examples = ["Pillow>=9.1"]
 # Earlier PsychoPy standalone installs ship Python 3.8 or earlier.
 psychopy = ["psychopy>=2024.2"]
 pyglet = ["pyglet>=1.4.11"]
-moderngl = ["pyglet>=1.4.11", "moderngl>=5.12"]
-zengl = ["pyglet>=1.4.11", "zengl>=2.7"]
+moderngl = ["pyglet>=1.4.11", "moderngl>=5.7"]
+zengl = ["pyglet>=1.4.11", "zengl>=2.1"]
 
 [dependency-groups]
 dev = ["pytest>=8", "nanobind>=2.4,<4", "scikit-build-core>=0.11,<2", "ninja>=1.11"]

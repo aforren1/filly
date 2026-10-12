@@ -27,7 +27,11 @@ See [Host integrations](../reference/api.md#host-integrations) for sizes and err
 
 The integrations were tested on Windows 11 with an Intel Iris Xe GPU and pyglet 1.4.11,
 moderngl 5.12.0, and zengl 2.7.3. They also passed on Linux GLX (Ubuntu 22.04 under WSL, with the
-Mesa D3D12 driver and with Xvfb and llvmpipe). pyglet 2 was not tested.
+Mesa D3D12 driver and with Xvfb and llvmpipe). On 2026-10-12, `tests/test_gl_hosts.py` passed on
+Windows with the oldest and newest versions that have Python 3.10 wheels: pyglet 1.4.11 with
+moderngl 5.7.0 and zengl 2.1.0, and pyglet 2.1.9 with moderngl 5.13.0 and zengl 2.7.3. moderngl
+5.6.4 has no `Context.external_texture`. The tests call `zengl.cleanup()`, which starts in
+zengl 2.6; the zengl 2.1.0 run replaced it with a function that does nothing.
 
 ## Install
 
