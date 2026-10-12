@@ -420,8 +420,12 @@ adapter converts sampled RGB to straight RGB in a shader, before ImageStim appli
 The temporary shader selection is restored after each draw so regular PsychoPy stimuli keep their
 normal rendering behavior. The host window uses average blending.
 
-The adapter is pinned to psychopy-lib 2026.2.4 because it uses PsychoPy's context and texture
-internals. Other versions and backends need separate tests.
+The adapter uses PsychoPy's context and texture internals, so each PsychoPy version needs its
+own test. It does not use texture providers (an `image` with `colorTexture`), which
+`ImageStim` takes in PsychoPy 2026.2 but not in 2024.2. It gives `ImageStim` a placeholder
+image and then replaces the texture name. The legacy GL path records the program and the
+texture in a display list, so the adapter rebuilds the list in its first draw, with the
+premultiplied program in place. Other backends need separate tests.
 
 ## Dependencies
 

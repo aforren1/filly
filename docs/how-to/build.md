@@ -218,7 +218,8 @@ uv run --no-sync python -m pytest -q
 
 The tests create real OpenGL engines. They fail if a driver is unavailable.
 The test suite generates its own GLB asset. No model download is necessary.
-Shared-context tests require pyglet. The PsychoPy adapter test requires psychopy-lib.
+Shared-context tests require pyglet. The PsychoPy adapter test requires PsychoPy (`psychopy`
+or `psychopy-lib`).
 These optional tests skip when their dependencies are absent. The PsychoPy setup includes both.
 To compare images with Filament's own `gltf_viewer`, see [reference comparison](reference-comparison.md).
 

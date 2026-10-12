@@ -20,7 +20,8 @@ Issues = "https://github.com/aforren1/filly/issues"
 
 [project.optional-dependencies]
 examples = ["Pillow>=10"]
-psychopy = ["psychopy>=2021.1.0"]
+# Earlier PsychoPy standalone installs ship Python 3.8 or earlier.
+psychopy = ["psychopy>=2024.2"]
 pyglet = ["pyglet>=1.4.11"]
 moderngl = ["pyglet>=1.4.11", "moderngl>=5.12"]
 zengl = ["pyglet>=1.4.11", "zengl>=2.7"]

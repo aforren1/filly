@@ -4,8 +4,10 @@ The adapter uses OpenGL and PsychoPy's `pyglet` backend, with Windows WGL or Lin
 Windows presentation has been tested. Linux shared-texture tests use pyglet directly; a full
 Linux PsychoPy presentation test remains necessary. See [Linux setup](build.md#build-on-linux).
 Raw GLX sharing passed on Mesa software rendering and the WSLg Intel D3D12 driver.
-It uses `psychopy-lib==2026.2.4`. The full PsychoPy package and Builder GUI are not required.
-The library package still includes dependencies used by dialogs and other runtime features.
+It needs PsychoPy 2024.2 or later: earlier standalone installs ship Python 3.8 or earlier, and
+filly needs Python 3.10 or later. It was tested with PsychoPy 2024.2.4 (Python 3.10) and
+2026.2.4 (Python 3.11). Either the `psychopy` or the `psychopy-lib` distribution works; the
+Builder GUI is not required.
 
 ## Install
 

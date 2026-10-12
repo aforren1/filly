@@ -1,9 +1,10 @@
-"""Shared-texture integration for psychopy-lib on Windows/WGL and Linux/GLX."""
+"""Shared-texture integration for PsychoPy on Windows/WGL and Linux/GLX."""
 
 import ctypes
 import sys
 import weakref
 
+import numpy
 from psychopy import visual
 from psychopy.visual import shaders
 from pyglet import gl
@@ -122,24 +123,36 @@ class SharedTarget(HostTarget):
 class _SharedImageStim(visual.ImageStim):
     @property
     def image(self):
+        if getattr(self, "_external_texture", False):
+            return self._shared_target
         return self.__dict__.get("image")
 
     @image.setter
     def image(self, value):
-        if getattr(self, "_external_texture", False) and value is not self._shared_target:
+        if not getattr(self, "_external_texture", False):
+            visual.ImageStim.image.__set__(self, value)
+        # ImageStim re-sets its own image (_imName) after some changes. An upload would overwrite
+        # the target's texture.
+        elif value is self._shared_target or value is self._imName:
+            self._needTextureUpdate = False
+        else:
             raise InteropError("A shared stimulus cannot replace its target image")
-        visual.ImageStim.image.__set__(self, value)
 
     def __init__(self, target, **kwargs):
         self._shared_target = target
         self._external_texture = False
-        super().__init__(target._win, image=target, autoLog=False, **kwargs)
-        # ImageStim allocates a placeholder even when its image supplies a GPU texture.
+        # An RGB placeholder, not the target: ImageStim in PsychoPy 2024.2 does not take texture
+        # providers (colorTexture). RGB selects the window's ImageStim program, not the luminance
+        # one.
+        super().__init__(target._win, image=numpy.zeros((1, 1, 3), numpy.float32), autoLog=False, **kwargs)
         gl.glDeleteTextures(1, ctypes.byref(self._texID))
         self._texID = target.colorTexture
         self._external_texture = True
         self.flipVert = False
         self._shared_program = _shared_program(target._win)
+        # The legacy GL path records the program and texture in a display list. Rebuild it in
+        # draw(), where the premultiplied program is in place.
+        self._needUpdate = True
 
     def draw(self, win=None):
         target = self._shared_target

@@ -23,6 +23,21 @@ The environment table lists the Windows setup; Linux setups are listed with thei
 
 ## Results
 
+### PsychoPy 2024.2 (October 12)
+
+The adapter no longer passes the target to `ImageStim` as an image, because PsychoPy 2024.2
+does not take texture providers. With filly 0.1.0 from PyPI and the changed adapter, all 23
+PsychoPy tests passed on Windows with PsychoPy 2024.2.4 (Python 3.10.0, pyglet 1.4.11, NumPy
+1.26.4), with psychopy-lib 2026.2.4 (Python 3.11), and with the `psychopy` distribution
+2026.2.4 (Python 3.11). Unchanged, the adapter failed on 2024.2.4 with "Couldn't make sense
+of requested image". PsychoPy 2024.2.4 was installed with uv and an override that removes its
+`pypi-search` requirement, which is no longer on PyPI. A standalone PsychoPy 2024.2 app was
+not tested. Linux was not retested.
+
+With NumPy 1.21.6, 98 of 99 tests in `test_renderer.py`, `test_mesh.py`, `test_textures.py`,
+`test_render_calls.py`, `test_node_tree.py`, and `test_camera_aspect.py` passed. The failure:
+a `numpy.float32` target size, because `float32.is_integer()` starts in NumPy 1.22.
+
 ### Skinned bounds, horse demo, tone-mapper route, framing (September 30)
 
 This revision:
