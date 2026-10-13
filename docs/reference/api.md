@@ -229,7 +229,7 @@ was 0.1 to 0.3 ms per call.
 `pick(scene, x, y)` asks which model surface a frame shows at a pixel, and where that surface
 is. It returns a `PickQuery` at once. The next `render()` of the scene takes the query: Filament
 draws that frame's geometry into a picking buffer and reads one pixel back. The answer arrives
-one or more frames later, without a CPU wait.
+one or more frames later, without a CPU wait. `examples/pick.py` shows it in a pyglet window.
 
 ```python
 query = renderer.pick(scene, x, y)

@@ -102,6 +102,7 @@ See the `examples/` folder.
 | `drifting_grating.py` | A texture updated every frame on a tilted plane. |
 | `stereo.py` | Two cameras side by side in one window. |
 | `shapes.py` | Generated and deforming meshes. |
+| `pick.py` | Click a model in a pyglet window: picking, with the hit node, point, and latency. `--auto` clicks by itself. |
 
 ## Documentation
 
