@@ -576,6 +576,15 @@ export class Renderer extends Handle
 		}
 	}
 
+	/**
+	 * Ask what the scene shows at target pixel (x, y), counted from the lower-left corner like
+	 * viewports. The scene's next render() takes the query; see PickQuery.
+	 */
+	pick(scene, x, y)
+	{
+		return new PickQuery(this._context, this._call("pick", scene._native, x, y));
+	}
+
 	/** Give the context back to the page; call it before the page draws. */
 	handBack()
 	{
@@ -829,7 +838,7 @@ export class Scene extends Handle
 for (const name of ["encoding", "outputPath", "toneMapping", "antialiasing", "msaa", "shadows",
 	"transparent", "dithering", "ssao", "bloom", "fog", "fogColor", "fogDensity", "fogStart", "depthOfField",
 	"vignette", "vignetteMidpoint", "vignetteRoundness", "vignetteFeather", "vignetteColor", "background",
-	"environmentIntensity", "environmentVisible", "environmentRotationDeg"])
+	"environmentIntensity", "environmentVisible", "environmentRotationDeg", "pickBlended"])
 {
 	defineProperty(Scene, name);
 }
@@ -1336,6 +1345,53 @@ export class ImportedTarget extends Handle
 	get closed()
 	{
 		return this._get("closed");
+	}
+}
+
+/**
+ * A pick that Renderer.pick() queued. WebGL completes the GPU readback only after control
+ * returns to the browser, so the answer arrives on a later turn of the event loop: poll ready()
+ * once per frame, or await wait().
+ */
+export class PickQuery extends Handle
+{
+	/** Whether the answer arrived. Does not wait for the GPU. */
+	ready()
+	{
+		return this._call("ready");
+	}
+
+	/** framesRendered just after the render that took the query, or null before it. */
+	get frameNumber()
+	{
+		return this._get("frameNumber");
+	}
+
+	/**
+	 * { model, node, position, depth } of the model surface at the point, or null for none:
+	 * position in world space, depth along the camera's viewing direction. Throws until ready().
+	 */
+	get result()
+	{
+		const result = this._call("result");
+		return result && { model: new Model(this._context, result.model), node: new Node(this._context, result.node),
+			position: result.position, depth: result.depth };
+	}
+
+	/** Resolves to result when the answer arrives. A render of the scene must take the query first. */
+	async wait({ timeoutMs = 10000 } = {})
+	{
+		const start = performance.now();
+		while (!this.ready())
+		{
+			if (performance.now() - start > timeoutMs)
+			{
+				throw new FillyError("The pick did not complete; render the scene to take it");
+			}
+			this._context.handBack();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		}
+		return this.result;
 	}
 }
 

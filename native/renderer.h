@@ -49,6 +49,7 @@ struct TargetData;
 struct TextureData;
 struct ReadbackData;
 struct PrepareData;
+struct PickData;
 }
 
 // A material parameter that a clip animates through KHR_animation_pointer: the material's name
@@ -286,6 +287,8 @@ public:
     explicit Model(std::shared_ptr<detail::ModelData> data);
     void close();
     bool closed() const;
+    bool same(const Model& other) const;
+    uintptr_t key() const;
     // The memory of the model's asset, which it shares with the other models of that asset.
     AssetMemory memory() const;
     std::array<Vec3, 2> bounds() const;
@@ -440,6 +443,10 @@ public:
     void set_environment_visible(bool value);
     Vec4 background() const;
     void set_background(Vec4 color);
+    // Whether picks hit surfaces of blended (alpha_mode "blend") materials, as if they were
+    // opaque. Otherwise picks pass through them.
+    bool pick_blended() const;
+    void set_pick_blended(bool value);
 private:
     std::shared_ptr<detail::SceneData> data_;
     friend class Renderer;
@@ -533,12 +540,38 @@ private:
 class Preparation {
 public:
     explicit Preparation(std::shared_ptr<detail::PrepareData> data);
-    // Lets the backend make progress, then reports whether every material has its programs.
+    // Lets the backend make progress, then reports whether every material has its programs and
+    // the renderer's first pick readback is done.
     bool ready();
-    // Materials whose programs are not compiled yet.
+    // Materials whose programs are not compiled yet, plus one while that readback runs.
     size_t pending() const;
 private:
     std::shared_ptr<detail::PrepareData> data_;
+};
+
+// The model surface that a pick found. position is in world space; depth is the distance from
+// the camera along its viewing direction, in scene units.
+struct PickResult {
+    Model model;
+    Node node;
+    Vec3 position;
+    float depth;
+};
+
+// A pick that Renderer::pick() queued. The next render of its scene takes it; Filament answers
+// it from that frame's depth pass, a frame or more later (see docs/reference/api.md#picking).
+class PickQuery {
+public:
+    explicit PickQuery(std::shared_ptr<detail::PickData> data);
+    // Delivers the answers that arrived, without waiting for the GPU, and reports whether this
+    // one has. The first true call maps the answer to a model node.
+    bool ready();
+    // Empty for no model surface at the point. Throws until ready() returns true.
+    std::optional<PickResult> result();
+    // Stats::frames_rendered just after the render that took the query; empty before it.
+    std::optional<uint64_t> frame_number() const;
+private:
+    std::shared_ptr<detail::PickData> data_;
 };
 
 // A Filament-owned color texture that supports readback.
@@ -603,6 +636,9 @@ public:
                                     std::function<void()> on_renderer_close = {});
     void render(const Scene& scene, const RenderTarget& target, const RenderOptions& options = {});
     void render(const Scene& scene, const ImportedTarget& target, const RenderOptions& options = {});
+    // Queues a query for what the scene shows at target pixel (x, y), counted from the
+    // lower-left corner like viewports. The scene's next render takes it.
+    PickQuery pick(const Scene& scene, double x, double y);
     // channels is 1, 3, or 4. Float textures hold linear values. pixels as for Texture::update().
     Texture create_texture(int64_t width, int64_t height, int channels, bool is_float,
                            const std::string& color_space, bool mipmaps,

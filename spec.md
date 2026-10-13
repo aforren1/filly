@@ -184,6 +184,7 @@ renderer.create_texture(pixels, color_space=...)
 renderer.import_gl_texture(texture_id, width=..., height=..., color_space=...)
 renderer.prepare(scene)
 renderer.render(scene, target, camera=None, viewport=None, clear=True)
+renderer.pick(scene, x, y)
 renderer.finish()
 renderer.close()
 renderer.stats
@@ -199,6 +200,16 @@ The full signatures are in [the API reference](docs/reference/api.md#renderer).
 **Decision.** `render()` flushes its commands to the driver, so there is no `flush()`. A target is required; there is no window target (section 11.1).
 
 **Decision (per-render camera and viewport).** `camera` replaces the scene camera for one call. `viewport` is (x, y, width, height) in target pixels from the lower-left corner. `clear=False` keeps the target outside the viewport, so two eyes can render side by side into one target; the viewport itself always starts from the background, never from an earlier frame. Each call is one frame and allocates no memory for these options. Imported targets keep the acquire rules of section 14.
+
+**Decision (picking).** `pick(scene, x, y)` uses Filament's GPU picker (`View::pick()`) and returns a `PickQuery`; the scene's next `render()` takes it, with that call's camera and viewport. Reasons:
+
+- Filament answers picks from the depth pass of the frame that took them, so the answer is exactly the surface that the frame showed, after skinning, morphing, animation, instancing, and alpha masking. A CPU ray cast would repeat all of that and could disagree with the image.
+- The query belongs to a render, not to a time: its `frame_number` is that render's `stats.frames_rendered`, so an experiment can log which frame a selection describes. A `pick=` argument of `render()` was the alternative; it would make `render()` return a value for some calls only, and a pick queued on the scene reads as plainly in a loop (`if clicked: query = renderer.pick(...)`). Filament queues picks on the view, which is the scene's.
+- `ready()` does not wait for the GPU, as `render()` does not. `finish()` is the blocking path; after it, every earlier query has its answer, so no separate wait method is needed. Measured latency: one or two frame periods at 60 Hz without `finish()`, none with it.
+- Coordinates are target pixels from the lower-left corner, as `viewport` is, and as OpenGL, pyglet, and PsychoPy count y. Converting from a top-left origin is one subtraction, documented once.
+- The result has the `Model` and the `Node` (each `EXT_mesh_gpu_instancing` instance is a node), the world position computed from Filament's float depth with the camera of that frame, and the depth along the view direction. It has no raw Filament entity or depth buffer value.
+- `scene.pick_blended` (Filament's transparent picking) is a scene property because one depth pass serves every query of a frame.
+- Without SSAO, filly sets Filament's ambient-occlusion resolution to 1, so that picks are per pixel. The structure buffer runs only in frames with picks then, so other frames cost the same. With SSAO, picks share its half-resolution buffer instead of changing its look and cost.
 
 `finish()` is explicitly blocking and exists primarily for testing, shutdown, screenshots, and diagnostics.
 

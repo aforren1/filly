@@ -432,8 +432,26 @@ NB_MODULE(_native, module) {
 
     nb::class_<Preparation>(module, "Preparation")
         .def("ready", &Preparation::ready,
-             "Let the backend make progress, then report whether every program is compiled.")
+             "Let the backend make progress, then report whether every program is compiled and the "
+             "renderer's first pick readback is done.")
         .def_prop_ro("pending", &Preparation::pending);
+
+    nb::class_<PickResult>(module, "PickResult")
+        .def_ro("model", &PickResult::model)
+        .def_ro("node", &PickResult::node)
+        .def_ro("position", &PickResult::position)
+        .def_ro("depth", &PickResult::depth)
+        .def("__repr__", [](nb::handle self) {
+            const auto& result = nb::cast<const PickResult&>(self);
+            return nb::str("<PickResult node={} position=({:.4g}, {:.4g}, {:.4g}) depth={:.4g}>").format(
+                self.attr("node"), result.position[0], result.position[1], result.position[2], result.depth);
+        });
+
+    nb::class_<PickQuery>(module, "PickQuery")
+        .def("ready", &PickQuery::ready,
+             "Deliver the answers that arrived, without waiting for the GPU, and report whether this one has.")
+        .def_prop_ro("result", &PickQuery::result)
+        .def_prop_ro("frame_number", &PickQuery::frame_number);
 
     nb::class_<Renderer> renderer_type(module, "Renderer");
     closable(renderer_type, "Renderer is closed");
@@ -502,6 +520,7 @@ NB_MODULE(_native, module) {
         }, "texture_id"_a, nb::kw_only(), "width"_a, "height"_a, "color_space"_a, "filter"_a = "linear",
            "wrap"_a = "repeat")
         .def("prepare", &Renderer::prepare, "scene"_a)
+        .def("pick", &Renderer::pick, "scene"_a, "x"_a, "y"_a)
         .def("finish", &Renderer::finish, nb::call_guard<nb::gil_scoped_release>())
         .def("close", &Renderer::close, nb::call_guard<nb::gil_scoped_release>())
         .def_prop_ro("closed", &Renderer::closed)
@@ -573,7 +592,8 @@ NB_MODULE(_native, module) {
         .def_prop_rw("environment_intensity", &Scene::environment_intensity, &Scene::set_environment_intensity)
         .def_prop_rw("environment_rotation_deg", &Scene::environment_rotation_deg, &Scene::set_environment_rotation_deg)
         .def_prop_rw("environment_visible", &Scene::environment_visible, &Scene::set_environment_visible)
-        .def_prop_rw("background", &Scene::background, &Scene::set_background);
+        .def_prop_rw("background", &Scene::background, &Scene::set_background)
+        .def_prop_rw("pick_blended", &Scene::pick_blended, &Scene::set_pick_blended);
 
     nb::class_<Light> light_type(module, "Light");
     closable(light_type, "Light is closed");
@@ -739,6 +759,10 @@ NB_MODULE(_native, module) {
                    [&](int64_t i) { self.apply_variant(i); return 0; });
         }, "key"_a)
         .def_prop_ro("bounds", &Model::bounds)
+        .def("__eq__", [](const Model& self, nb::handle other) {
+            return nb::isinstance<Model>(other) && self.same(nb::cast<const Model&>(other));
+        })
+        .def("__hash__", [](const Model& self) { return self.key(); })
         .def("update_mesh", [](Model& self, std::optional<Vertices3> positions, std::optional<Vertices3> normals,
                                std::optional<Vertices2> uvs, std::optional<Vertices4> colors) {
             const auto arrays = mesh_arrays(self.vertex_count(), positions, normals, uvs, colors);

@@ -221,6 +221,8 @@ Light Scene::add_spot_light(Vec3 position, Vec3 direction, float intensity, Vec3
     detail::resource_cast<detail::LightData>(owner)->cone_deg = cone_deg;
     return Light(owner, entity.getId());
 }
+bool Model::same(const Model& other) const { return data_ == other.data_; }
+uintptr_t Model::key() const { return reinterpret_cast<uintptr_t>(data_.get()); }
 bool Model::closed() const { data_->state->check_thread(); return !data_->asset || !data_->state->engine; }
 void Model::close() {
     data_->state->check_thread();
@@ -595,8 +597,17 @@ void Scene::set_ssao(bool value) {
     data_->check(); detail::require_exact(*data_, value, "ssao");
     f::AmbientOcclusionOptions ao;
     ao.enabled = value;
+    // SSAO keeps Filament's half-resolution structure buffer, which picks then read too; full
+    // resolution would change its look and quadruple its cost. See create_scene().
+    ao.resolution = value ? 0.5f : 1.0f;
     data_->view->setAmbientOcclusionOptions(ao);
     data_->ssao = value;
+}
+bool Scene::pick_blended() const { data_->check(); return data_->pick_blended; }
+void Scene::set_pick_blended(bool value) {
+    data_->check();
+    data_->view->setTransparentPickingEnabled(value);
+    data_->pick_blended = value;
 }
 bool Scene::bloom() const { data_->check(); return data_->bloom; }
 void Scene::set_bloom(bool value) {

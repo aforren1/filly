@@ -84,6 +84,8 @@ Close the renderer before the window. The same pattern works with a
 - **Predictable output:** sRGB (default) or linear. Effects such as antialiasing,
   fog, and bloom are off until you enable them. With default settings, the same scene gives the same pixels on every frame.
 - **Several views per frame:** each `render()` call can take its own camera and viewport, for example for side-by-side stereo.
+- **Picking:** find the model, node, and world position under a pixel of a rendered frame, for
+  example where a participant clicked. See [picking](docs/reference/api.md#picking).
 - **Browsers:** the same core compiles to WebAssembly for WebGL2. It renders into a texture that the page's own renderer draws, such as PIXI in PsychoJS. See
   [the web build](docs/explanation/web.md).
 

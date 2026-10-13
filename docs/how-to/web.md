@@ -254,6 +254,51 @@ const rgba = await target.read();  // Uint8Array, rows from the top
 
 A readback waits for the GPU. Do not read in a timing-critical frame.
 
+## Pick objects
+
+To find the model under a pointer, queue a pick before the render that shows the frame, then
+poll it once per frame. Coordinates are target pixels from the lower-left corner, so convert
+from the canvas's top-left origin:
+
+```javascript
+canvas.addEventListener("pointerdown", (event) =>
+{
+	const box = canvas.getBoundingClientRect();
+	const x = (event.clientX - box.left) * target.width / box.width;
+	const y = target.height - (event.clientY - box.top) * target.height / box.height;
+	pending = renderer.pick(scene, x, y);
+});
+
+function frame()
+{
+	if (pending?.ready())
+	{
+		const hit = pending.result;  // { model, node, position, depth } or null
+		if (hit && hit.model.equals(cup))
+		{
+			console.log(hit.node.name, hit.position, pending.frameNumber);
+		}
+		pending = null;
+	}
+	renderer.render(scene, target);
+	renderer.handBack();
+	requestAnimationFrame(frame);
+}
+```
+
+`frameNumber` is the `framesRendered` value of the render that took the query, the frame that
+the answer describes. WebGL completes the readback only after the page returns to the event
+loop. With one render per `requestAnimationFrame`, the answer arrived 2 or 3 frames after the
+render that took the query, in Chrome, Edge, and Firefox. Outside a frame loop,
+`await query.wait()` resolves to the result after a render took the query. Set
+`scene.pickBlended = true` to hit blended surfaces. The answers are the same as on the desktop;
+see [picking](../reference/api.md#picking).
+
+The first pick at a target size answers later than the next ones. In Chrome on the test laptop,
+at 1920 x 1080, the first answer arrived 21 to 41 ms after the render, later ones after 6 to
+12 ms, and a pick after 12 frames without picks after 13 to 20 ms. `prepare()` does not change
+this. See [performance](../reference/performance.md#first-pick-after-prepare).
+
 ## Handle errors
 
 filly's errors are `FillyError` and its subclasses `AssetError`, `InteropError`, and

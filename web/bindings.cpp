@@ -516,7 +516,8 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("cameras", optional_override([](const Model& model) { return array_of(model.cameras()); }))
         .function("isMesh", &Model::is_mesh)
         .function("vertexCount", optional_override([](const Model& model) { return double(model.vertex_count()); }))
-        .function("updateMesh", &update_mesh);
+        .function("updateMesh", &update_mesh)
+        .function("same", &Model::same);
 
     class_<Asset>("Asset")
         .function("memory", optional_override([](const Asset& asset) { return asset_memory(asset.memory()); }))
@@ -592,11 +593,30 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("environmentVisible", &Scene::environment_visible)
         .function("setEnvironmentVisible", &Scene::set_environment_visible)
         .function("background", &Scene::background)
-        .function("setBackground", &Scene::set_background);
+        .function("setBackground", &Scene::set_background)
+        .function("pickBlended", &Scene::pick_blended)
+        .function("setPickBlended", &Scene::set_pick_blended);
 
     class_<Preparation>("Preparation")
         .function("ready", &Preparation::ready)
         .function("pending", optional_override([](const Preparation& preparation) { return double(preparation.pending()); }));
+
+    class_<PickQuery>("PickQuery")
+        .function("ready", &PickQuery::ready)
+        .function("frameNumber", optional_override([](const PickQuery& query) {
+            const auto frame = query.frame_number();
+            return frame ? val(double(*frame)) : val::null();
+        }))
+        .function("result", optional_override([](PickQuery& query) {
+            const auto result = query.result();
+            if (!result) return val::null();
+            val out = val::object();
+            out.set("model", result->model);
+            out.set("node", result->node);
+            out.set("position", result->position);
+            out.set("depth", result->depth);
+            return out;
+        }));
 
     class_<Readback>("Readback")
         .function("ready", &Readback::ready)
@@ -657,6 +677,7 @@ EMSCRIPTEN_BINDINGS(filly) {
             return renderer.import_gl_texture(texture, int64_t(width), int64_t(height), color_space, filter, wrap);
         }))
         .function("prepare", &Renderer::prepare)
+        .function("pick", &Renderer::pick)
         .function("finish", &Renderer::finish)
         .function("resetGlState", &Renderer::reset_gl_state)
         .function("close", &Renderer::close)

@@ -436,6 +436,69 @@ def test_model_cache(page_results):
     assert value["liveAfter"] == value["liveModels"] - 2
 
 
+def _desktop_picks(renderer, scene, target, points):
+    queries = [renderer.pick(scene, x, y) for x, y in points]
+    renderer.render(scene, target)
+    renderer.finish()
+    return [query.result for query in queries]
+
+
+def _assert_picks_match(web, desktop, models):
+    assert len(web) == len(desktop)
+    for hit, expected in zip(web, desktop):
+        if expected is None:
+            assert hit is None
+            continue
+        assert hit["model"] == models.index(expected.model)
+        assert hit["node"] == expected.node.index
+        # The same float depth from the same projection; WebGL may round differently.
+        np.testing.assert_allclose(hit["position"], expected.position, atol=1e-4)
+        assert hit["depth"] == pytest.approx(expected.depth, abs=1e-4)
+
+
+def test_pick_matches_desktop(page_results):
+    value = _value(page_results, "pick")
+    with filly.Renderer() as renderer:
+        scene = renderer.create_scene()
+        back = scene.create_mesh(**filly.shapes.plane(1.6, 1.6), unlit=True, base_color=(0, 1, 0, 1))
+        back.position = (0, 0, -0.5)
+        front = scene.create_mesh(**filly.shapes.box(0.8, 0.8, 0.8), unlit=True)
+        front.rotation_euler_deg = (20, 30, 0)
+        glass = scene.create_mesh(**filly.shapes.plane(0.4, 0.4), unlit=True, base_color=(1, 0, 0, 0.3),
+                                  alpha_mode="blend")
+        glass.position = (0.55, -0.55, 0.1)
+        camera = renderer.create_camera()
+        camera.set_perspective(fov_y_deg=40, near=0.1, far=20)
+        camera.position = (0.3, 0.4, 3)
+        camera.look_at((0, 0, 0))
+        scene.camera = camera
+        target = renderer.create_render_target(width=64, height=64)
+        layers = _desktop_picks(renderer, scene, target, [(32, 32), (48, 15), (49, 49), (5, 5)])
+        scene.pick_blended = True
+        blended = _desktop_picks(renderer, scene, target, [(48, 15)])
+        instanced = renderer.create_scene()
+        model = instanced.load(instances_glb())
+        view = renderer.create_camera()
+        view.set_perspective(fov_y_deg=35, near=0.5, far=20)
+        view.position = (1, 2, 5)
+        view.look_at((0, 0, 0))
+        instanced.camera = view
+        wide = renderer.create_render_target(width=160, height=120)
+        instances = _desktop_picks(renderer, instanced, wide, [(80, 60), (40, 30), (120, 90), (100, 40), (60, 85), (5, 5)])
+        models = [front, back, glass, model]
+        assert [hit and hit.model for hit in layers] == [front, back, back, None] and blended[0].model == glass
+        assert len({hit.node.index for hit in instances if hit}) == 5
+        for name, desktop in (("layers", layers), ("blended", blended), ("instances", instances)):
+            web = value[name]
+            # The query waits for the render, which takes it: its frame is that render's.
+            assert web["queued"] is False and set(web["frames"]) == {0}
+            _assert_picks_match(web["hits"], desktop, models)
+    # Frames from the render that took the pick to the first ready() that returned true, with
+    # one render per requestAnimationFrame: 2 or 3 in Chrome, Edge, and Firefox on the test machine.
+    print("web pick latency (frames):", value["latency"])
+    assert max(value["latency"]) <= 4, value["latency"]
+
+
 def test_environment(page_results):
     value = _value(page_results, "environment")
     assert value["defaults"] == {"environment": None, "intensity": 30000, "rotationDeg": 0}

@@ -510,6 +510,77 @@ await check("gpu_frame_time", async () =>
 		timer: Boolean(gl.getExtension("EXT_disjoint_timer_query_webgl2")) };
 });
 
+// Picks in two scenes, compared with desktop: generated meshes with a blended square, and the
+// instanced boxes, whose instances are nodes. Then the latency of a pick in a requestAnimationFrame
+// loop that renders every frame and polls ready() at the start of each.
+await check("pick", async () =>
+{
+	const scene = renderer.createScene();
+	const back = scene.createMesh({ ...shapes.plane({ width: 1.6, height: 1.6 }), unlit: true, baseColor: [0, 1, 0, 1] });
+	back.position = [0, 0, -0.5];
+	const front = scene.createMesh({ ...shapes.box({ width: 0.8, height: 0.8, depth: 0.8 }), unlit: true });
+	front.rotationEulerDeg = [20, 30, 0];
+	const glass = scene.createMesh({ ...shapes.plane({ width: 0.4, height: 0.4 }), unlit: true,
+		baseColor: [1, 0, 0, 0.3], alphaMode: "blend" });
+	glass.position = [0.55, -0.55, 0.1];
+	const camera = renderer.createCamera();
+	camera.setPerspective({ fovYDeg: 40, near: 0.1, far: 20 });
+	camera.position = [0.3, 0.4, 3];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	const models = [front, back, glass];
+	const target = renderer.createRenderTarget(SIZE, SIZE);
+	const describe = (result) => result && { model: models.findIndex((model) => model.equals(result.model)),
+		node: result.node.index, position: result.position, depth: result.depth };
+	const pickAll = async (points, scene, target) =>
+	{
+		const queries = points.map(([x, y]) => renderer.pick(scene, x, y));
+		const queued = queries[0].ready();
+		renderer.render(scene, target);
+		const frame = renderer.stats.framesRendered;
+		const hits = [];
+		for (const query of queries)
+		{
+			hits.push(describe(await query.wait()));
+		}
+		return { queued, frames: queries.map((query) => query.frameNumber - frame), hits };
+	};
+	const layers = await pickAll([[32, 32], [48, 15], [49, 49], [5, 5]], scene, target);
+	scene.pickBlended = true;
+	const blended = await pickAll([[48, 15]], scene, target);
+
+	const instanced = renderer.createScene();
+	const model = await instanced.loadUrl("instances.glb");
+	models.push(model);
+	const view = renderer.createCamera();
+	view.setPerspective({ fovYDeg: 35, near: 0.5, far: 20 });
+	view.position = [1, 2, 5];
+	view.lookAt([0, 0, 0]);
+	instanced.camera = view;
+	const wide = renderer.createRenderTarget(160, 120);
+	const instances = await pickAll([[80, 60], [40, 30], [120, 90], [100, 40], [60, 85], [5, 5]], instanced, wide);
+
+	const latency = [];
+	for (let trial = 0; trial < 10; trial++)
+	{
+		const query = renderer.pick(instanced, 80, 60);
+		let frames = 0;
+		do
+		{
+			renderer.render(instanced, wide);
+			renderer.handBack();
+			await new Promise((resolve) => requestAnimationFrame(resolve));
+			frames++;
+		} while (!query.ready());
+		latency.push(frames);
+	}
+	target.close();
+	wide.close();
+	scene.close();
+	instanced.close();
+	return { layers, blended, instances, latency };
+});
+
 results.platform = renderer.glPlatform;
 results.framesRendered = renderer.stats.framesRendered;
 renderer.close();

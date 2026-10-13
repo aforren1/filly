@@ -71,9 +71,10 @@ Assets with roughly 18,000 or more meshes can still exceed the ring and abort th
 | `create_render_target(*, width, height, format="rgba8", depth=True)` | Return a `RenderTarget`. Dimensions must be 1 through 8192. |
 | `import_gl_target(texture_id, *, width, height, format="rgba8", depth=True, on_renderer_close=None)` | Return an `ImportedTarget` for a host-owned 2D texture with `GL_RGBA8` storage. Requires a shared context. See [imported targets](#importedtarget). |
 | `render(scene, target, *, camera=None, viewport=None, clear=True)` | Submit one frame to a `RenderTarget` or `ImportedTarget` and flush it to the driver. See [render calls](#render-calls). Return `None`. |
+| `pick(scene, x, y)` | Return a `PickQuery` for the model surface at target pixel `(x, y)`. The next `render()` of the scene answers it. See [picking](#picking). |
 | `create_texture(pixels, *, color_space, mipmaps=False, filter="linear", wrap="repeat")` | Return a [`Texture`](#texture) with the pixels of a NumPy array. |
 | `import_gl_texture(texture_id, *, width, height, color_space, filter="linear", wrap="repeat")` | Return an [`ImportedTexture`](#importedtexture) that materials sample. Requires a shared context. |
-| `prepare(scene)` | Start to compile the programs of the scene and return a [`Preparation`](#prepare-a-scene). Does not block. |
+| `prepare(scene)` | Start to compile the programs of the scene and return a [`Preparation`](#prepare-a-scene). The first call of a renderer also starts a hidden pick that does the first pick's driver work. Does not block. |
 | `finish()` | Block until prior GPU work finishes. |
 | `close()` | Call the `on_renderer_close` callbacks of open imported targets, then release every resource of the renderer. Repeated calls are valid. |
 | `closed` | Report whether the engine is closed. |
@@ -162,7 +163,7 @@ PsychoPy or pyglet host measured around the frame. See
 `Preparation` immediately. `Preparation.ready()` returns `True` when all of them are compiled.
 Each call also lets Filament make progress, so call it once per frame, or poll it with a short
 sleep. `Preparation.pending` is the number of materials and output passes that are not
-compiled.
+compiled, plus one while the picking warm-up below runs.
 
 Call `prepare()` after you set the lights, shadows, fog, antialiasing, and output options of the
 scene. It compiles the variants that those settings can use, for every material of the scene and
@@ -177,6 +178,16 @@ for each renderer.
 On the test machine (Intel Iris Xe, warm driver cache), `ready()` was `True` after 133 to 160 ms,
 and the first render of a lit sphere took 11 to 13 ms instead of 17 to 24 ms. For browsers, see
 [web](../explanation/web.md#shader-compilation).
+
+The first `prepare()` of a renderer also does the one-time driver work of the first
+[pick](#picking). It renders one hidden frame with one pick, into its own empty scene and a
+32 x 32 target, and `ready()` returns `True` only after that pick has its answer. Your scenes,
+targets, cameras, and queued picks do not change. `Stats` does not count the hidden frame:
+`frames_rendered` and `gpu_frame_number` count only `render()` calls. Later `prepare()` calls of
+the renderer do not render it again. It added 0.3 to 1 ms to the `prepare()` call. Until
+`ready()` was `True`, it added no measurable time on Intel Iris Xe, where compilation took longer,
+and 3 to 8 ms on NVIDIA RTX A500. The web build does not render it, because browsers showed no
+such cost.
 
 ### Render calls
 
@@ -213,6 +224,104 @@ including a `finish()`: one full frame of a lit sphere took 1.8 ms on the direct
 5.4 ms with Filament's color grading and 4x MSAA; two eyes took 3.2 ms and 7.9 ms. CPU submission
 was 0.1 to 0.3 ms per call.
 
+### Picking
+
+`pick(scene, x, y)` asks which model surface a frame shows at a pixel, and where that surface
+is. It returns a `PickQuery` at once. The next `render()` of the scene takes the query: Filament
+draws that frame's geometry into a picking buffer and reads one pixel back. The answer arrives
+one or more frames later, without a CPU wait.
+
+```python
+query = renderer.pick(scene, x, y)
+renderer.render(scene, target)
+...
+# Once per frame, before render():
+if query.ready():
+    hit = query.result
+    if hit is not None and hit.model == cup:
+        print(hit.node.name, hit.position, query.frame_number)
+```
+
+- `x` and `y` are target pixels, counted from the lower-left corner of the target, as for
+  `viewport`. Floats are valid: the pick reads the pixel that contains the point. For a
+  top-left origin, for example image rows or window coordinates, use `y = height - y_top`.
+- Every query that is queued when a scene renders belongs to that render, with the camera and
+  viewport of the call. A point outside the viewport has no hit.
+- When queries are queued, the viewport must be at least 32 x 32 pixels, or 64 x 64 with
+  `ssao`. A smaller viewport raises `ValueError`, and the queries wait for the next render.
+
+| `PickQuery` member | Behavior |
+| --- | --- |
+| `ready()` | Deliver the answers that arrived, and return `True` when this query has its answer. Does not wait for the GPU. See [when the answer arrives](#when-the-answer-arrives). |
+| `result` | A `PickResult`, or `None` when no model surface is at the point. Raises `FillyError` before the answer arrives, and when the scene closed before a render took the query. |
+| `frame_number` | The frame that the answer describes: `stats.frames_rendered` just after the render that took the query. `None` before that render. |
+
+| `PickResult` member | Behavior |
+| --- | --- |
+| `model` | The `Model` that was hit. Compare it with `==`. |
+| `node` | The `Node` that carries the mesh. For a skinned mesh, this is the mesh node, not a joint. Each `EXT_mesh_gpu_instancing` instance is its own child node. A generated mesh has `model.node(0)`. |
+| `position` | The world position `(x, y, z)` of the surface at the center of the picked pixel. |
+| `depth` | The distance from the camera to `position` along the camera's viewing direction, in scene units. |
+
+What a pick sees:
+
+- **The frame's geometry.** Occlusion, node and model transforms, animation, skinning, morph
+  targets, instances, and visibility are those of the frame that took the query. Edits after
+  that render do not change the answer.
+- **Masked materials** (`alpha_mode="mask"`). Cut-out regions do not hit: the pick finds the
+  surface behind, as the image shows it.
+- **Blended materials** (`alpha_mode="blend"`). By default, picks pass through them. With
+  `scene.pick_blended = True`, a blended surface is a hit over its whole primitive, also where
+  its alpha is zero, and the nearest blended or opaque surface wins.
+- **Not models.** The background, the skybox, and lights are no hit.
+- **Image effects.** MSAA, FXAA, bloom, depth of field, and refraction do not change the answer:
+  it is the triangle that covers the pixel center.
+- **SSAO.** With `ssao`, picks read Filament's half-resolution depth buffer. An answer then
+  describes a 2 x 2 pixel block, and `position` is the surface point at the center of the block.
+  Without `ssao`, each pixel is exact.
+- **Position accuracy.** The picking buffer stores the 32-bit float depth of the fragment, not a
+  depth buffer value. On a tilted test plane 3 to 7 units from the camera, positions were
+  within 9e-5 units of the analytic intersection (perspective; 4e-5 orthographic), about
+  1/450 of a pixel, on both test GPUs.
+
+The first ready() that returns `True` looks up the node. A model that closed before then gives
+`None`.
+
+#### When the answer arrives
+
+Filament checks the readback when a later frame begins on its driver thread, or in `finish()`.
+`ready()` then delivers the answer. Call `ready()` once per frame before `render()`, or call
+`finish()` after the render that takes the query: after `finish()`, every query of earlier
+renders has its answer, and `result` works without `ready()`. If the renderer has not rendered
+since the render that took the query, for example because the host renders only after changes,
+`ready()` begins a frame that renders nothing, so that Filament checks the readback. The answer
+then arrives at a later call. Measured in a 60 Hz loop on the
+development laptop (see [Performance](performance.md#picking)):
+
+| Loop | Intel Iris Xe | NVIDIA RTX A500 |
+| --- | --- | --- |
+| `ready()` at the start of each frame | 2 frames later (1 more render), 33 ms | 1 frame later (no more renders), 17 ms |
+| `ready()` just after each `render()` | After 1 or 2 more renders, 33 ms | After 1 more render, 17 ms |
+| `finish()` after the render, then `ready()` | Same frame; `render()` and `finish()` took 2.2 to 4.9 ms | Same frame; 0.9 to 2.0 ms |
+
+Without [`prepare()`](#prepare-a-scene), the first frame with a pick in a renderer took 45 to 60 ms
+longer on Intel Iris Xe, also in an empty scene: a one-time cost in the driver. `prepare()` pays
+it in a hidden frame. A pick frame that follows 8 or more frames without picks costs 2 to 3 ms
+more than consecutive pick frames, on both test GPUs, because Filament allocates the picking
+buffer again. The first pick frame at a target size has this cost too. At 1920 x 1080, after
+`prepare()`, the first pick frame took 7 to 10 ms (render and `finish()`) on Intel Iris Xe,
+against 3 ms for later ones.
+
+A frame with picks costs one more depth pass of the scene geometry (with `ssao` and without
+`pick_blended`, the SSAO depth pass serves) and one readback per query. At 1920 x 1080, one query
+added 0.1 to 1.8 ms to the GPU frame on Intel Iris Xe and 0.6 to 0.9 ms on NVIDIA RTX A500, and
+each further query about 0.1 to 0.2 ms. Frames without queries cost the same as before. CPU
+submission did not change. See [Performance](performance.md#picking).
+
+In JavaScript, `renderer.pick(scene, x, y)` returns a `PickQuery` with `ready()`, `result`
+(`{ model, node, position, depth }` or `null`), `frameNumber`, and `await query.wait()`; the
+scene option is `scene.pickBlended`. See [web](../how-to/web.md#pick-objects).
+
 ## Scene
 
 | Member | Behavior |
@@ -228,6 +337,7 @@ was 0.1 to 0.3 ms per call.
 | `background` | Get or set linear RGBA values in `[0, 1]`. Default: `(0, 0, 0, 1)`. |
 | [Rendering options](#rendering-options) | `encoding`, `output_path`, `tone_mapping`, `antialiasing`, `msaa`, `shadows`, `transparent`, `dithering`, `ssao`, `bloom`, `fog`, `depth_of_field`, `vignette`, and the [fog](#fog) and [vignette](#vignette) parameters. |
 | [Environment members](#environment-lighting) | `environment`, `environment_intensity`, `environment_rotation_deg`, `environment_visible`. |
+| `pick_blended` | Get or set whether [picks](#picking) hit blended (`alpha_mode="blend"`) surfaces. Default: `False`, picks pass through them. |
 | `close()` | Release the scene's models, lights, and view. Renderer cameras, assets, and environments stay open. Repeated calls are valid. |
 | `closed` | Report whether the scene or its renderer is closed. |
 
@@ -820,6 +930,9 @@ Imported perspective cameras support an omitted far plane. Imported orthographic
   [generated mesh](#generated-meshes).
 - `close()`: remove the model from its scene and release its material copies. Repeated calls are valid.
 - `closed`: report whether the model, its scene, or its renderer is closed.
+
+Models support `==` and `hash()`: two handles of the same model are equal, for example the model
+of a [pick](#picking) and the handle that `load()` returned.
 
 ### Keys
 

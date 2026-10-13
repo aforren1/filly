@@ -522,6 +522,126 @@ NVIDIA RTX A500:
   instances on Intel the GPU frame went from 6.1 to 4.3 ms; for 20,000, `cpu_submit_ms` went
   from 28 to 14 ms, because frames without instancing filled Filament's command queue.
 
+## Picking
+
+Measured on October 12, 2026 with the build that added `Renderer.pick()`. 1920 x 1080 offscreen,
+AC, 60 Hz pacing by a sleep, no `finish()`. Scenes: ChronographWatch (one asset, one directional
+light), and 400 lit boxes (400 generated meshes, so 400 draws per depth pass). Each process
+rendered 60 warmup frames and then six blocks of 360 frames with 0, 1, 10, 0, 1, and 10
+queries per frame. 3 rounds; each round ran every configuration once in a fresh process, in
+an order rotated by one per round. Cells: median of the per-round medians (frames 30 and
+later of each block), range in brackets, ms. "ready()" is the time of one `ready()` call.
+
+| GPU | Scene | Queries per frame | `cpu_submit_ms` | GPU frame | `ready()` |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Intel | Watch | 0 | 0.21 [0.21-0.22] | 5.93 [5.67-6.62] | 0.007 |
+| Intel | Watch | 1 | 0.21 [0.20-0.22] | 7.76 [7.25-7.78] | 0.023 |
+| Intel | Watch | 10 | 0.21 [0.20-0.22] | 9.38 [9.28-9.59] | 0.030 |
+| Intel | Watch, `ssao` | 0 | 0.24 [0.21-0.33] | 7.91 [7.77-8.26] | 0.007 |
+| Intel | Watch, `ssao` | 1 | 0.23 [0.23-0.38] | 8.04 [6.90-8.39] | 0.022 |
+| Intel | Watch, `ssao` | 10 | 0.25 [0.23-0.35] | 9.82 [9.47-9.96] | 0.031 |
+| Intel | Watch, `pick_blended` | 0 | 0.22 [0.21-0.22] | 7.29 [6.49-7.39] | 0.007 |
+| Intel | Watch, `pick_blended` | 1 | 0.21 [0.21-0.22] | 7.54 [6.42-8.10] | 0.023 |
+| Intel | Watch, `pick_blended` | 10 | 0.21 [0.20-0.23] | 9.66 [8.32-9.74] | 0.030 |
+| Intel | 400 boxes | 0 | 0.36 [0.36-0.86] | 2.07 [2.07-2.09] | 0.006 |
+| Intel | 400 boxes | 1 | 0.46 [0.43-0.85] | 3.56 [3.35-4.69] | 0.021 |
+| Intel | 400 boxes | 10 | 0.43 [0.38-1.09] | 4.43 [4.01-6.21] | 0.046 |
+| NVIDIA | Watch | 0 | 0.29 [0.23-0.41] | 1.12 [1.10-1.52] | 0.008 |
+| NVIDIA | Watch | 1 | 0.42 [0.25-0.44] | 2.02 [1.16-2.46] | 0.032 |
+| NVIDIA | Watch | 10 | 0.38 [0.25-0.40] | 3.07 [1.91-3.41] | 0.037 |
+| NVIDIA | Watch, `ssao` | 0 | 0.39 [0.23-0.61] | 2.05 [1.34-2.35] | 0.008 |
+| NVIDIA | Watch, `ssao` | 1 | 0.48 [0.22-0.55] | 2.68 [1.35-2.69] | 0.030 |
+| NVIDIA | Watch, `ssao` | 10 | 0.35 [0.31-0.57] | 3.10 [2.67-3.80] | 0.032 |
+| NVIDIA | Watch, `pick_blended` | 0 | 0.41 [0.33-0.45] | 1.46 [1.40-1.89] | 0.010 |
+| NVIDIA | Watch, `pick_blended` | 1 | 0.37 [0.31-0.51] | 2.01 [1.58-2.12] | 0.027 |
+| NVIDIA | Watch, `pick_blended` | 10 | 0.45 [0.33-0.45] | 3.18 [2.74-3.77] | 0.042 |
+| NVIDIA | 400 boxes | 0 | 0.64 [0.36-0.95] | 0.26 [0.19-0.45] | 0.008 |
+| NVIDIA | 400 boxes | 1 | 0.54 [0.42-1.16] | 0.99 [0.89-2.14] | 0.018 |
+| NVIDIA | 400 boxes | 10 | 0.55 [0.40-1.15] | 1.75 [1.39-3.54] | 0.041 |
+
+- **Frames without queries** run no extra pass: Filament culls its structure pass when nothing
+  reads it. filly sets the ambient-occlusion resolution to 1 only without `ssao`, so the 0-query
+  rows are the cost of the scene alone.
+- **One query** adds a full-resolution depth pass with a picking attachment, and one 1 x 1
+  readback: 1.8 ms on Intel and 0.9 ms on NVIDIA for the watch, 1.5 and 0.7 ms for 400 draws.
+  With `ssao` the SSAO depth pass carries the picking attachment, so the step is 0.1 ms (Intel)
+  to 0.6 ms (NVIDIA). The rounds of the Intel watch differed by up to 1 ms between processes,
+  so treat single-ms differences on Intel as approximate.
+- **Further queries** cost 0.1 to 0.2 ms each of GPU frame time. Filament issues one
+  `glReadPixels()` into its own pixel buffer and one fence per query; the GPU frame timer also
+  counts the gaps while the driver thread issues them.
+- **CPU.** Submission did not change beyond the spread of the rounds. `ready()` takes 0.02 to
+  0.05 ms.
+- **First pick.** Before `prepare()` rendered its hidden pick, the first frame with a pick in a
+  renderer took about 55 ms longer on Intel (render plus `finish()` 60 ms instead of 6 ms), also
+  for an empty scene, and also after `prepare()` and after an RGBA readback. Later frames did not
+  repeat it, also in new scenes and for new materials. It is a one-time cost of the driver's
+  integer readback path, not a program compile. See [first pick after prepare()](#first-pick-after-prepare).
+
+Latency, one query per trial, 120 trials, 60 Hz loop (box at 1024 x 1024 and the watch at 1920 x
+1080 gave the same counts). "Renders" counts the renders after the one that took the query,
+until `ready()` returned `True`; ms is the time from that render to that call.
+
+| Loop | Intel renders | Intel ms (median) | NVIDIA renders | NVIDIA ms (median) |
+| --- | --- | ---: | --- | ---: |
+| `ready()` at the start of each frame, before `render()` | 1 (119 of 120) | 33.3 | 0 (120 of 120) | 16.7 |
+| `ready()` just after each `render()` | 2 (100 to 116 of 120), else 1 | 33.4 to 33.5 | 1 (120 of 120) | 16.8 to 16.9 |
+| `finish()` after each `render()`, then `ready()` | 0 | 2.2 (box), 4.9 (watch) | 0 | 0.9 (box), 2.0 (watch) |
+
+Filament checks the readback fence when a frame begins or ends on its driver thread, and in
+`finish()`. On NVIDIA the fence had signaled by the end of the frame that took the query; on
+Intel only by the start of the next one. A `ready()` right after `render()` runs before the
+driver thread reaches that frame's start, so it sees the answer one render later. The one
+outlier per run (4 renders, 84 ms) is the first pick of the renderer, measured before
+`prepare()` rendered a hidden pick.
+
+In browsers (`tests/test_web.py`, one render per `requestAnimationFrame`, Intel), the answer
+arrived 2 or 3 frames after the render that took the query in Chrome, Edge, and Firefox: WebGL
+signals fences only after the page returns to the event loop.
+
+### First pick after prepare()
+
+Measured on October 13, 2026. `prepare()` renders one hidden frame with one pick, once per
+renderer (desktop only). One lit box, 1920 x 1080 offscreen, AC, a fresh process per run, 3 runs
+per row. Steps: `prepare()` and `ready()` polled every 2 ms, 5 renders, then 4 frames with one
+pick each. Each frame is `render()` plus `finish()`, in ms. "Before" is the build without the
+hidden pick; "no prepare()" is the new build without a `prepare()` call. A background compile
+job ran on the machine for part of an earlier round; these rounds ran without it.
+
+| GPU | Build | `prepare()` call | Until `ready()` | First pick frame | Later pick frames |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Intel | Before | 0.13 to 0.14 | 145 to 160 | 45 to 59 | 2.7 to 3.0 |
+| Intel | Hidden pick | 0.45 to 0.87 | 98 to 149 | 7.0 to 10.2 | 2.9 to 3.2 |
+| Intel | No `prepare()` | | | 78 to 155 (with program compiles) | 3.1 to 4.0 |
+| Intel, `ssao` | Before | 0.12 to 0.14 | 145 to 161 | 44 to 46 | 3.1 to 4.2 |
+| Intel, `ssao` | Hidden pick | 0.47 to 0.51 | 88 to 110 | 4.1 to 5.2 | 3.5 to 4.4 |
+| NVIDIA | Before | 0.15 to 0.16 | 4.9 to 5.4 | 2.6 to 2.7 | 0.5 to 1.0 |
+| NVIDIA | Hidden pick | 0.50 to 0.54 | 8.3 to 12.9 | 3.9 to 4.1 | 0.7 to 1.4 |
+| NVIDIA, `ssao` | Before | 0.15 to 0.16 | 4.8 to 5.3 | 1.1 to 1.5 | 0.8 to 2.2 |
+| NVIDIA, `ssao` | Hidden pick | 0.46 to 1.11 | 10.6 to 20.6 | 3.3 to 6.8 | 1.3 to 4.1 |
+
+- **Intel.** The hidden pick removes the one-time driver cost: the first pick frame took 7 to
+  10 ms instead of 45 to 59 ms. The time until `ready()` did not grow, because the driver does
+  the work on Filament's driver thread while the compiler threads run.
+- **NVIDIA** had no one-time cost to remove. The hidden pick added 3 to 8 ms until `ready()`.
+- **What remains** of the first pick frame is the allocation of the picking buffer at the
+  target size. Filament frees frame-graph textures that 8 frames did not use
+  (`resourceAllocatorCacheMaxAge` = 8), so a pick after 8 or more frames without picks allocates
+  it again. In the same scene, with 0 to 30 plain frames before each pick (3 picks per gap):
+
+| GPU | Pick frame after 0 to 7 plain frames | After 9, 12, or 30 plain frames | Plain frame |
+| --- | ---: | ---: | ---: |
+| Intel | 2.8 to 4.4 | 4.8 to 9.8 (most 4.9 to 6.5) | 2.2 to 3.5 |
+| NVIDIA | 0.9 to 2.0 | 2.7 to 4.1 | 0.8 to 1.5 |
+
+  After 8 plain frames, the pick frame was in between (Intel 3.0 to 4.1, NVIDIA 2.7 to 3.1).
+- **Chrome** (ANGLE on Direct3D 11, Intel; 1920 x 1080; 8 page loads, alternately with and
+  without `await renderer.prepare(scene)`, a `requestAnimationFrame` between frames). The first
+  pick's `render()` plus `finish()` took 2.4 to 4.4 ms, later ones 0.6 to 1.8 ms, and its answer
+  arrived 21 to 41 ms after the render, later ones 6 to 12 ms. A hidden pick in `prepare()` (a
+  test build) did not change these numbers, so the web build does not render it. A pick after
+  12 frames without picks answered after 13 to 20 ms.
+
 ## GPU frame time validation
 
 `Stats.gpu_frame_ms` exposes Filament's frame timer. On October 12, 2026 it was compared with

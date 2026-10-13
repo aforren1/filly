@@ -142,6 +142,7 @@ void clipping(double near, double far) {
 namespace detail {
 struct Resource;
 struct TextureData;
+struct PickData;
 struct State {
     f::Engine* engine = nullptr;
     f::Renderer* renderer = nullptr;
@@ -188,6 +189,8 @@ struct State {
     f::View* fill_view = nullptr;
     f::Scene* fill_scene = nullptr;
     f::Skybox* fill_sky = nullptr;
+    // The hidden pick of the first prepare() (see warm_picking()); null before it, and in browsers.
+    std::shared_ptr<PickData> pick_warmup;
     // filly's output passes (see output_pass.h). Each draws one full-screen triangle in its own
     // view, after the scene view in the same frame.
     struct Pass {
@@ -312,6 +315,28 @@ struct CameraData : Resource {
 };
 
 struct ModelData;
+struct SceneData;
+// One Renderer::pick(). Filament's callback holds a reference until it runs, which it does once
+// for every query that the view took, also when the engine shuts down.
+struct PickData {
+    std::shared_ptr<State> state;
+    std::weak_ptr<SceneData> scene;
+    double x = 0, y = 0;
+    enum class Status : uint8_t { queued, submitted, answered, cancelled } status = Status::queued;
+    uint64_t frame = 0;
+    // Captured when a render takes the query: the camera of that frame and the sampled point
+    // in normalized device coordinates.
+    m::mat4 world_from_clip;
+    m::double3 eye, forward;
+    double ndc_x = 0, ndc_y = 0;
+    // Filament's answer: the renderable's entity (0 for none) and its depth (1 at the near
+    // plane, 0 infinitely far).
+    uint32_t entity = 0;
+    float depth = 0;
+    bool resolved = false;
+    std::optional<PickResult> result;
+};
+
 struct SceneData : Resource {
     using Resource::Resource;
     static constexpr Kind tag = Kind::scene;
@@ -319,6 +344,9 @@ struct SceneData : Resource {
     f::Scene* scene = nullptr;
     f::View* view = nullptr;
     std::shared_ptr<CameraData> active_camera;
+    // Picks for the next render.
+    std::vector<std::shared_ptr<PickData>> picks;
+    bool pick_blended = false;
     // Why the scene lost its camera, for the error of the next render; null if it did not.
     const char* lost_camera = nullptr;
     std::vector<std::shared_ptr<Resource>> children;
@@ -379,6 +407,8 @@ struct SceneData : Resource {
         active_camera.reset();
         children.clear();
         dirty_bones.clear();
+        for (auto& pick : picks) pick->status = PickData::Status::cancelled;
+        picks.clear();
     }
     ~SceneData() override { release(); }
 };
@@ -1674,6 +1704,9 @@ Scene Renderer::create_scene() {
     data->view->setTemporalAntiAliasingOptions(taa);
     f::AmbientOcclusionOptions ao;
     ao.enabled = false;
+    // Picks read Filament's structure buffer, which has this resolution. Without SSAO only
+    // frames with picks render it, so full resolution costs nothing in other frames.
+    ao.resolution = 1.0f;
     data->view->setAmbientOcclusionOptions(ao);
     f::BloomOptions bloom;
     bloom.enabled = false;
@@ -1847,6 +1880,168 @@ f::View* fill_view(detail::State& state) {
     state.fill_view->setShadowingEnabled(false);
     return state.fill_view;
 }
+// Filament answers picks from its structure buffer, which has the ambient occlusion resolution
+// (see Scene::set_ssao()) and at least 32 texels on a side (PostProcessManager::structure()).
+double structure_scale(const detail::SceneData& data) { return data.ssao ? 0.5 : 1.0; }
+uint32_t pick_minimum(const detail::SceneData& data) { return data.ssao ? 64 : 32; }
+void on_pick(const f::View::PickingQueryResult& result, f::View::PickingQuery* query) {
+    std::unique_ptr<std::shared_ptr<detail::PickData>> hold(static_cast<std::shared_ptr<detail::PickData>*>(query->storage[0]));
+    auto& pick = **hold;
+    pick.entity = result.renderable.getId();
+    pick.depth = result.depth;
+    pick.status = detail::PickData::Status::answered;
+}
+// Hands the scene's queued picks to its view for this frame and returns them in `taken`.
+void submit_picks(detail::SceneData& data, const f::Camera& camera, const f::Viewport& viewport,
+                  std::vector<std::shared_ptr<detail::PickData>>& taken) {
+    using Status = detail::PickData::Status;
+    taken.swap(data.picks);
+    const double scale = structure_scale(data);
+    // Camera::getProjectionMatrix() has the GL depth convention. Filament renders with depth
+    // reversed into [0, 1] and with the camera's scaling and shift (FCamera::getProjectionMatrix()),
+    // and the picking pass stores that depth.
+    const auto scaling = camera.getScaling();
+    const auto shift = camera.getShift();
+    const m::mat4 device(m::mat4::row_major_init{
+        scaling.x, 0.0, 0.0, shift.x,
+        0.0, scaling.y, 0.0, shift.y,
+        0.0, 0.0, -0.5, 0.5,
+        0.0, 0.0, 0.0, 1.0});
+    const m::mat4 world_from_view = camera.getModelMatrix();
+    const m::mat4 world_from_clip = inverse(device * camera.getProjectionMatrix() * inverse(world_from_view));
+    for (auto& pick : taken) {
+        const double x = std::floor(pick->x) - viewport.left, y = std::floor(pick->y) - viewport.bottom;
+        if (x < 0 || y < 0 || x >= double(viewport.width) || y >= double(viewport.height)) {
+            pick->status = Status::answered;
+            continue;
+        }
+        // Filament reads texel (x, y) * scale (View::executePickingQueries()); the depth is the
+        // value at that texel's center.
+        pick->ndc_x = 2 * (std::floor(x * scale) + 0.5) / scale / viewport.width - 1;
+        pick->ndc_y = 2 * (std::floor(y * scale) + 0.5) / scale / viewport.height - 1;
+        pick->world_from_clip = world_from_clip;
+        pick->eye = world_from_view[3].xyz;
+        pick->forward = -normalize(world_from_view[2].xyz);
+        auto& query = data.view->pick(uint32_t(x), uint32_t(y), nullptr, &on_pick);
+        query.storage[0] = new std::shared_ptr<detail::PickData>(pick);
+        pick->status = Status::submitted;
+    }
+}
+#if !defined(__EMSCRIPTEN__)
+// The first picking readback of a renderer cost the Intel Iris Xe driver 45 to 60 ms, also in an
+// empty scene; later ones did not. prepare() pays it here, in a frame of its own empty view and
+// 32 x 32 target (Filament's minimum structure buffer), so that no scene, target, camera, or
+// Stats changes. Browsers showed no such cost (see docs/reference/performance.md#picking).
+std::shared_ptr<detail::PickData> warm_picking(detail::State& state) {
+    using T = f::Texture;
+    constexpr uint32_t size = 32;
+    auto& engine = *state.engine;
+    auto* color = T::Builder().width(size).height(size).levels(1).sampler(T::Sampler::SAMPLER_2D)
+        .format(T::InternalFormat::RGBA8).usage(T::Usage::COLOR_ATTACHMENT).build(engine);
+    auto* target = f::RenderTarget::Builder().texture(f::RenderTarget::AttachmentPoint::COLOR, color).build(engine);
+    auto* scene = engine.createScene();
+    auto* view = engine.createView();
+    const auto camera_entity = utils::EntityManager::get().create();
+    auto* camera = engine.createCamera(camera_entity);
+    camera->setProjection(f::Camera::Projection::ORTHO, -1, 1, -1, 1, 0, 1);
+    view->setScene(scene);
+    view->setCamera(camera);
+    view->setRenderTarget(target);
+    view->setViewport({0, 0, size, size});
+    view->setPostProcessingEnabled(false);
+    view->setShadowingEnabled(false);
+    auto warmup = std::make_shared<detail::PickData>();
+    auto& query = view->pick(size / 2, size / 2, nullptr, &on_pick);
+    query.storage[0] = new std::shared_ptr<detail::PickData>(warmup);
+    warmup->status = detail::PickData::Status::submitted;
+    f::Renderer::ClearOptions clear;
+    clear.clear = true;
+    clear.discard = true;
+    state.renderer->setClearOptions(clear);
+    // Rendered also when beginFrame() returns false, as in Renderer::submit().
+    state.renderer->beginFrame(state.frame_chain);
+    state.renderer->render(view);
+    state.renderer->endFrame();
+    // The readback owns its query, so the view can go before it completes.
+    engine.destroy(view);
+    engine.destroy(scene);
+    engine.destroy(target);
+    engine.destroy(color);
+    engine.destroyCameraComponent(camera_entity);
+    utils::EntityManager::get().destroy(camera_entity);
+    return warmup;
+}
+#endif
+}
+PickQuery Renderer::pick(const Scene& scene, double x, double y) {
+    state_->check();
+    auto& data = *scene.data_;
+    if (data.state != state_) throw std::invalid_argument("Scene must belong to this renderer");
+    data.check();
+    if (!std::isfinite(x) || !std::isfinite(y)) throw std::invalid_argument("Pick coordinates must be finite");
+    auto pick = std::make_shared<detail::PickData>();
+    pick->state = state_;
+    pick->scene = scene.data_;
+    pick->x = x;
+    pick->y = y;
+    data.picks.push_back(pick);
+    return PickQuery(pick);
+}
+PickQuery::PickQuery(std::shared_ptr<detail::PickData> data) : data_(std::move(data)) {}
+std::optional<uint64_t> PickQuery::frame_number() const {
+    data_->state->check_thread();
+    return data_->frame ? std::optional<uint64_t>(data_->frame) : std::nullopt;
+}
+bool PickQuery::ready() {
+    using Status = detail::PickData::Status;
+    auto& pick = *data_;
+    if (pick.status == Status::submitted) {
+        auto& state = *pick.state;
+        state.check();
+#if defined(__EMSCRIPTEN__)
+        // The single-threaded driver checks readback fences only when it runs; WebGL signals
+        // them between turns of the event loop.
+        detail::flush_and_wait(*state.engine);
+#else
+        // Filament checks the readback's fence when a later frame begins or in finish(); the
+        // callback then waits in the message queue. A caller that renders only after changes
+        // makes no later frame, so a frame that renders nothing checks the fence instead, as in
+        // Preparation::ready(); its answer arrives at a later call.
+        if (state.stats.frames_rendered == pick.frame) {
+            if (state.renderer->beginFrame(state.frame_chain)) state.renderer->endFrame();
+            state.engine->flush();
+        }
+#endif
+        state.engine->pumpMessageQueues();
+    }
+    if (pick.status == Status::cancelled) return true;
+    if (pick.status != Status::answered) return false;
+    if (!pick.resolved) {
+        pick.resolved = true;
+        // Every renderable of a model is a glTF node entity, also the generated mesh's and each
+        // expanded EXT_mesh_gpu_instancing instance. Other renderables, such as the skybox, are
+        // not hits.
+        const auto scene = pick.scene.lock();
+        const auto entity = utils::Entity::import(pick.entity);
+        if (pick.entity && scene && scene->scene) {
+            for (const auto& child : scene->children) {
+                auto model = detail::resource_cast<detail::ModelData>(child);
+                if (!model || !model->asset || detail::node_index(*model, entity) == SIZE_MAX) continue;
+                const auto point = pick.world_from_clip * m::double4(pick.ndc_x, pick.ndc_y, double(pick.depth), 1.0);
+                const auto position = point.xyz / point.w;
+                pick.result = PickResult{Model(model), Node(model, pick.entity), vec(m::float3(position)),
+                                         float(dot(position - pick.eye, pick.forward))};
+                break;
+            }
+        }
+    }
+    return true;
+}
+std::optional<PickResult> PickQuery::result() {
+    if (!ready()) throw FillyError("The pick has no answer yet: render the scene, then call ready() until it returns true");
+    if (data_->status == detail::PickData::Status::cancelled)
+        throw FillyError("The scene closed before a render took the pick");
+    return data_->result;
 }
 void Renderer::submit(const Scene& scene, detail::TargetData& target, const RenderOptions& options) {
     auto& data = *scene.data_;
@@ -1867,6 +2062,9 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
                 + std::to_string(target.width) + "x" + std::to_string(target.height) + " target");
         x = uint32_t(v[0]); y = uint32_t(v[1]); width = uint32_t(v[2]); height = uint32_t(v[3]);
     }
+    if (!data.picks.empty() && (width < pick_minimum(data) || height < pick_minimum(data)))
+        throw std::invalid_argument("Picks need a viewport of at least " + std::to_string(pick_minimum(data)) + " x "
+            + std::to_string(pick_minimum(data)) + " pixels" + (data.ssao ? " with ssao" : ""));
     for (const auto* input : state_->host_inputs)
         if (input->writing) throw InteropError("Leave write() on every host texture before rendering");
     const auto start = std::chrono::steady_clock::now();
@@ -1943,6 +2141,8 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
     state_->engine->flush();
     state_->interop->begin_frame_timer();
 #endif
+    std::vector<std::shared_ptr<detail::PickData>> picks;
+    if (!data.picks.empty()) submit_picks(data, *camera->camera, viewport, picks);
     const auto frame_begin = std::chrono::steady_clock::now();
     state_->renderer->beginFrame(state_->frame_chain);
     if (fill) {
@@ -1986,6 +2186,7 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
 #endif
     target.rendered = true;
     const auto number = ++state_->stats.frames_rendered;
+    for (auto& pick : picks) pick->frame = number;
     // Filament records a frame's begin time in beginFrame(), or in endFrame() when its frame
     // skipper deferred the frame, so the span covers both.
     auto nanoseconds = [](auto time) {
@@ -2005,6 +2206,7 @@ namespace detail {
 struct PrepareData {
     std::shared_ptr<State> state;
     size_t pending = 0;
+    std::shared_ptr<PickData> warmup;
 };
 }
 Preparation Renderer::prepare(const Scene& scene) {
@@ -2073,13 +2275,19 @@ Preparation Renderer::prepare(const Scene& scene) {
             ? detail::output_pass(*state_, state_->encode_graded, detail::PassKind::encode_graded) : state_->encode);
         if (data.antialiasing == "fxaa") compile_pass(detail::output_pass(*state_, state_->fxaa, detail::PassKind::fxaa));
     }
+#if !defined(__EMSCRIPTEN__)
+    if (!state_->pick_warmup) state_->pick_warmup = warm_picking(*state_);
+    result->warmup = state_->pick_warmup;
+#endif
     engine.flush();
     return Preparation(result);
 }
 Preparation::Preparation(std::shared_ptr<detail::PrepareData> data) : data_(std::move(data)) {}
-size_t Preparation::pending() const { return data_->pending; }
+size_t Preparation::pending() const {
+    return data_->pending + (data_->warmup && data_->warmup->status != detail::PickData::Status::answered);
+}
 bool Preparation::ready() {
-    if (!data_->pending) return true;
+    if (!pending()) return true;
     auto& state = *data_->state;
     state.check();
     // A frame begin ticks the backend, which advances compilation and queues the completion
@@ -2087,7 +2295,7 @@ bool Preparation::ready() {
     if (state.renderer->beginFrame(state.frame_chain)) state.renderer->endFrame();
     state.engine->flush();
     state.engine->pumpMessageQueues();
-    return !data_->pending;
+    return !pending();
 }
 void Renderer::reset_gl_state() {
     state_->check();
