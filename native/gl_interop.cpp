@@ -412,8 +412,14 @@ PlatformPtr select_offscreen(SyncQueue& sync, const char*& name) {
         }
         if (choice == "egl") throw BackendError("EGL offscreen rendering is not available: " + probe.reason);
     }
-    // PlatformGLX exits the process when it cannot open a display.
+    // PlatformGLX exits the process when it cannot open a display, so check again just before.
+    // An X server can refuse a connection right after accepting one: Xvfb did once in CI
+    // (2026-10-13). A software EGL device from the probe is a better answer than an error then.
     if (!x_display_available()) {
+        if (probe.device) {
+            name = "egl";
+            return std::make_unique<SyncPlatform<EglPlatform>>(sync, std::move(probe.device));
+        }
         if (choice == "glx") throw BackendError("FILLY_OFFSCREEN_GL=glx needs an X display; DISPLAY is unset or unreachable");
         throw BackendError("Offscreen rendering needs an EGL device or an X display. EGL: " + probe.reason);
     }
