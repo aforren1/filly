@@ -1,17 +1,18 @@
 // Serve a folder, open one page in a browser, and print the page's window.testResult as JSON.
 //
-// Usage: node run_page.mjs FOLDER PAGE BROWSER EXECUTABLE
+// Usage: node run_page.mjs FOLDER PAGE BROWSER EXECUTABLE [WASM_TYPE]
 //
 // The page sets window.testResult when it is done. Page errors and console errors are reported
-// with the result. The server sends no special headers.
+// with the result, and console warnings too. The server sends no special headers; WASM_TYPE
+// replaces the Content-Type of .wasm files (default application/wasm).
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import puppeteer from "puppeteer-core";
 
-const [folder, pageName, browserName, executable] = process.argv.slice(2);
+const [folder, pageName, browserName, executable, wasmType] = process.argv.slice(2);
 const types = { ".html": "text/html", ".mjs": "text/javascript", ".js": "text/javascript",
-	".wasm": "application/wasm", ".json": "application/json" };
+	".wasm": wasmType ?? "application/wasm", ".json": "application/json" };
 const server = http.createServer((request, response) =>
 {
 	const file = path.join(folder, decodeURIComponent(new URL(request.url, "http://host").pathname));
@@ -28,7 +29,7 @@ const server = http.createServer((request, response) =>
 	});
 }).listen(0);
 
-const report = { pageErrors: [], consoleErrors: [] };
+const report = { pageErrors: [], consoleErrors: [], consoleWarnings: [] };
 const browser = await puppeteer.launch({
 	executablePath: executable,
 	browser: browserName === "firefox" ? "firefox" : "chrome",
@@ -44,6 +45,10 @@ try
 		if (message.type() === "error" && !message.text().includes("404"))
 		{
 			report.consoleErrors.push(message.text());
+		}
+		else if (message.type() === "warn")
+		{
+			report.consoleWarnings.push(message.text());
 		}
 	});
 	await page.goto(`http://localhost:${server.address().port}/${pageName}`);

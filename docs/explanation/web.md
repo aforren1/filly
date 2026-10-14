@@ -155,6 +155,10 @@ Firefox has no `KHR_parallel_shader_compile`. Filament then compiles at the firs
   `write(fn)`) keep only the bookkeeping.
 - Files load from memory: `loadUrl()` fetches a `.glb`, or a `.gltf` and the buffers and images
   it names, and writes them to Emscripten's in-memory file system for the load.
+- `filly.js` compiles `filly-core.wasm` while it downloads only if the server sends it as
+  `application/wasm`. Some static hosts, Pavlovia among them, send another type. Then
+  `filly.js` compiles the downloaded bytes. Emscripten's own loader would log an error and
+  download the file again.
 
 ## Output compared with the desktop
 

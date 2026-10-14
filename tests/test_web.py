@@ -108,8 +108,9 @@ def _web_build():
     return build
 
 
-def _run_page(browser, page, folder):
-    """Serve the web build, the pages, and tree.glb from folder; return the page's testResult."""
+def _run_page(browser, page, folder, wasm_type=None, report=False):
+    """Serve the web build, the pages, and tree.glb from folder; return the page's testResult,
+    or with `report`, also the console messages. `wasm_type`: the Content-Type of .wasm files."""
     executable = os.environ.get(f"FILLY_TEST_{browser.upper()}", EXECUTABLES.get(browser, ""))
     node = shutil.which("node")
     if not node:
@@ -128,12 +129,13 @@ def _run_page(browser, page, folder):
         (folder / "tree.glb").write_bytes(tree_glb())
         (folder / "instances.glb").write_bytes(instances_glb())
         shutil.copytree(ROOT / "tests" / "data" / "draco-box", folder / "draco-box")
-    result = subprocess.run([node, str(WEB / "run_page.mjs"), str(folder), page, browser, executable],
+    command = [node, str(WEB / "run_page.mjs"), str(folder), page, browser, executable]
+    result = subprocess.run(command + ([wasm_type] if wasm_type else []),
                             capture_output=True, text=True, timeout=300, cwd=WEB)
     assert result.returncode == 0, result.stderr[-3000:]
-    report = json.loads(result.stdout.strip().splitlines()[-1])
-    assert report["pageErrors"] == [], report["pageErrors"]
-    return report["result"]
+    output = json.loads(result.stdout.strip().splitlines()[-1])
+    assert output["pageErrors"] == [], output["pageErrors"]
+    return output if report else output["result"]
 
 
 @pytest.fixture(scope="module", params=BROWSERS)
@@ -388,6 +390,18 @@ def test_gpu_frame_time(page_results):
     large = np.median([ms for number, ms, _ in value["times"] if number % 2 == 0])
     small = np.median([ms for number, ms, _ in value["times"] if number % 2 == 1])
     assert large > 2 * small, value
+
+
+def test_wasm_without_wasm_type(browser_folder):
+    """A host that sends the .wasm file as application/octet-stream, as Pavlovia does: the module
+    loads without the console error and second download of Emscripten's fallback."""
+    browser, folder = browser_folder
+    output = _run_page(browser, "handover.html", folder, wasm_type="application/octet-stream",
+                       report=True)
+    assert output["consoleErrors"] == [], output["consoleErrors"]
+    warnings = [text for text in output["consoleWarnings"] if "wasm" in text.lower()]
+    assert warnings == [], warnings
+    assert output["result"]["readValues"]["width"] == 512
 
 
 def test_handover(handover_results):

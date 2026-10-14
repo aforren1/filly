@@ -48,9 +48,38 @@ let loadedModule = null;
 /** Load the WebAssembly module once per page. filly-core.wasm is resolved next to this file. */
 export function loadModule()
 {
-	modulePromise ??= createFillyModule({ locateFile: (file) => new URL(file, import.meta.url).href })
-		.then((module) => (loadedModule = module));
+	if (!modulePromise)
+	{
+		// Emscripten's instantiateWasm hook has no way to report a failure.
+		let fail;
+		const failed = new Promise((resolve, reject) => (fail = reject));
+		const created = createFillyModule({
+			locateFile: (file) => new URL(file, import.meta.url).href,
+			instantiateWasm: (imports, receive) =>
+			{
+				instantiateWasm(new URL("filly-core.wasm", import.meta.url).href, imports)
+					.then(({ instance, module }) => receive(instance, module), fail);
+				return {};
+			},
+		});
+		modulePromise = Promise.race([created, failed]).then((module) => (loadedModule = module));
+	}
 	return modulePromise;
+}
+
+// Static hosts, Pavlovia among them, can send .wasm files without the application/wasm type that
+// streaming compilation needs. Emscripten's loader then logs an error and fetches the file again.
+async function instantiateWasm(url, imports)
+{
+	const response = await fetch(url);
+	if (!response.ok)
+	{
+		throw new FillyError(`Could not fetch ${url}: ${response.status} ${response.statusText}`);
+	}
+	const type = response.headers.get("Content-Type")?.split(";")[0].trim();
+	return type === "application/wasm"
+		? WebAssembly.instantiateStreaming(response, imports)
+		: WebAssembly.instantiate(await response.arrayBuffer(), imports);
 }
 
 function moduleNow()
