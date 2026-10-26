@@ -104,6 +104,23 @@ struct MeshMaterial {
     std::string alpha_mode = "opaque";
 };
 
+// A borrowed array of float32 or float64 values for the batch calls. Element (i, j, k)
+// is at index i * strides[0] + j * strides[1] + k * strides[2], counted in elements, so that each
+// frontend passes its arrays without a copy: NumPy arrays are usually row-major, MATLAB arrays
+// column-major. Unused trailing dimensions have size 1.
+struct ValueArray {
+    const void* data = nullptr;
+    bool is_double = true;
+    std::array<size_t, 3> shape = {1, 1, 1};
+    std::array<int64_t, 3> strides = {0, 0, 0};
+    double at(size_t i, size_t j = 0, size_t k = 0) const {
+        const auto index = int64_t(i) * strides[0] + int64_t(j) * strides[1] + int64_t(k) * strides[2];
+        return is_double ? static_cast<const double*>(data)[index] : static_cast<const float*>(data)[index];
+    }
+};
+
+enum class MaterialParameter { base_color, metallic, roughness, emissive };
+
 // Per-render overrides. A viewport is (x, y, width, height) from the lower-left corner.
 struct RenderOptions {
     const class Camera* camera = nullptr;
@@ -183,6 +200,10 @@ public:
     // For tests: the name of the Filament material behind this handle, and whether it refracts
     // in screen space.
     std::pair<std::string, bool> shader() const;
+    // Batch form of the parameter setters; see Node::set_transforms(). values has shape
+    // (materials, components): 4 for base_color, 3 for emissive, else 1.
+    static void set_parameters(const std::vector<Material>& materials, MaterialParameter parameter,
+                               const ValueArray& values);
 private:
     std::shared_ptr<detail::ModelData> data_;
     size_t index_;
@@ -215,6 +236,13 @@ public:
     void set_morph_weights(const float* values, size_t count);
     bool same(const Node& other) const;
     uintptr_t key() const;
+    // Batch calls, for frontends where one call costs more than one update, such as MATLAB.
+    // The items may come from any open models of one renderer. All inputs are checked before
+    // the first update, so an error changes nothing.
+    // transforms has shape (nodes, 4, 4): row, then column, of each set_transform() matrix.
+    static void set_transforms(const std::vector<Node>& nodes, const ValueArray& transforms);
+    // weights has shape (nodes, targets), and every node must have `targets` morph targets.
+    static void set_morph_weights(const std::vector<Node>& nodes, const ValueArray& weights);
 private:
     std::shared_ptr<detail::ModelData> data_;
     uint32_t entity_;

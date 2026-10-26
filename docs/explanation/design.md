@@ -191,6 +191,11 @@ one fence, which the texture shares with the target and with the other sampled i
 and entering `write()` queues a host-side wait on it. Each Filament fence costs a `glFlush()` on
 Filament's thread, so a render places at most one. A scene that does not sample an imported texture
 neither waits for its writes nor fences it. Neither side waits on the CPU.
+Every host fence is placed after a `glFlush()` and followed by one. Mesa's `glFenceSync` does not
+flush the vertices that immediate mode (`glBegin`/`glEnd`) still buffers, so without the first
+flush a host draw from pyglet or from Psychtoolbox's `DrawTexture` can land after the fence that
+should cover it. Mesa's Zink driver showed this as stale texture reads; llvmpipe hides it by its
+submission order.
 
 Two kinds of per-frame work run only when something changed. A camera whose projection follows
 the target compares the target aspect with the last applied one and sets a new projection only
@@ -738,7 +743,11 @@ rendering and do not add GPU completion waits.
 
 Shared GLX contexts use the host's X display connection. Opening a separate connection can
 produce incorrect shared-texture pixels under contention on Mesa. The platform borrows this
-connection and does not close it. For an offscreen engine, the platform owns its display and
+connection and does not close it. Mesa destroys every context of a connection when the connection
+closes, so a shared renderer watches the host's connection with an Xlib close hook. If the host
+closes it first (Psychtoolbox does when its `Screen` MEX file unloads), the renderer closes
+itself in the hook, while Filament's context still works. Xlib runs the newest hook first, so
+this runs before GLX's own cleanup. For an offscreen engine, the platform owns its display and
 closes it after the driver thread exits. This keeps driver libraries loaded through thread-local
 cleanup. The SDK build manifest records these patches. Review them when updating Filament.
 

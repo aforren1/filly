@@ -241,6 +241,22 @@ All angles are in degrees, and their names end in `Deg`. A property that an obje
 reads as `null`, and setting it throws: for example `position` of a directional light and
 `coneDeg` of a point light.
 
+## Update many nodes or materials in one call
+
+For many nodes or materials in each frame, use the batch functions. Each takes one flat array, or
+one array for each item:
+
+```javascript
+import { setMaterialParameters, setMorphWeights, setTransforms } from "./filly/filly.js";
+
+setTransforms(nodes, matrices);  // 16 numbers for each node, in Node.transform's order
+setMaterialParameters(materials, "baseColor", colors);  // 4 for baseColor, 3 for emissive, else 1
+setMorphWeights(nodes, weights);  // one weight for each morph target of each node
+```
+
+The items can come from any scenes of one renderer. The functions check all inputs before the
+first update, so an error changes nothing. See [batch calls](../reference/api.md#batch-calls).
+
 ## Read pixels
 
 Render into a Filament-owned target and read it. The read resolves on a later turn of the event

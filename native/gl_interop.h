@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -46,6 +47,10 @@ public:
     void wait_on_host(const SyncPoint& point);
     void destroy(filament::Engine& engine, SyncPoint& point);
     void finish_host();
+    // Runs the callback when the host closes the window-system connection that Filament's shared
+    // context uses (Linux: the X display, which takes Filament's context with it). Elsewhere, and
+    // for offscreen engines, it does nothing.
+    void on_host_display_close(std::function<void()> callback);
     // Sets GL_FRAMEBUFFER_SRGB in Filament's context, in command-stream order. Filament never
     // sets it, and it decides whether writes to sRGB attachments are encoded. Only scenes with
     // output_path 'direct' enable it; filly's encode pass writes encoded values raw.

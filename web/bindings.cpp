@@ -50,6 +50,34 @@ template <class T> Numbers<T> numbers(const val& array, const char* name) {
     return copy_numbers<T>(array);
 }
 
+// Batch calls take their items as an array of native handles and their values as one flat array:
+// `columns` numbers per item, in item order.
+template <class T> std::vector<T> items_of(const val& array) {
+    std::vector<T> out;
+    const auto count = array["length"].as<size_t>();
+    out.reserve(count);
+    for (size_t i = 0; i < count; ++i) out.push_back(array[i].as<T>());
+    return out;
+}
+ValueArray rows(const Numbers<float>& values, size_t items, size_t columns, const char* name) {
+    if (values.size != items * columns)
+        throw std::invalid_argument(std::string(name) + " must have " + std::to_string(columns) + " numbers per item, "
+                                    + std::to_string(items * columns) + " in all, got " + std::to_string(values.size));
+    ValueArray out;
+    out.data = values.data.get();
+    out.is_double = false;
+    out.shape = {items, columns, 1};
+    out.strides = {int64_t(columns), 1, 0};
+    return out;
+}
+MaterialParameter material_parameter(const std::string& name) {
+    if (name == "baseColor") return MaterialParameter::base_color;
+    if (name == "metallic") return MaterialParameter::metallic;
+    if (name == "roughness") return MaterialParameter::roughness;
+    if (name == "emissive") return MaterialParameter::emissive;
+    throw std::invalid_argument("Material parameter must be baseColor, metallic, roughness, or emissive, got '" + name + "'");
+}
+
 val animations(const Model& model) {
     val out = val::array();
     for (const auto& clip : model.animations()) {
@@ -306,6 +334,29 @@ EMSCRIPTEN_BINDINGS(filly) {
                +[](Stats&, val) {});
 
     function("setLogLevel", &set_log_level);
+    function("setTransforms", optional_override([](const val& nodes, const val& transforms) {
+        const auto items = items_of<Node>(nodes);
+        const auto values = numbers<float>(transforms, "transforms");
+        auto array = rows(values, items.size(), 16, "transforms");
+        // Each run of 16 is one matrix in Node.transform's order, row by row.
+        array.shape = {items.size(), 4, 4};
+        array.strides = {16, 4, 1};
+        Node::set_transforms(items, array);
+    }));
+    function("setMaterialParameters", optional_override([](const val& materials, const std::string& name,
+                                                           const val& values) {
+        const auto items = items_of<Material>(materials);
+        const auto parameter = material_parameter(name);
+        const size_t columns = parameter == MaterialParameter::base_color ? 4 : parameter == MaterialParameter::emissive ? 3 : 1;
+        const auto numbers_in = numbers<float>(values, "values");
+        Material::set_parameters(items, parameter, rows(numbers_in, items.size(), columns, "values"));
+    }));
+    function("setMorphWeights", optional_override([](const val& nodes, const val& weights) {
+        const auto items = items_of<Node>(nodes);
+        const auto values = numbers<float>(weights, "weights");
+        const size_t targets = items.empty() ? 0 : values.size / items.size();
+        Node::set_morph_weights(items, rows(values, items.size(), targets, "weights"));
+    }));
     function("currentGlContext", optional_override([] { return double(current_gl_context()); }));
     function("shapePlane", optional_override([](double width, double height, double columns, double rows) {
         return shape(shape_plane(width, height, int64_t(columns), int64_t(rows)));

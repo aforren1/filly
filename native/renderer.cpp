@@ -1638,11 +1638,21 @@ void render_output(State& state, const SceneData& scene, TargetData& target, con
 }
 }
 
+namespace {
+void close_renderer(detail::State& state);
+}
+
 Renderer::Renderer(uintptr_t shared_context) {
     state_ = std::make_shared<detail::State>();
     state_->interop = std::make_unique<detail::GlInterop>(shared_context);
     state_->engine = state_->interop->create_engine();
     if (!state_->engine) throw BackendError("Could not create the OpenGL engine");
+    // A host can close the connection under Filament's shared context while the renderer is
+    // open: Psychtoolbox does when its Screen MEX file unloads. The renderer then closes first,
+    // while that context still works; later calls raise "Renderer is closed", not a crash.
+    state_->interop->on_host_display_close([weak = std::weak_ptr<detail::State>(state_)] {
+        if (auto state = weak.lock(); state && state->thread == std::this_thread::get_id()) close_renderer(*state);
+    });
     state_->renderer = state_->engine->createRenderer();
     // EXT_mesh_gpu_instancing children share geometry and material instances, so Filament draws
     // up to 64 of them per call (8 in WebGL). With 1,000 or more instances this saved 35 to 70%
@@ -2303,12 +2313,12 @@ void Renderer::reset_gl_state() {
     state_->engine->resetBackendState();
 #endif
 }
-void Renderer::close() {
-    state_->check_thread();
-    if (!state_->engine) return;
+namespace {
+void close_renderer(detail::State& state) {
+    if (!state.engine) return;
     // Collected first: a callback can create or close resources, which changes the registry.
     std::vector<std::function<void()>> callbacks;
-    for (auto it = state_->resources.rbegin(); it != state_->resources.rend(); ++it) {
+    for (auto it = state.resources.rbegin(); it != state.resources.rend(); ++it) {
         auto target = detail::resource_cast<detail::TargetData>(it->lock());
         if (target && target->target && target->on_renderer_close)
             callbacks.push_back(std::exchange(target->on_renderer_close, nullptr));
@@ -2322,9 +2332,14 @@ void Renderer::close() {
     callbacks.clear();
     // A closed host window takes its context with it. Filament's own work is still fenced by
     // State::close(); host work that sampled shared textures can no longer be fenced.
-    if (state_->engine && state_->interop->shared() && state_->interop->host_current()) state_->interop->finish_host();
-    state_->close();
+    if (state.engine && state.interop->shared() && state.interop->host_current()) state.interop->finish_host();
+    state.close();
     if (error) std::rethrow_exception(error);
+}
+}
+void Renderer::close() {
+    state_->check_thread();
+    close_renderer(*state_);
 }
 uintptr_t Renderer::shared_context() const {
     state_->check_thread();
@@ -3055,6 +3070,10 @@ void unit_interval(float value) {
     finite(value);
     if (value < 0 || value > 1) throw std::invalid_argument("Value must be in [0, 1]");
 }
+void emissive_component(float value) {
+    finite(value);
+    if (value < 0) throw std::invalid_argument("Emissive values must be nonnegative");
+}
 }
 
 Node::Node(std::shared_ptr<detail::ModelData> data, uint32_t entity)
@@ -3228,6 +3247,121 @@ float Material::roughness() const {
 void Material::set_roughness(float value) {
     unit_interval(value);
     material_instance(data_, index_, "roughnessFactor")->setParameter("roughnessFactor", value);
+}
+
+namespace {
+std::string shape_text(const std::array<size_t, 3>& shape, size_t dimensions) {
+    std::string text = "(";
+    for (size_t i = 0; i < dimensions; ++i) text += (i ? ", " : "") + std::to_string(shape[i]);
+    return text + ")";
+}
+void require_shape(const ValueArray& values, const std::array<size_t, 3>& shape, size_t dimensions,
+                   const char* name) {
+    if (values.shape != shape)
+        throw std::invalid_argument(std::string(name) + " must have shape " + shape_text(shape, dimensions)
+                                    + ", got " + shape_text(values.shape, dimensions));
+    if (!values.data && shape[0] * shape[1] * shape[2]) throw std::invalid_argument(std::string(name) + " has no data");
+}
+// Batch items may come from any scenes and models of one renderer. Another renderer has its own
+// engine and transform manager, which one call must not reach into.
+void require_open(const std::shared_ptr<detail::ModelData>& model, detail::State*& state, const char* what,
+                  size_t index) {
+    model->check();
+    if (!state) state = model->state.get();
+    else if (model->state.get() != state)
+        throw std::invalid_argument(std::string(what) + " " + std::to_string(index)
+                                    + " of the batch belongs to another renderer");
+}
+Matrix matrix_at(const ValueArray& values, size_t item) {
+    Matrix result;
+    for (size_t row = 0; row < 4; ++row)
+        for (size_t col = 0; col < 4; ++col) result[row * 4 + col] = float(values.at(item, row, col));
+    return result;
+}
+}
+
+void Node::set_transforms(const std::vector<Node>& nodes, const ValueArray& transforms) {
+    require_shape(transforms, {nodes.size(), 4, 4}, 3, "transforms");
+    detail::State* state = nullptr;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        require_open(nodes[i].data_, state, "Node", i);
+        matrix(matrix_at(transforms, i));
+    }
+    if (!state) return;
+    auto& tm = state->engine->getTransformManager();
+    // One world-transform update for the whole batch, instead of one per node and its subtree.
+    tm.openLocalTransformTransaction();
+    try {
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            const auto entity = utils::Entity::import(nodes[i].entity_);
+            tm.setTransform(tm.getInstance(entity), matrix(matrix_at(transforms, i)));
+            nodes[i].data_->mark_bones(entity);
+        }
+    } catch (...) {
+        tm.commitLocalTransformTransaction();
+        throw;
+    }
+    tm.commitLocalTransformTransaction();
+}
+
+void Material::set_parameters(const std::vector<Material>& materials, MaterialParameter parameter,
+                              const ValueArray& values) {
+    const char* name = nullptr;
+    size_t components = 1;
+    switch (parameter) {
+    case MaterialParameter::base_color: name = "baseColorFactor"; components = 4; break;
+    case MaterialParameter::metallic: name = "metallicFactor"; break;
+    case MaterialParameter::roughness: name = "roughnessFactor"; break;
+    case MaterialParameter::emissive: name = "emissiveFactor"; components = 3; break;
+    default: throw std::invalid_argument("Unknown material parameter");
+    }
+    require_shape(values, {materials.size(), components, 1}, components == 1 ? 1 : 2, "values");
+    detail::State* state = nullptr;
+    for (size_t i = 0; i < materials.size(); ++i) {
+        require_open(materials[i].data_, state, "Material", i);
+        material_instance(materials[i].data_, materials[i].index_, name);
+        for (size_t c = 0; c < components; ++c) {
+            const float value = float(values.at(i, c));
+            if (parameter == MaterialParameter::emissive) emissive_component(value);
+            else unit_interval(value);
+        }
+    }
+    for (size_t i = 0; i < materials.size(); ++i) {
+        auto* instance = material_instance(materials[i].data_, materials[i].index_, name);
+        auto at = [&](size_t c) { return float(values.at(i, c)); };
+        switch (parameter) {
+        case MaterialParameter::base_color: instance->setParameter(name, m::float4{at(0), at(1), at(2), at(3)}); break;
+        case MaterialParameter::emissive:
+            instance->setParameter(name, m::float3{at(0), at(1), at(2)});
+            // As Material::set_emissive(): the values are the effective emission.
+            if (instance->getMaterial()->hasParameter("emissiveStrength")) instance->setParameter("emissiveStrength", 1.0f);
+            break;
+        default: instance->setParameter(name, at(0)); break;
+        }
+    }
+}
+
+void Node::set_morph_weights(const std::vector<Node>& nodes, const ValueArray& weights) {
+    const size_t targets = weights.shape[1];
+    require_shape(weights, {nodes.size(), targets, 1}, 2, "weights");
+    detail::State* state = nullptr;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        require_open(nodes[i].data_, state, "Node", i);
+        const auto count = nodes[i].morph_target_count();
+        if (!count) throw std::invalid_argument("Node " + std::to_string(i) + " of the batch has no morph targets");
+        if (count != targets)
+            throw std::invalid_argument("weights has " + std::to_string(targets) + " columns, but node "
+                                        + std::to_string(i) + " of the batch has " + std::to_string(count)
+                                        + " morph targets");
+        for (size_t t = 0; t < targets; ++t) finite(float(weights.at(i, t)));
+    }
+    if (!state) return;
+    auto& rm = state->engine->getRenderableManager();
+    std::vector<float> row(targets);
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        for (size_t t = 0; t < targets; ++t) row[t] = float(weights.at(i, t));
+        rm.setMorphWeights(rm.getInstance(utils::Entity::import(nodes[i].entity_)), row.data(), targets);
+    }
 }
 
 RenderTarget::RenderTarget(std::shared_ptr<detail::TargetData> data) : data_(std::move(data)) {}

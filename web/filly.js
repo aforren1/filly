@@ -119,6 +119,40 @@ export async function setLogLevel(level)
 	callNative(module, () => module.setLogLevel(level));
 }
 
+/**
+ * Set the transforms of many nodes in one call: 16 numbers per node, in Node.transform's order.
+ * The batch calls take one flat array or one array per item. The items may come from any scenes
+ * of one renderer. Inputs are checked first, so an error changes nothing.
+ */
+export function setTransforms(nodes, transforms)
+{
+	batchCall(nodes, transforms, (module, natives, values) => module.setTransforms(natives, values));
+}
+
+/** Set one parameter of many materials in one call: "baseColor" (4 numbers per material), "emissive" (3), "metallic" or "roughness" (1). */
+export function setMaterialParameters(materials, name, values)
+{
+	batchCall(materials, values, (module, natives, flat) => module.setMaterialParameters(natives, name, flat));
+}
+
+/** Set the morph weights of many nodes in one call: one weight per morph target of each node. */
+export function setMorphWeights(nodes, weights)
+{
+	batchCall(nodes, weights, (module, natives, values) => module.setMorphWeights(natives, values));
+}
+
+function batchCall(items, values, fn)
+{
+	if (items.length === 0)
+	{
+		return;
+	}
+	const context = items[0]._context;
+	const flat = Array.isArray(values) && Array.isArray(values[0]) ? values.flat() : values;
+	context.enter();
+	callNative(context.module, () => fn(context.module, items.map((item) => item._native), flat));
+}
+
 function callNative(module, fn)
 {
 	try

@@ -1,7 +1,9 @@
-"""List the shared libraries that the filly extension module imports and reject unexpected ones.
+"""List the shared libraries that a filly native module imports and reject unexpected ones.
 
-Arguments can be a .pyd, a .so, or a wheel that contains one. The exit status is 1 if a module
-imports a library outside the allowed set for its format.
+Arguments can be a .pyd, a .so, a wheel that contains one, a MATLAB MEX file (.mexw64,
+.mexa64), or an Octave MEX file (.mex). The exit status is 1 if a module imports a library
+outside the allowed set for its format and frontend, or if an ELF module exports a symbol other
+than its entry points.
 """
 
 import argparse
@@ -14,23 +16,41 @@ import zipfile
 # The C++ runtime and vcruntime are linked statically; the UCRT is an OS component on Windows 10+.
 # Python itself does not ship MSVCP140.dll, so importing it makes the module depend on the
 # Visual C++ Redistributable and on whichever msvcp140.dll the host process loaded first.
-ALLOWED_PE = [
+# MATLAB also ships its own msvcp140.dll, so the same reasoning holds for the MEX file.
+SYSTEM_PE = [
     "api-ms-win-crt-*.dll",  # Universal CRT, part of the OS
     "kernel32.dll",
     "user32.dll",  # WGL needs a window class and a device context
     "gdi32.dll",  # pixel formats and SwapBuffers
     "opengl32.dll",  # WGL entry points; drivers are loaded through it
     "shlwapi.dll",  # Filament utils path helpers
+]
+ALLOWED_PE = SYSTEM_PE + [
     "python3.dll",  # stable ABI
     "python3??.dll",  # version-specific builds for Python 3.10 and 3.11
 ]
+# The C MEX API only: libmat or the C++ MATLAB Data API would tie the file to more of MATLAB.
+ALLOWED_MEX_PE = SYSTEM_PE + ["libmx.dll", "libmex.dll"]
 # Only the glibc family, the GCC C++ runtime, and the GL/X11 client libraries. manylinux_2_28
 # allows all of these, so auditwheel must not graft any library into the wheel.
-ALLOWED_ELF = [
+SYSTEM_ELF = [
     "libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0", "librt.so.1", "ld-linux-x86-64.so.2",
-    "libstdc++.so.6", "libgcc_s.so.1",
     "libGL.so.1", "libX11.so.6",
 ]
+ALLOWED_ELF = SYSTEM_ELF + ["libstdc++.so.6", "libgcc_s.so.1"]
+# MATLAB puts its own, older libstdc++ and libgcc_s first in the library path, so the MATLAB MEX
+# file links both statically.
+ALLOWED_MEX_ELF = SYSTEM_ELF + ["libmx.so", "libmex.so"]
+# Octave runs on the system C++ runtime. mkoctfile --mex links no Octave library either: the MEX
+# API resolves against the running Octave, so one file serves several Octave versions.
+ALLOWED_OCTAVE_ELF = ALLOWED_ELF
+# Exported entry points. Anything else exported could bind to another copy of Filament, libwebp,
+# or the C++ runtime in the process. MATLAB's export map adds the API version query.
+EXPORTS = {
+    "python": ["PyInit__native"],
+    "matlab": ["mexFunction", "mexfilerequiredapiversion"],
+    "octave": ["mexFunction"],
+}
 
 
 def _pe_imports(data):
@@ -100,6 +120,26 @@ def _elf_needed(data):
     return [data[strtab + item:data.index(b"\0", strtab + item)].decode() for item in needed]
 
 
+def elf_exports(data):
+    """Return the names of the defined global and weak symbols in an ELF image's .dynsym."""
+    if data[4] != 2 or data[5] != 1:
+        raise ValueError("only little-endian ELF64 is supported")
+    shoff, = struct.unpack_from("<Q", data, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
+    sections = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + index * shentsize) for index in range(shnum)]
+    names = []
+    for _, kind, _, _, offset, size, link, _, _, entsize in sections:
+        if kind != 11:  # SHT_DYNSYM
+            continue
+        strtab = sections[link][4]
+        for cursor in range(offset + entsize, offset + size, entsize):
+            name, info, _, shndx = struct.unpack_from("<IBBH", data, cursor)
+            binding = info >> 4
+            if shndx != 0 and binding in (1, 2) and name:  # defined, GLOBAL or WEAK
+                names.append(data[strtab + name:data.index(b"\0", strtab + name)].decode())
+    return names
+
+
 def imports(data):
     """Return the DLL or DT_NEEDED names of a PE or ELF image."""
     if data[:2] == b"MZ":
@@ -109,12 +149,33 @@ def imports(data):
     raise ValueError("not a PE or ELF image")
 
 
-def unexpected(data):
-    """Return the imported names that are outside the allowed set for the image format."""
-    allowed = ALLOWED_PE if data[:2] == b"MZ" else ALLOWED_ELF
+def frontend(label):
+    """The frontend of a module from its file name: "matlab", "octave", or "python"."""
+    if label.endswith((".mexw64", ".mexa64")):
+        return "matlab"
+    if label.endswith(".mex"):
+        return "octave"
+    return "python"
+
+
+def unexpected(data, kind="python"):
+    """Return the imported names that are outside the allowed set for the format and frontend."""
+    if data[:2] == b"MZ":
+        if kind == "octave":
+            raise ValueError("Octave MEX files are built for Linux only")
+        allowed = ALLOWED_MEX_PE if kind == "matlab" else ALLOWED_PE
+    else:
+        allowed = {"python": ALLOWED_ELF, "matlab": ALLOWED_MEX_ELF, "octave": ALLOWED_OCTAVE_ELF}[kind]
     # PE names are case-insensitive; ELF sonames are not.
     fold = str.lower if data[:2] == b"MZ" else str
     return [name for name in imports(data) if not any(fnmatch.fnmatchcase(fold(name), pattern) for pattern in allowed)]
+
+
+def unexpected_exports(data, kind="python"):
+    """Return the exported names of an ELF image that are not its frontend's entry points."""
+    if data[:4] != b"\x7fELF":
+        return []
+    return sorted(name for name in elf_exports(data) if name not in EXPORTS[kind])
 
 
 def _modules(path):
@@ -135,10 +196,16 @@ def main():
     for path in args.paths:
         for label, data in _modules(path):
             found = True
-            bad = unexpected(data)
-            print(f"{label} ({len(data)} bytes): {', '.join(imports(data))}")
+            kind = frontend(label)
+            bad = unexpected(data, kind)
+            print(f"{label} ({len(data)} bytes, {kind}): {', '.join(imports(data))}")
             if bad:
                 print(f"  unexpected: {', '.join(bad)}")
+                failed = True
+            extra = unexpected_exports(data, kind)
+            if extra:
+                shown = ", ".join(extra[:20]) + (f", and {len(extra) - 20} more" if len(extra) > 20 else "")
+                print(f"  unexpected exports: {shown}")
                 failed = True
     if not found:
         print("no extension module found", file=sys.stderr)

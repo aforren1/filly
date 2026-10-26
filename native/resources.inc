@@ -246,7 +246,7 @@ Vec3 Material::emissive() const {
     return {color.x, color.y, color.z};
 }
 void Material::set_emissive(Vec3 value) {
-    for (auto v : value) { finite(v); if (v < 0) throw std::invalid_argument("Emissive values must be nonnegative"); }
+    for (auto v : value) emissive_component(v);
     auto* instance = material_instance(data_, index_, "emissiveFactor");
     instance->setParameter("emissiveFactor", m::float3{value[0], value[1], value[2]});
     if (instance->getMaterial()->hasParameter("emissiveStrength")) instance->setParameter("emissiveStrength", 1.0f);

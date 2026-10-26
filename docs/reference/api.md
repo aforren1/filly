@@ -1217,7 +1217,7 @@ Its transform is relative to its original glTF parent.
 | `bounds` | Rest-pose minimum and maximum corners of the node and its descendants, with the meaning of [`Model.bounds`](#model): in the model's frame, not changed by node edits or animation. Load computes one box per mesh node; each read joins the boxes of the subtree. Each minimum is greater than its maximum when no mesh is below the node. Read-only. |
 | `material(slot=0)` | Return this node slot's own material. |
 | `morph_target_count` | Number of morph targets. |
-| `set_morph_weights(weights)` | Set one finite weight per target. Weights are not restricted to `[0,1]`. |
+| `set_morph_weights(weights)` | Set one finite weight per target. Weights are not restricted to `[0,1]`. For many nodes, use the [batch calls](#batch-calls). |
 
 Nodes support `==` and `hash()`. `EXT_mesh_gpu_instancing` children, which loading adds, have
 indices after the authored nodes and no name. Each child has the mesh, so its `mesh_name` is the
@@ -1292,6 +1292,31 @@ materials; on node-local materials that the variant maps, they are lost, as othe
 A texture can serve many materials. Closing it removes it from every material that uses it.
 
 Cache node and material handles before the frame loop to avoid repeated name lookups.
+
+### Batch calls
+
+The batch calls update many nodes or materials in one call. They are module functions, because
+`Node.set_morph_weights()` is already the one-node form. They exist for frontends in which one
+call costs more than one update, such as MATLAB, and the MATLAB and JavaScript frontends have the
+same calls. In Python they also remove the per-item call overhead.
+
+| Call | Values |
+| --- | --- |
+| `filly.set_transforms(nodes, transforms)` | `transforms[i]` is the 4 x 4 matrix of `nodes[i]`, as for `Node.transform`. |
+| `filly.set_material_parameters(materials, "base_color", values)` | `(N, 4)` linear RGBA factors in `[0, 1]`. |
+| `filly.set_material_parameters(materials, "emissive", values)` | `(N, 3)` nonnegative effective emission, as for `Material.emissive`. |
+| `filly.set_material_parameters(materials, "metallic" or "roughness", values)` | `(N,)` or `(N, 1)` factors in `[0, 1]`. |
+| `filly.set_morph_weights(nodes, weights)` | `(N, targets)` finite weights. Each node must have `targets` morph targets. |
+
+Rules:
+
+- The items can come from any scenes and models of one renderer. An item of another renderer
+  raises `ValueError`, and an item of a closed model raises `FillyError`.
+- The call checks all inputs before the first update. An error changes nothing.
+- The arrays can be `float32` or `float64` in any memory layout, for example a Fortran-order
+  array. Other inputs, such as nested lists, are converted to `float64`.
+- `set_transforms()` updates the world transforms once for the whole batch, not once for each
+  node and its subtree.
 
 ## Texture
 
@@ -1471,6 +1496,10 @@ The host texture must remain alive until the target closes, or until the host co
 another context is current, or none is, they skip the host fence. Filament then waits only for
 its own work before it releases resources. Host work that still samples a shared texture is not
 fenced. Use this after a host window has closed.
+
+On Linux, a shared renderer uses the host's X display connection. If the host closes that
+connection while the renderer is open, the renderer closes itself first, and later calls raise
+`FillyError`. Psychtoolbox closes its connection when its `Screen` MEX file unloads.
 
 `render()`, the outermost `acquire()` enter and exit, native asset loading, environment
 filtering, `finish()`, `close()` of `Renderer`, `Scene`, `RenderTarget`, `ImportedTarget`, and

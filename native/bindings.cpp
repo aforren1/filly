@@ -229,6 +229,39 @@ std::function<void()> python_callback(nb::handle function) {
     };
 }
 
+// A strided view of a float32 or float64 array for the batch calls. Other inputs, such as nested
+// lists, are converted to float64 first; `keep` owns that copy until the call returns.
+ValueArray value_array(nb::handle object, size_t dimensions, const char* name, nb::object& keep) {
+    using Any = nb::ndarray<nb::ro, nb::device::cpu>;
+    Any array;
+    auto usable = [&](const Any& value) {
+        return value.dtype() == nb::dtype<double>() || value.dtype() == nb::dtype<float>();
+    };
+    if (!nb::try_cast(object, array) || !usable(array)) {
+        keep = nb::module_::import_("numpy").attr("asarray")(object, "dtype"_a = "float64");
+        array = nb::cast<Any>(keep);
+    }
+    // A 1-D array of scalar parameters is one column.
+    if (array.ndim() != dimensions && !(dimensions == 2 && array.ndim() == 1))
+        throw std::invalid_argument(std::string(name) + " must have " + std::to_string(dimensions) + " dimensions, got "
+                                    + std::to_string(array.ndim()));
+    ValueArray result;
+    result.data = array.data();
+    result.is_double = array.dtype() == nb::dtype<double>();
+    for (size_t i = 0; i < array.ndim(); ++i) {
+        result.shape[i] = array.shape(i);
+        result.strides[i] = array.stride(i);
+    }
+    return result;
+}
+MaterialParameter material_parameter(const std::string& name) {
+    if (name == "base_color") return MaterialParameter::base_color;
+    if (name == "metallic") return MaterialParameter::metallic;
+    if (name == "roughness") return MaterialParameter::roughness;
+    if (name == "emissive") return MaterialParameter::emissive;
+    throw std::invalid_argument("Material parameter must be base_color, metallic, roughness, or emissive, got '" + name + "'");
+}
+
 RenderOptions render_options(const std::optional<Camera>& camera, nb::handle viewport, bool clear) {
     RenderOptions options;
     if (camera) options.camera = &*camera;
@@ -849,4 +882,24 @@ NB_MODULE(_native, module) {
         .def_prop_rw("emissive_texture_scale", uv_get<1>(&UvTransform::scale), uv_set<1>(&UvTransform::scale))
         .def_prop_rw("emissive_texture_rotation_deg", uv_get<1>(&UvTransform::rotation_deg),
                      uv_set<1>(&UvTransform::rotation_deg));
+
+    // Batch calls are module functions: Node.set_morph_weights() is already the one-node form.
+    module.def("set_transforms", [](const std::vector<Node>& nodes, nb::handle transforms) {
+        nb::object keep;
+        Node::set_transforms(nodes, value_array(transforms, 3, "transforms", keep));
+    }, "nodes"_a, "transforms"_a,
+       "Set the transform of each node from an (N, 4, 4) array, in one call. The nodes may come from any "
+       "models of one renderer. Inputs are checked first, so an error changes nothing.");
+    module.def("set_material_parameters", [](const std::vector<Material>& materials, const std::string& name,
+                                             nb::handle values) {
+        nb::object keep;
+        Material::set_parameters(materials, material_parameter(name), value_array(values, 2, "values", keep));
+    }, "materials"_a, "name"_a, "values"_a,
+       "Set one parameter (base_color, metallic, roughness, or emissive) of each material from row i of "
+       "`values`, in one call. Inputs are checked first, so an error changes nothing.");
+    module.def("set_morph_weights", [](const std::vector<Node>& nodes, nb::handle weights) {
+        nb::object keep;
+        Node::set_morph_weights(nodes, value_array(weights, 2, "weights", keep));
+    }, "nodes"_a, "weights"_a,
+       "Set the morph weights of each node from row i of an (N, targets) array, in one call.");
 }

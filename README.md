@@ -109,6 +109,7 @@ See the `examples/` folder.
 - Tutorial: [render an image](docs/tutorials/offscreen.md)
 - How-to guides: [build and test](docs/how-to/build.md),
   [use PsychoPy](docs/how-to/psychopy.md), [use other OpenGL hosts](docs/how-to/gl-hosts.md),
+  [use MATLAB, Octave, and Psychtoolbox](docs/how-to/matlab.md),
   [measure timing](docs/how-to/stress-test.md), [profile a frame](docs/how-to/profile.md),
   [compare with Filament's viewer](docs/how-to/reference-comparison.md),
   [use filly in a web page](docs/how-to/web.md)

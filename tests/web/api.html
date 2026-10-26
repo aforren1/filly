@@ -3,7 +3,8 @@
      window.testResult; tests/test_web.py compares them with desktop filly. -->
 <html><body><canvas width="16" height="16"></canvas>
 <script type="module">
-import { AssetError, createRenderer, FillyError, ImportedTexture, shapes, Texture } from "./filly/filly.js";
+import { AssetError, createRenderer, FillyError, ImportedTexture, setMaterialParameters, setMorphWeights, setTransforms,
+	shapes, Texture } from "./filly/filly.js";
 
 const gl = document.querySelector("canvas").getContext("webgl2");
 const renderer = await createRenderer(gl);
@@ -209,6 +210,45 @@ await check("mesh_update", async () =>
 		before: [half(before, 0), half(before, 1)], after: [half(after, 0), half(after, 1)] };
 	target.close();
 	scene.close();
+	return result;
+});
+
+await check("batch", () =>
+{
+	// Two scenes of one renderer in one batch.
+	const scenes = [renderer.createScene(), renderer.createScene()];
+	const models = scenes.map((scene) => scene.createMesh({ ...shapes.box({ width: 0.2, height: 0.2, depth: 0.2 }) }));
+	const nodes = models.map((model) => model.nodes[0]);
+	const matrix = (x) => [1, 0, 0, x, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+	setTransforms(nodes, new Float32Array([...matrix(0.25), ...matrix(-0.5)]));
+	const flat = nodes.map((node) => Array.from(node.transform));
+	setTransforms(nodes, [matrix(1), matrix(2)]);
+	const nested = nodes.map((node) => Array.from(node.transform));
+	const materials = nodes.map((node) => node.material(0));
+	setMaterialParameters(materials, "baseColor", [[1, 0, 0, 1], [0, 0, 1, 0.5]]);
+	setMaterialParameters(materials, "roughness", [0.25, 0.75]);
+	const errorOf = (fn) =>
+	{
+		try
+		{
+			fn();
+			return null;
+		}
+		catch (error)
+		{
+			return `${error.name}: ${error.message}`;
+		}
+	};
+	const result = {
+		flat, nested,
+		baseColors: materials.map((material) => Array.from(material.baseColor)),
+		roughness: materials.map((material) => material.roughness),
+		countError: errorOf(() => setTransforms(nodes, matrix(0))),
+		rangeError: errorOf(() => setMaterialParameters(materials, "metallic", [0.5, 2])),
+		metallicAfterError: materials.map((material) => material.metallic),
+		morphError: errorOf(() => setMorphWeights(nodes, [1, 1])),
+	};
+	scenes.forEach((scene) => scene.close());
 	return result;
 });
 

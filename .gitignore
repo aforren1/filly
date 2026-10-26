@@ -8,3 +8,7 @@ __pycache__/
 *.pyd
 *.so
 tests/web/node_modules/
+# MEX files of the MATLAB frontend, built into matlab/
+*.mexw64
+*.mexa64
+*.mex

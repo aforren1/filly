@@ -13,6 +13,10 @@
 #include <GL/glx.h>
 #include <backend/platforms/PlatformGLX.h>
 #include "egl_platform.h"
+// libX11 declares this in X11/Xlibint.h, its header for extension implementations, which also
+// defines macros that would leak into this file.
+extern "C" int (*XESetCloseDisplay(Display* display, int extension, int (*hook)(Display*, XExtCodes*)))(
+    Display*, XExtCodes*);
 #endif
 #include <filament/Engine.h>
 #include <filament/Sync.h>
@@ -24,6 +28,7 @@
 #include <mutex>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 
 namespace filly {
 uintptr_t current_gl_context() {
@@ -378,11 +383,46 @@ struct GlInterop::Impl {
     SyncQueue sync;
     std::unique_ptr<filament::backend::Platform> platform;
     const char* name = nullptr;
+#if defined(__linux__)
+    // The host's X display connection, for shared engines.
+    Display* display = nullptr;
+#endif
     explicit Impl(uintptr_t context) : sync(context) {}
 };
 
 #if defined(__linux__)
 namespace {
+// Close handlers of shared engines, by host display connection. Filament's shared GLX context
+// uses the host's connection (see build_filament_linux.py), and Mesa destroys every context of
+// a connection when it closes: Psychtoolbox closes its connection when its Screen MEX file
+// unloads (`clear mex`). Xlib runs close hooks newest first, so these run before GLX's own,
+// while Filament's context is still usable.
+struct DisplayHook {
+    Display* display;
+    int extension;
+    const void* owner;
+    std::function<void()> callback;
+};
+std::mutex display_hooks_mutex;
+std::vector<DisplayHook> display_hooks;
+
+int close_display(Display* display, XExtCodes* codes) {
+    std::vector<std::function<void()>> callbacks;
+    {
+        std::lock_guard lock(display_hooks_mutex);
+        std::erase_if(display_hooks, [&](DisplayHook& hook) {
+            if (hook.display != display || hook.extension != codes->extension) return false;
+            callbacks.push_back(std::move(hook.callback));
+            return true;
+        });
+    }
+    // Outside the lock: a callback closes a renderer, whose GlInterop removes its own hooks.
+    for (auto& callback : callbacks) {
+        try { callback(); } catch (...) {}
+    }
+    return 0;
+}
+
 bool x_display_available() {
     const char* name = std::getenv("DISPLAY");
     if (!name || !*name) return false;
@@ -437,15 +477,33 @@ GlInterop::GlInterop(uintptr_t context) {
     impl_->name = "wgl";
 #else
     if (context) {
+        impl_->display = glXGetCurrentDisplay();
         impl_->platform = std::make_unique<SyncPlatform<filament::backend::PlatformGLX>>(
-            impl_->sync, glXGetCurrentDisplay());
+            impl_->sync, impl_->display);
         impl_->name = "glx";
     } else {
         impl_->platform = select_offscreen(impl_->sync, impl_->name);
     }
 #endif
 }
-GlInterop::~GlInterop() = default;
+GlInterop::~GlInterop() {
+#if defined(__linux__)
+    std::lock_guard lock(display_hooks_mutex);
+    std::erase_if(display_hooks, [this](const DisplayHook& hook) { return hook.owner == this; });
+#endif
+}
+void GlInterop::on_host_display_close(std::function<void()> callback) {
+#if defined(__linux__)
+    if (!shared() || !impl_->display) return;
+    auto* codes = XAddExtension(impl_->display);
+    if (!codes) throw InteropError("Could not watch the host X display connection");
+    XESetCloseDisplay(impl_->display, codes->extension, close_display);
+    std::lock_guard lock(display_hooks_mutex);
+    display_hooks.push_back({impl_->display, codes->extension, this, std::move(callback)});
+#else
+    (void)callback;
+#endif
+}
 filament::backend::Platform* GlInterop::platform() { return impl_->platform.get(); }
 const char* GlInterop::platform_name() const { return impl_->name; }
 bool GlInterop::shared() const { return impl_->sync.context != 0; }
@@ -538,6 +596,10 @@ void GlInterop::delete_host_texture(uint32_t texture) const {
 }
 void* GlInterop::host_fence() {
     require_host();
+    // Mesa does not flush buffered immediate-mode vertices into a fence (glFenceSync skips
+    // FLUSH_VERTICES), so a host draw with glBegin/glEnd (pyglet, Psychtoolbox's DrawTexture)
+    // would land after it. Zink exposes this; llvmpipe's submission order hides it.
+    glFlush();
     void* result = impl_->sync.fence(SYNC_GPU_COMMANDS_COMPLETE, 0);
     if (!result) throw InteropError("Could not create host OpenGL fence");
     glFlush();

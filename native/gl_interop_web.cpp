@@ -137,6 +137,7 @@ void GlInterop::set_srgb_writes(filament::Engine&, bool value) {
     if (value) throw InteropError("output_path 'direct' with sRGB encoding is not available in WebGL2");
 }
 void GlInterop::finish_host() {}
+void GlInterop::on_host_display_close(std::function<void()>) {}
 void GlInterop::begin_frame_timer() {
     auto& d = *impl_;
     if (!d.timer_supported)

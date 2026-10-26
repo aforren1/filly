@@ -247,6 +247,18 @@ def test_mesh_update(page_results):
     assert after_left == 0 and after_right == before_left
 
 
+def test_batch_calls(page_results):
+    value = _value(page_results, "batch")
+    assert [row[3] for row in value["flat"]] == [0.25, -0.5]
+    assert [row[3] for row in value["nested"]] == [1, 2]
+    assert value["baseColors"] == [[1, 0, 0, 1], [0, 0, 1, 0.5]]
+    assert value["roughness"] == [0.25, 0.75]
+    assert value["countError"].startswith("RangeError: transforms must have 16 numbers per item")
+    assert value["rangeError"].startswith("RangeError")
+    assert value["metallicAfterError"] == [0, 0]
+    assert "no morph targets" in value["morphError"]
+
+
 def test_shapes_match_desktop(page_results):
     value = _value(page_results, "shapes")
     desktop = {"plane": filly.shapes.plane(2, 1, segments=(3, 2)), "box": filly.shapes.box(),

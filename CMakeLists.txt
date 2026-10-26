@@ -1,8 +1,18 @@
 cmake_minimum_required(VERSION 3.28...3.31)
 project(filly VERSION 0.1.0 LANGUAGES CXX)
+# filly uses no C++ modules. Without this, CMake 3.28 with Ninja and C++20 needs clang-scan-deps,
+# which Ubuntu ships in a separate package (clang-tools).
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
-find_package(Python 3.10 REQUIRED COMPONENTS Interpreter Development.Module OPTIONAL_COMPONENTS Development.SABIModule)
-find_package(nanobind CONFIG REQUIRED)
+# The wheel build sets no options, so it builds the Python module only. The MEX gateways are
+# opt-in, because they need MATLAB or Octave.
+option(FILLY_PYTHON "Build the Python extension module" ON)
+option(FILLY_MATLAB "Build the MATLAB MEX gateway in matlab/" OFF)
+option(FILLY_OCTAVE "Build the Octave MEX gateway in matlab/ (Linux)" OFF)
+if(FILLY_PYTHON)
+  find_package(Python 3.10 REQUIRED COMPONENTS Interpreter Development.Module OPTIONAL_COMPONENTS Development.SABIModule)
+  find_package(nanobind CONFIG REQUIRED)
+endif()
 
 set(FILAMENT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.deps" CACHE PATH "Filament 1.77.1 SDK directory")
 if(NOT EXISTS "${FILAMENT_ROOT}/include/filament/Engine.h")
@@ -72,24 +82,30 @@ else()
   target_compile_options(filly_core PRIVATE -fvisibility=hidden)
 endif()
 
-nanobind_add_module(_native STABLE_ABI NOSTRIP native/bindings.cpp)
-target_link_libraries(_native PRIVATE filly_core)
-if(MSVC)
-  # The UCRT is part of Windows 10 and later, and one shared copy keeps a single heap and
-  # locale state per process. The static runtime objects request libucrt.lib by default.
-  target_link_options(_native PRIVATE /NODEFAULTLIB:libucrt.lib /DEFAULTLIB:ucrt.lib)
-else()
-  # Filament marks its public API visible, and the C++ template instantiations are visible
-  # regardless of -fvisibility. Exported, they could bind to another copy of Filament, libwebp,
-  # or a different libstdc++ build in the process, so only the module entry point is exported.
-  set(FILLY_EXPORTS "${CMAKE_CURRENT_BINARY_DIR}/_native.map")
-  file(WRITE "${FILLY_EXPORTS}" "{\n  global: PyInit__native;\n  local: *;\n};\n")
-  target_link_options(_native PRIVATE "LINKER:--version-script=${FILLY_EXPORTS}")
-  set_property(TARGET _native APPEND PROPERTY LINK_DEPENDS "${FILLY_EXPORTS}")
+if(FILLY_PYTHON)
+  nanobind_add_module(_native STABLE_ABI NOSTRIP native/bindings.cpp)
+  target_link_libraries(_native PRIVATE filly_core)
+  if(MSVC)
+    # The UCRT is part of Windows 10 and later, and one shared copy keeps a single heap and
+    # locale state per process. The static runtime objects request libucrt.lib by default.
+    target_link_options(_native PRIVATE /NODEFAULTLIB:libucrt.lib /DEFAULTLIB:ucrt.lib)
+  else()
+    # Filament marks its public API visible, and the C++ template instantiations are visible
+    # regardless of -fvisibility. Exported, they could bind to another copy of Filament, libwebp,
+    # or a different libstdc++ build in the process, so only the module entry point is exported.
+    set(FILLY_EXPORTS "${CMAKE_CURRENT_BINARY_DIR}/_native.map")
+    file(WRITE "${FILLY_EXPORTS}" "{\n  global: PyInit__native;\n  local: *;\n};\n")
+    target_link_options(_native PRIVATE "LINKER:--version-script=${FILLY_EXPORTS}")
+    set_property(TARGET _native APPEND PROPERTY LINK_DEPENDS "${FILLY_EXPORTS}")
+  endif()
+  install(TARGETS _native LIBRARY DESTINATION filly RUNTIME DESTINATION filly)
+  install(FILES "${FILAMENT_ROOT}/LICENSE" DESTINATION filly/licenses RENAME Filament.txt)
+  install(FILES native/vendor/meshoptimizer/LICENSE.md DESTINATION filly/licenses RENAME meshoptimizer.txt)
+  install(FILES native/vendor/cgltf/LICENSE DESTINATION filly/licenses RENAME cgltf.txt)
+  install(FILES "${libwebp_SOURCE_DIR}/COPYING" DESTINATION filly/licenses RENAME libwebp.txt)
+  install(FILES "${libwebp_SOURCE_DIR}/PATENTS" DESTINATION filly/licenses RENAME libwebp-PATENTS.txt)
 endif()
-install(TARGETS _native LIBRARY DESTINATION filly RUNTIME DESTINATION filly)
-install(FILES "${FILAMENT_ROOT}/LICENSE" DESTINATION filly/licenses RENAME Filament.txt)
-install(FILES native/vendor/meshoptimizer/LICENSE.md DESTINATION filly/licenses RENAME meshoptimizer.txt)
-install(FILES native/vendor/cgltf/LICENSE DESTINATION filly/licenses RENAME cgltf.txt)
-install(FILES "${libwebp_SOURCE_DIR}/COPYING" DESTINATION filly/licenses RENAME libwebp.txt)
-install(FILES "${libwebp_SOURCE_DIR}/PATENTS" DESTINATION filly/licenses RENAME libwebp-PATENTS.txt)
+
+if(FILLY_MATLAB OR FILLY_OCTAVE)
+  add_subdirectory(matlab)
+endif()
