@@ -114,6 +114,18 @@ LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 matlab
 
 This is the configuration of the CI job. It was not tested on a local MATLAB installation.
 
+Without a usable GPU driver, for example under Xvfb or in a virtual machine, MATLAB can select
+its bundled software OpenGL. That is an old Mesa `libGL` in MATLAB's `sys/opengl/lib` folder,
+and the system's Mesa driver crashes when it binds to it. filly then refuses to create a
+renderer and names the library in the error. Start MATLAB with `-nosoftwareopengl`:
+
+```bash
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 matlab -nosoftwareopengl
+```
+
+In CI, R2021b under Xvfb selected the software OpenGL and crashed before filly had this check.
+The latest MATLAB did not select it.
+
 ## Set up the path
 
 In MATLAB or Octave, run `SetupFilly` in the `matlab` folder. It adds the folder to the path and

@@ -32,6 +32,10 @@
 #define FILLY_OCTAVE 1
 #endif
 
+#if defined(__linux__) && !defined(FILLY_OCTAVE)
+#include <link.h>
+#endif
+
 using namespace filly;
 
 namespace {
@@ -825,6 +829,27 @@ template <> const Properties<Preparation>& properties() {
 
 void close_all() noexcept;
 
+#if defined(__linux__) && !defined(FILLY_OCTAVE)
+// In software OpenGL mode, MATLAB loads its own copy of an old Mesa libGL (sys/opengl/lib). The
+// system's Mesa driver then binds its _glapi symbols to that copy and crashes while the renderer
+// starts (seen with R2021b under Xvfb). An error with the remedy is better than the crash.
+void require_system_libgl() {
+    std::string bundled;
+    dl_iterate_phdr([](dl_phdr_info* info, size_t, void* data) {
+        const std::string_view name = info->dlpi_name ? info->dlpi_name : "";
+        if (name.find("/sys/opengl/lib/") == std::string_view::npos || name.find("/libGL.so") == std::string_view::npos)
+            return 0;
+        *static_cast<std::string*>(data) = std::string(name);
+        return 1;
+    }, &bundled);
+    if (!bundled.empty())
+        throw InteropError("MATLAB uses its software OpenGL library (" + bundled + "), which crashes the system's "
+                           "OpenGL driver. Start MATLAB with -nosoftwareopengl; see docs/how-to/matlab.md.");
+}
+#else
+void require_system_libgl() {}
+#endif
+
 // `clear mex` must not unload code that Filament's driver thread runs. Locked for every renderer,
 // not once: Octave 11 keeps the lock on a function object, and a call after a script that run()
 // executed can get a new object for the same loaded file, without the lock. MATLAB counts the
@@ -914,6 +939,7 @@ const std::unordered_map<std::string_view, Handler>& commands() {
                 context = mxIsUint64(c[0]) ? handle_id(c[0]) : uint64_t(whole(c[0], "sharedContext"));
                 if (!context) throw InteropError("sharedContext cannot be zero; omit it for offscreen rendering");
             }
+            require_system_libgl();
             // Locked before the engine starts its threads.
             lock();
             auto& t = table();
