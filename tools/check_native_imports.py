@@ -41,15 +41,16 @@ ALLOWED_ELF = SYSTEM_ELF + ["libstdc++.so.6", "libgcc_s.so.1"]
 # MATLAB puts its own, older libstdc++ and libgcc_s first in the library path, so the MATLAB MEX
 # file links both statically.
 ALLOWED_MEX_ELF = SYSTEM_ELF + ["libmx.so", "libmex.so"]
-# Octave runs on the system C++ runtime. mkoctfile --mex links no Octave library either: the MEX
-# API resolves against the running Octave, so one file serves several Octave versions.
-ALLOWED_OCTAVE_ELF = ALLOWED_ELF
+# Octave runs on the system C++ runtime. Before Octave 10, mkoctfile --mex links no Octave library:
+# the MEX API resolves against the running Octave. From Octave 10, it links liboctmex.
+ALLOWED_OCTAVE_ELF = ALLOWED_ELF + ["liboctmex.so.*"]
 # Exported entry points. Anything else exported could bind to another copy of Filament, libwebp,
 # or the C++ runtime in the process. MATLAB's export map adds the API version query.
 EXPORTS = {
     "python": ["PyInit__native"],
     "matlab": ["mexFunction", "mexfilerequiredapiversion"],
-    "octave": ["mexFunction"],
+    # Octave 10 and later check __octave_mex_soversion__ (matlab/CMakeLists.txt).
+    "octave": ["mexFunction", "__octave_mex_soversion__"],
 }
 
 
@@ -135,7 +136,9 @@ def elf_exports(data):
         for cursor in range(offset + entsize, offset + size, entsize):
             name, info, _, shndx = struct.unpack_from("<IBBH", data, cursor)
             binding = info >> 4
-            if shndx != 0 and binding in (1, 2) and name:  # defined, GLOBAL or WEAK
+            # Defined, GLOBAL or WEAK. Absolute symbols are version-node names from a version
+            # script (MATLAB's export map defines node "MEX"), not code or data.
+            if shndx not in (0, 0xFFF1) and binding in (1, 2) and name:
                 names.append(data[strtab + name:data.index(b"\0", strtab + name)].decode())
     return names
 

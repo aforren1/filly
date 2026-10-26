@@ -8,8 +8,32 @@ Supported now:
 
 | Platform | MATLAB | Octave |
 | --- | --- | --- |
-| Windows x64 | Yes. R2023a was used. | No (see phase 6 of the plan) |
-| Linux x86_64 | Builds in CI. The tests run in CI only. | Yes. Octave 8.4 (Ubuntu 24.04) was used. |
+| Windows x64 | R2021b and later | No (see phase 6 of the plan) |
+| Linux x86_64, glibc 2.28 or later | R2021b and later | 6.4 and later |
+
+## Install a release
+
+Each `matlab-v<version>` release on GitHub has one zip file for each package:
+
+| Package | Runs on |
+| --- | --- |
+| `filly-matlab-windows` | MATLAB R2021b and later on Windows |
+| `filly-matlab-linux` | MATLAB R2021b and later on Linux |
+| `filly-octave-linux-6.4` | Octave 6.4 through 9 on Linux |
+| `filly-octave-linux-10` | Octave 10 and later on Linux |
+
+Octave 10 changed the MEX ABI, so each side of that change has its own package. A package for
+the wrong Octave does not load: Octave 11 rejects a file without the version symbol that Octave
+10 introduced, and Octave 10 crashes on the first error from a file built for an earlier
+release.
+
+1. Unzip the package into an empty folder.
+2. In MATLAB or Octave, go to that folder and run `SetupFilly`. See
+   [Set up the path](#set-up-the-path).
+3. Run `filly.version` to see the version of the frontend. It has its own version, apart from
+   the Python package.
+
+To build the MEX files yourself, use the next sections.
 
 ## Build the MEX file on Windows
 
@@ -36,7 +60,7 @@ The Python wheel build sets no options, so it does not need MATLAB or Octave.
 ## Build the MEX files on Linux
 
 Requirements: the requirements of the [Linux build](build.md#build-on-linux) (Clang, CMake 3.28
-or later, Ninja, and the Linux SDK in `.deps/filament-linux`), and MATLAB or Octave 7 or later
+or later, Ninja, and the Linux SDK in `.deps/filament-linux`), and MATLAB or Octave 6.4 or later
 with its development files. On Ubuntu 24.04, the Octave packages are `octave` and `octave-dev`.
 
 For Octave, run:
@@ -49,8 +73,18 @@ cmake --build build/octave --target filly_octave_mex
 
 The build writes `matlab/filly_mex.mex`. CMake gets the Octave include folders from
 `mkoctfile -p INCFLAGS`. To select an Octave installation, add
-`-DFILLY_MKOCTFILE=<path to mkoctfile>`. The file links no Octave library, as `mkoctfile --mex`
-does, and uses the system C++ runtime, as Octave does.
+`-DFILLY_MKOCTFILE=<path to mkoctfile>`. The file uses the system C++ runtime, as Octave does.
+It links the same Octave libraries as `mkoctfile --mex`:
+
+- Before Octave 10, none. The MEX API resolves against the running Octave.
+- From Octave 10, `liboctmex`, from `mkoctfile -p OCTLIBDIR`. The file also exports
+  `__octave_mex_soversion__`, which Octave 11 requires.
+
+Build with the Octave that you run, or with an Octave from the same side of the Octave 10
+change (see [Install a release](#install-a-release)). Without `mkoctfile`, set
+`-DFILLY_OCTAVE_INCLUDE_DIRS` (the `octave-<version>/octave` and `octave-<version>` folders) and,
+for Octave 10 and later, `-DFILLY_OCTAVE_LIBRARY_DIR` (the folder of `liboctmex`). The release
+build does this in the manylinux container: see `tools/ci_matlab_linux.sh`.
 
 For MATLAB, run:
 
@@ -199,6 +233,11 @@ and the tests do not use these forms:
   fails. Use function syntax, which works in both: `setTransforms(nodes, T)`.
 - Octave reads `clear mex` as the name of a variable. Use `clear functions` to unload MEX files.
 - Octave adds `filly_mex: ` to the start of error messages. The identifiers are the same.
+- Do not replace `filly_mex.mex` while Octave runs, and after a build, wait a few seconds before
+  you start Octave. Octave 10 and later reload a MEX file whose time stamp is close to the start
+  of the session or later. With a renderer open, Octave 10 then crashes and Octave 11 loses the
+  MEX lock. Files from an unzipped release keep their old time stamps, so this does not apply to
+  them.
 
 ### Object lifetime
 
@@ -251,13 +290,17 @@ LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1024x768x24" \
 `FILLY_REFERENCE_DIR` if its output is not in `.deps/reference-compare`. The test skips if that
 output is missing or names files that no longer exist.
 
-CI (`.github/workflows/matlab.yml`) builds the MEX files and checks their imports and exports:
+CI (`.github/workflows/matlab.yml`) builds the packages on the oldest supported releases,
+checks the imports and exports of each MEX file, and tests the same files on the oldest and the
+newest release. The Linux packages build in the manylinux_2_28 container, as the Python wheels
+do, so they need glibc 2.28 or later.
 
-| Job | Tests |
-| --- | --- |
-| Windows, MATLAB | `test_gateway.m` only, which needs no renderer. Hosted Windows runners have no usable OpenGL device. |
-| Linux, MATLAB | The offscreen tests, under Xvfb with Mesa's llvmpipe |
-| Linux, Octave | The offscreen tests with llvmpipe, and the Psychtoolbox tests with Ubuntu's Psychtoolbox |
+| Package | Built with | Tested on |
+| --- | --- | --- |
+| `filly-matlab-windows` | MATLAB R2021b | R2021b and the latest MATLAB: `test_gateway.m` only, which needs no renderer. Hosted Windows runners have no usable OpenGL device. |
+| `filly-matlab-linux` | MATLAB R2021b headers | R2021b (Ubuntu 22.04) and the latest MATLAB (Ubuntu 24.04): the offscreen tests, under Xvfb with Mesa's llvmpipe |
+| `filly-octave-linux-6.4` | Octave 6.4 headers | Octave 6.4 and 9.4: the offscreen tests with llvmpipe. Ubuntu's Octave 8.4: the Psychtoolbox tests with Ubuntu's Psychtoolbox, under Zink |
+| `filly-octave-linux-10` | Octave 10.1 headers and `liboctmex` | Octave 10.1 and 11.3: the offscreen tests with llvmpipe |
 
 Run the parity test and the Psychtoolbox tests in MATLAB on a machine with a GPU before a
 release.
@@ -287,3 +330,24 @@ The packages are `octave-psychtoolbox-3`, `xvfb`, `xauth`, `mesa-vulkan-drivers`
 
 `matlab/tools/ptb_spike.m` is the phase 0 measurement, and `matlab/tools/benchmark_calls.m`
 measures the call overhead.
+
+## Publish a release
+
+The frontend releases apart from the Python package, with `matlab-v<version>` tags. The Python
+package keeps the `v<version>` tags.
+
+1. Set the new version in `matlab/VERSION`.
+2. Run the parity test and the Psychtoolbox tests in MATLAB on a machine with a GPU. CI cannot
+   run them.
+3. Commit, and wait for a green CI run on `main`.
+4. Push the tag:
+
+   ```bash
+   git tag matlab-v0.1.0
+   git push origin matlab-v0.1.0
+   ```
+
+CI then builds and tests every package again. When all jobs pass, the release job checks that
+the tag matches `matlab/VERSION`, zips each package, and creates a GitHub release that is not
+marked as the latest release. To repeat a failed release, delete the tag on both sides, fix the
+cause, and push the tag again.

@@ -50,9 +50,11 @@ assert(scene2.closed);
 expect_error(@() scene2.background, 'filly:error');
 
 % Asset compatibility messages become warnings with an identifier (none for this file).
+% The path first: Octave 11 warns about its own mix of string types in fullfile.
+horsePath = fullfile(fileparts(fileparts(fileparts(mfilename('fullpath')))), 'examples', 'assets', ...
+    'wooden_playground_horse.glb');
 lastwarn('');
-horse = scene.load(fullfile(fileparts(fileparts(fileparts(mfilename('fullpath')))), 'examples', 'assets', ...
-    'wooden_playground_horse.glb'));
+horse = scene.load(horsePath);
 [~, warningId] = lastwarn();
 assert(isempty(warningId) || strcmp(warningId, 'filly:assetCompatibility'));
 

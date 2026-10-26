@@ -8,8 +8,7 @@ if exist('filly_mex', 'file') ~= 3
     error('filly:setup', ['No filly_mex MEX file in %s. Build it with CMake ' ...
         '(-DFILLY_MATLAB=ON); see docs/how-to/matlab.md.'], here);
 end
-count = filly_mex('handleCount');
-fprintf('filly: %s loaded (%d open handles)\n', which('filly_mex'), count);
+fprintf('filly %s: %s loaded\n', filly_mex('version'), which('filly_mex'));
 if nargin > 0 && save
     savepath;
 end

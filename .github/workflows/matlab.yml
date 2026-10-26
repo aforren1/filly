@@ -1,19 +1,52 @@
 name: MATLAB and Octave
 
-# Builds the MEX gateway for MATLAB on Windows and Linux and for Octave on Linux, checks the
-# libraries and symbols of each file, and runs the frontend tests:
-# - Windows, MATLAB: the tests that need no renderer. Hosted Windows runners do not supply a
-#   reliable OpenGL rendering device.
-# - Linux, MATLAB and Octave: the offscreen tests under Xvfb with Mesa's llvmpipe.
-# - Linux, Octave: the Psychtoolbox tests with Ubuntu's Psychtoolbox, under Xvfb with Mesa's Zink
-#   driver on lavapipe. Psychtoolbox crashes in Screen('OpenWindow') with llvmpipe under Xvfb.
-# The parity tests and the Psychtoolbox tests in MATLAB run on a machine with a GPU
-# (docs/how-to/matlab.md).
+# Builds the toolbox packages on the oldest supported release, tests those exact files on the
+# oldest and the newest release, and publishes them on a matlab-v<version> tag.
+#
+# - MATLAB MEX files load in later releases, so one build per OS on R2021b covers R2021b and
+#   later.
+# - Octave has two MEX ABIs. A build against the Octave 6.4 headers links no Octave library and
+#   loads in Octave 6.4 through 9. Octave 10 moved the API into liboctmex with a different ABI,
+#   and Octave 11 refuses a file without the __octave_mex_soversion__ symbol, so a second build
+#   against Octave 10.1 covers 10 and later (tested locally on 2026-10-26).
+# - Linux packages build in manylinux_2_28, the container and compiler of the Filament SDK and
+#   the Python wheels, so they load on glibc 2.28 and later.
+# - Hosted runners have no GPU. Linux tests render with Mesa's llvmpipe under Xvfb, and the
+#   Psychtoolbox tests use Mesa's Zink on lavapipe, because Psychtoolbox crashes in
+#   Screen('OpenWindow') with llvmpipe under Xvfb. Windows runners have no usable OpenGL device,
+#   so Windows runs only the tests that need no renderer. Parity and the Psychtoolbox tests in
+#   MATLAB run on a machine with a GPU (docs/how-to/matlab.md).
+#
+# The Python wheels have their own workflow and v<version> tags; the paths below keep this one
+# off changes that cannot affect the MEX files. Path filters do not apply to tag pushes.
 on:
   workflow_dispatch:
   pull_request:
+    paths:
+      - 'matlab/**'
+      - 'native/**'
+      - 'CMakeLists.txt'
+      - 'tools/ci_matlab_linux.sh'
+      - 'tools/ci_linux.sh'
+      - 'tools/build_filament_linux.py'
+      - 'tools/fetch_filament.py'
+      - 'tools/check_native_imports.py'
+      - 'examples/assets/**'
+      - '.github/workflows/matlab.yml'
   push:
     branches: [main, master]
+    tags: ['matlab-v*']
+    paths:
+      - 'matlab/**'
+      - 'native/**'
+      - 'CMakeLists.txt'
+      - 'tools/ci_matlab_linux.sh'
+      - 'tools/ci_linux.sh'
+      - 'tools/build_filament_linux.py'
+      - 'tools/fetch_filament.py'
+      - 'tools/check_native_imports.py'
+      - 'examples/assets/**'
+      - '.github/workflows/matlab.yml'
 
 permissions:
   contents: read
@@ -22,9 +55,15 @@ concurrency:
   group: matlab-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  MATLAB_FLOOR: R2021b
+  OCTAVE_FLOOR: 6.4.0
+  OCTAVE10_FLOOR: 10.1.0
+
 jobs:
-  windows:
-    name: windows-2022 MATLAB
+  # ============================================================== Windows =====
+  windows-build:
+    name: build · windows · MATLAB R2021b
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -43,22 +82,48 @@ jobs:
       - id: matlab
         uses: matlab-actions/setup-matlab@v3
         with:
-          # The release that the local rendering and PTB tests ran on.
-          release: R2023a
+          release: ${{ env.MATLAB_FLOOR }}
           cache: true
-      - name: Build the MEX file
+      - name: Build the package
         shell: bash
         run: |
           cmake -S . -B build/matlab -G "Visual Studio 17 2022" -A x64 -DFILLY_PYTHON=OFF -DFILLY_MATLAB=ON \
             -DMatlab_ROOT_DIR="${{ steps.matlab.outputs.matlabroot }}"
           cmake --build build/matlab --config Release --target filly_mex
+          cmake --install build/matlab --config Release --component matlab --prefix dist/filly-matlab-windows
       - name: Check MEX imports
-        run: python tools/check_native_imports.py matlab/filly_mex.mexw64
+        run: python tools/check_native_imports.py dist/filly-matlab-windows/filly_mex.mexw64
+      - name: Run the gateway tests
+        uses: matlab-actions/run-command@v3
+        with:
+          command: cd matlab/tests; assert(run_tests('test_gateway*') == 0, 'filly:test', 'gateway tests failed')
+      - uses: actions/upload-artifact@v7
+        with:
+          name: filly-matlab-windows
+          path: dist/filly-matlab-windows
+          if-no-files-found: error
+
+  windows-forward:
+    name: test · windows · MATLAB latest
+    needs: windows-build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      # Over the checkout's matlab folder, so that the tests run the package's files.
+      - uses: actions/download-artifact@v8
+        with:
+          name: filly-matlab-windows
+          path: matlab
+      - uses: matlab-actions/setup-matlab@v3
+        with:
+          release: latest
       - name: Run the gateway tests
         uses: matlab-actions/run-command@v3
         with:
           command: cd matlab/tests; assert(run_tests('test_gateway*') == 0, 'filly:test', 'gateway tests failed')
 
+  # ================================================================ Linux =====
   linux-sdk:
     name: Linux SDK
     runs-on: ubuntu-24.04
@@ -71,18 +136,17 @@ jobs:
         with:
           path: .deps/filament-linux
           key: filament-linux-x86_64-manylinux228-${{ hashFiles('tools/build_filament_linux.py', 'tools/ci_linux.sh') }}
-      # As in the wheel build: manylinux_2_28 and its C++ runtime. The static libraries also link
-      # on ubuntu-24.04, whose glibc and libstdc++ are newer.
       - name: Build the SDK
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           docker run --rm -v "$PWD:/project" -w /project quay.io/pypa/manylinux_2_28_x86_64 bash tools/ci_linux.sh
           sudo chown -R "$(id -u):$(id -g)" .deps
 
-  octave:
-    name: ubuntu-24.04 Octave
+  linux-build:
+    name: build · linux · MATLAB R2021b, Octave 6.4 and 10.1
     needs: linux-sdk
-    runs-on: ubuntu-24.04
+    # The MATLAB floor release installs on Ubuntu 22.04; the build itself runs in manylinux.
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -91,73 +155,75 @@ jobs:
           path: .deps/filament-linux
           key: filament-linux-x86_64-manylinux228-${{ hashFiles('tools/build_filament_linux.py', 'tools/ci_linux.sh') }}
           fail-on-cache-miss: true
-      # Octave 8.4, Psychtoolbox 3.0.19, and Mesa from the Ubuntu archive. dbus: Psychtoolbox's
-      # GameMode support aborts the process at exit without a session bus.
-      - name: Install Octave, Psychtoolbox, and Mesa
-        run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ninja-build clang octave octave-dev octave-psychtoolbox-3 \
-            xvfb xauth mesa-vulkan-drivers libgl1-mesa-dri libegl1 libgl-dev libegl-dev libx11-dev dbus dbus-x11
-      - name: Build the MEX file
-        env:
-          CC: clang
-          CXX: clang++
-        run: |
-          cmake -S . -B build/octave -G Ninja -DCMAKE_BUILD_TYPE=Release -DFILLY_PYTHON=OFF -DFILLY_OCTAVE=ON \
-            -DFILAMENT_ROOT="$PWD/.deps/filament-linux"
-          cmake --build build/octave --target filly_octave_mex
-      - name: Check MEX libraries and exports
-        run: python3 tools/check_native_imports.py matlab/filly_mex.mex
-      - name: Run the offscreen tests (llvmpipe)
-        working-directory: matlab/tests
-        env:
-          LIBGL_ALWAYS_SOFTWARE: '1'
-        run: |
-          timeout 900 xvfb-run -a -s "-screen 0 1024x768x24" \
-            octave-cli --no-gui --no-init-file --quiet --eval "exit(run_tests() > 0)"
-      - name: Run the Psychtoolbox tests (Zink on lavapipe)
-        working-directory: matlab/tests/ptb
-        env:
-          MESA_LOADER_DRIVER_OVERRIDE: zink
-          LIBGL_ALWAYS_SOFTWARE: '1'
-          LIBGL_KOPPER_DRI2: '1'
-        run: |
-          timeout 1500 dbus-run-session -- xvfb-run -a -s "-screen 0 1024x768x24" \
-            octave-cli --no-gui --no-init-file --quiet --eval "exit(run_ptb_tests() > 0)"
-
-  matlab-linux:
-    name: ubuntu-24.04 MATLAB
-    needs: linux-sdk
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/cache/restore@v6
-        with:
-          path: .deps/filament-linux
-          key: filament-linux-x86_64-manylinux228-${{ hashFiles('tools/build_filament_linux.py', 'tools/ci_linux.sh') }}
-          fail-on-cache-miss: true
-      - name: Install Xvfb and Mesa
-        run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ninja-build clang xvfb xauth libgl1-mesa-dri libegl1 libgl-dev libegl-dev libx11-dev
+      # For its headers and libmx/libmex only: nothing in this job runs MATLAB.
       - id: matlab
         uses: matlab-actions/setup-matlab@v3
         with:
-          release: R2023a
+          release: ${{ env.MATLAB_FLOOR }}
           cache: true
-      - name: Build the MEX file
-        env:
-          CC: clang
-          CXX: clang++
+      # The include trees of the oldest Octave of each MEX ABI, and Octave 10's liboctmex.
+      - name: Copy the Octave headers and liboctmex
         run: |
-          cmake -S . -B build/matlab -G Ninja -DCMAKE_BUILD_TYPE=Release -DFILLY_PYTHON=OFF -DFILLY_MATLAB=ON \
-            -DFILAMENT_ROOT="$PWD/.deps/filament-linux" -DMatlab_ROOT_DIR="${{ steps.matlab.outputs.matlabroot }}"
-          cmake --build build/matlab --target filly_mex
+          mkdir -p .deps/octave
+          docker run --rm -v "$PWD/.deps/octave:/out" "gnuoctave/octave:$OCTAVE_FLOOR" \
+            cp -r "/usr/local/include/octave-$OCTAVE_FLOOR" /out/
+          docker run --rm -v "$PWD/.deps/octave:/out" "gnuoctave/octave:$OCTAVE10_FLOOR" bash -c \
+            "cp -r /usr/local/include/octave-$OCTAVE10_FLOOR /out/ && mkdir -p /out/lib10 && cp -P /usr/local/lib/octave/$OCTAVE10_FLOOR/liboctmex.so* /out/lib10/"
+      - name: Build the packages in manylinux_2_28
+        env:
+          MATLAB_ROOT: ${{ steps.matlab.outputs.matlabroot }}
+        run: |
+          docker run --rm -v "$PWD:/project" -v "$MATLAB_ROOT:$MATLAB_ROOT:ro" -w /project \
+            -e MATLAB_ROOT -e "OCTAVE6_INCLUDE=/project/.deps/octave/octave-$OCTAVE_FLOOR" \
+            -e "OCTAVE10_INCLUDE=/project/.deps/octave/octave-$OCTAVE10_FLOOR" -e OCTAVE10_LIB=/project/.deps/octave/lib10 \
+            quay.io/pypa/manylinux_2_28_x86_64 bash tools/ci_matlab_linux.sh
+          sudo chown -R "$(id -u):$(id -g)" dist build .deps
       - name: Check MEX libraries and exports
-        run: python3 tools/check_native_imports.py matlab/filly_mex.mexa64
+        run: |
+          python3 tools/check_native_imports.py dist/filly-matlab-linux/filly_mex.mexa64
+          python3 tools/check_native_imports.py dist/filly-octave-linux-6.4/filly_mex.mex
+          python3 tools/check_native_imports.py dist/filly-octave-linux-10/filly_mex.mex
+      - uses: actions/upload-artifact@v7
+        with:
+          name: filly-matlab-linux
+          path: dist/filly-matlab-linux
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: filly-octave-linux-6.4
+          path: dist/filly-octave-linux-6.4
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: filly-octave-linux-10
+          path: dist/filly-octave-linux-10
+          if-no-files-found: error
+
+  matlab-linux-test:
+    name: test · ${{ matrix.os }} · MATLAB ${{ matrix.release }}
+    needs: linux-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, release: R2021b }
+          - { os: ubuntu-24.04, release: latest }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: filly-matlab-linux
+          path: matlab
+      - name: Install Xvfb and Mesa
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb xauth libgl1-mesa-dri libegl1
+      - uses: matlab-actions/setup-matlab@v3
+        with:
+          release: ${{ matrix.release }}
+          cache: true
       # run-command starts MATLAB itself, so the display comes from a server started here.
       - name: Start Xvfb
         run: |
@@ -172,3 +238,110 @@ jobs:
           LD_PRELOAD: /usr/lib/x86_64-linux-gnu/libstdc++.so.6
         with:
           command: cd matlab/tests; assert(run_tests() == 0, 'filly:test', 'offscreen tests failed')
+
+  octave-test:
+    name: test · linux · Octave ${{ matrix.octave }}
+    needs: linux-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest and the newest Octave of each package.
+        include:
+          - { octave: '6.4.0', package: filly-octave-linux-6.4 }
+          - { octave: '9.4.0', package: filly-octave-linux-6.4 }
+          - { octave: '10.1.0', package: filly-octave-linux-10 }
+          - { octave: '11.3.0', package: filly-octave-linux-10 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.package }}
+          path: matlab
+      # Octave 10 and later reload a MEX file whose time stamp is close to the start of the
+      # session: Octave 10 then crashes with a renderer open, and Octave 11 drops the lock.
+      # Unzipped releases keep their old time stamps; a fresh download does not.
+      - name: Backdate the package files
+        run: find matlab examples -exec touch -d '1 hour ago' {} +
+      - name: Run the offscreen tests (llvmpipe)
+        run: |
+          docker run --rm -i -v "$PWD:/work" -w /work/matlab/tests "gnuoctave/octave:${{ matrix.octave }}" bash -s <<'EOF'
+          set -e
+          if ! command -v xvfb-run >/dev/null; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb xauth libgl1-mesa-dri libegl1
+          fi
+          LIBGL_ALWAYS_SOFTWARE=1 timeout 900 xvfb-run -a -s "-screen 0 1024x768x24" \
+            octave-cli --no-gui --no-init-file --quiet --eval "exit(run_tests() > 0)"
+          EOF
+
+  octave-ptb:
+    name: test · ubuntu-24.04 · Octave 8.4 with Psychtoolbox
+    needs: linux-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: filly-octave-linux-6.4
+          path: matlab
+      # As in octave-test. Octave 8.4 did not need it in testing; the step keeps the jobs alike.
+      - name: Backdate the package files
+        run: find matlab examples -exec touch -d '1 hour ago' {} +
+      # Octave 8.4, Psychtoolbox 3.0.19, and Mesa from the Ubuntu archive. dbus: Psychtoolbox's
+      # GameMode support aborts the process at exit without a session bus.
+      - name: Install Octave, Psychtoolbox, and Mesa
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            octave octave-psychtoolbox-3 xvfb xauth mesa-vulkan-drivers libgl1-mesa-dri libegl1 dbus dbus-x11
+      - name: Run the Psychtoolbox tests (Zink on lavapipe)
+        working-directory: matlab/tests/ptb
+        env:
+          MESA_LOADER_DRIVER_OVERRIDE: zink
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          LIBGL_KOPPER_DRI2: '1'
+        run: |
+          timeout 1500 dbus-run-session -- xvfb-run -a -s "-screen 0 1024x768x24" \
+            octave-cli --no-gui --no-init-file --quiet --eval "exit(run_ptb_tests() > 0)"
+
+  # ============================================================== Release =====
+  # On a matlab-v<version> tag, publish the packages that every test above ran on.
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/matlab-v')
+    needs: [windows-build, windows-forward, linux-build, matlab-linux-test, octave-test, octave-ptb]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check that the tag matches matlab/VERSION
+        run: |
+          version=$(head -1 matlab/VERSION)
+          if [ "${GITHUB_REF_NAME#matlab-v}" != "$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match version $version in matlab/VERSION" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v8
+        with:
+          path: packages
+          pattern: filly-*
+      - name: Zip each package
+        run: |
+          cd packages
+          for dir in */; do
+            name="${dir%/}"
+            (cd "$name" && zip -qr "../$name-$VERSION.zip" .)
+          done
+          ls -la ./*.zip
+      # Not the repository's latest release: that stays with the Python package's tags.
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" packages/*.zip --repo "$GITHUB_REPOSITORY" \
+            --title "filly for MATLAB and Octave $VERSION" --generate-notes --latest=false

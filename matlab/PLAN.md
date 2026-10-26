@@ -696,13 +696,26 @@ Done when: the frontend tests pass in Octave for Windows.
   - `FILLY_MATLAB` (default OFF): the MEX file, with `matlab_add_mex` from FindMatlab. It is built
     into `matlab/`, next to `+filly`.
   - `FILLY_OCTAVE` (default OFF, Linux): `matlab/filly_mex.mex` for Octave. It is a CMake module
-    with the include directories that `mkoctfile -p INCFLAGS` reports, not the planned custom
-    command that runs `mkoctfile --mex`: that command cannot get `filly_core`'s link libraries
-    from CMake. Like `mkoctfile --mex`, it links no Octave library; the MEX API resolves against
-    the running Octave. MATLAB and Octave files can be in the same folder: MATLAB loads
-    `.mexa64` and Octave loads `.mex`.
-- Ship per-platform binaries in a toolbox folder. PTB users expect a drop-in install without a
-  compiler. `SetupFilly.m` adds the folder to the path and checks that the MEX file loads.
+    with the include directories that `mkoctfile -p INCFLAGS` reports, or with
+    `FILLY_OCTAVE_INCLUDE_DIRS`, not the planned custom command that runs `mkoctfile --mex`:
+    that command cannot get `filly_core`'s link libraries from CMake. It links what
+    `mkoctfile --mex` links: no Octave library before Octave 10, `liboctmex` from Octave 10, plus
+    the exported `__octave_mex_soversion__` that Octave 11 requires. MATLAB and Octave files can
+    be in the same folder: MATLAB loads `.mexa64` and Octave loads `.mex`.
+- Releases (done 2026-10-26, not yet run): `.github/workflows/matlab.yml` builds one package for
+  each platform on the oldest supported release, tests that exact file on the oldest and the
+  newest release, and publishes the packages on a `matlab-v<version>` tag. `matlab/VERSION`
+  holds the frontend's own version, which `filly.version` reports. Each package is a
+  `cmake --install --component matlab|octave` folder: the MEX file, `+filly`, `SetupFilly.m`, a
+  README, and the licenses. PTB users get a drop-in install without a compiler.
+  - MATLAB: built on R2021b. MEX files load in later releases.
+  - Octave: two packages, because Octave 10 changed the MEX ABI. Tested locally on 2026-10-26
+    with the gnuoctave images: a build against the Octave 6.4 headers loads and renders in 6.4
+    and 9.4. In Octave 10.1 it loads but crashes on the first error path, and Octave 11.3 rejects
+    it ("No SOVERSION found"). A build against Octave 10.1 with `liboctmex` passes in 10.1.
+  - Linux: built in manylinux_2_28 with the SDK's compiler, as the Python wheels are, so the
+    files need glibc 2.28 (measured: GLIBC_2.27 at most). The MATLAB file links
+    `libstdc++-static` and has no GLIBCXX dependency.
 - `tools/check_native_imports.py` checks the libraries that each MEX file imports, against a list
   for each frontend and platform. For ELF files, it also checks that only the entry points are
   exported.
@@ -726,5 +739,8 @@ Done when: the frontend tests pass in Octave for Windows.
 | Mesa's `glFenceSync` skips buffered immediate-mode vertices | Found under Zink in phase 4; filly flushes before each host fence | Done |
 | The host closes the X display that Filament's shared context uses | Crashed after PTB's `clear mex` on Linux; the renderer now closes in an Xlib close hook | Done; the hook acts only on the creating thread |
 | PTB with llvmpipe under Xvfb | Crashes in `Screen('OpenWindow')` (Mesa) | CI uses Zink on lavapipe |
+| Octave 10 and later reload a MEX file with a fresh time stamp during the session | Measured 2026-10-26 in the gnuoctave images, with the files copied just before Octave started: Octave 10.1 crashed in 3 of 3 runs, Octave 11.3 lost the MEX lock in 3 of 3 runs (`mislocked` false). With the files backdated by one hour: 6 of 6 passed. Octave 6.4 and 9.4 were not affected. | CI backdates the downloaded packages; the how-to tells users not to replace the file during a session. Releases keep old time stamps. A fix inside the gateway is not known. |
+| Octave 11 runs a subclass `delete` again after an explicit `delete` | `Renderer.delete` then saw a released handle and warned | `Renderer.delete` checks `filly_mex('valid', id)` first |
+| Octave 11 keeps the MEX lock on a function object | A second function object for the same file can be unlocked | The gateway calls `mexLock` for every renderer, not once |
 | A new PTB window whose context gets the HGLRC value of a closed one would look current to a closed target | Not observed | The PTB classes also compare the OpenGL texture name before they close a PTB texture |
 | Rare crash when two processes create shared-context renderers at the same time (see the filly validation reference) | Open | Low priority here: a MATLAB and PTB session is one process |

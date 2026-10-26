@@ -55,7 +55,6 @@ struct Table {
     uint64_t next = 1;
     // Every renderer that the gateway created, so that the exit handler can close them first.
     std::vector<Renderer> renderers;
-    bool locked = false;
 };
 // Never destroyed: destroying a Filament engine joins its threads, which must not happen under
 // the loader lock when the DLL unloads. The exit handler empties the table instead.
@@ -826,13 +825,11 @@ template <> const Properties<Preparation>& properties() {
 
 void close_all() noexcept;
 
-void lock_once() {
-    auto& t = table();
-    if (t.locked) return;
-    // `clear mex` must not unload code that Filament's driver thread runs.
-    mexLock();
-    t.locked = true;
-}
+// `clear mex` must not unload code that Filament's driver thread runs. Locked for every renderer,
+// not once: Octave 11 keeps the lock on a function object, and a call after a script that run()
+// executed can get a new object for the same loaded file, without the lock. MATLAB counts the
+// calls; nothing unlocks.
+void lock() { mexLock(); }
 
 template <class T> bool same(const T& a, const T& b) {
     if constexpr (requires { a.same(b); }) return a.same(b);
@@ -874,6 +871,10 @@ const std::unordered_map<std::string_view, Handler>& commands() {
             table().objects.erase(handle_id(c[0]));
         }},
         {"handleCount", [](Call& c) { c.out(0, number_out(double(table().objects.size()))); }},
+        // Octave 11 runs a subclass destructor again after an explicit delete, when the handle can
+        // already be released; the destructors check first.
+        {"valid", [](Call& c) { c.out(0, bool_out(table().objects.count(handle_id(c[0])) > 0)); }},
+        {"version", [](Call& c) { c.out(0, text_out(FILLY_FRONTEND_VERSION)); }},
         {"kind", [](Call& c) { c.out(0, text_out(kind_names[lookup(c[0]).index()])); }},
         {"same", [](Call& c) {
             auto& a = lookup(c[0]);
@@ -914,7 +915,7 @@ const std::unordered_map<std::string_view, Handler>& commands() {
                 if (!context) throw InteropError("sharedContext cannot be zero; omit it for offscreen rendering");
             }
             // Locked before the engine starts its threads.
-            lock_once();
+            lock();
             auto& t = table();
             std::erase_if(t.renderers, [](const Renderer& r) { return r.closed(); });
             Renderer renderer(context);
@@ -1347,6 +1348,11 @@ bool run(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[], char* ident
 }
 
 }
+
+#if defined(FILLY_OCTAVE_MEX_SOVERSION)
+// Octave 10 and later check this symbol for the MEX API version, as mkoctfile --mex writes it.
+extern "C" const int __octave_mex_soversion__ = FILLY_OCTAVE_MEX_SOVERSION;
+#endif
 
 void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     char identifier[32];

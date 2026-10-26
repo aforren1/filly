@@ -2,6 +2,11 @@
 % identifiers. Hosted CI runners have no usable OpenGL device, so CI runs only this file.
 assert(filly_mex('handleCount') == 0, 'a fresh session must have no handles');
 
+% The MEX file carries the frontend's version, which the release tag must match.
+here = fileparts(mfilename('fullpath'));
+expected = strtrim(fileread(fullfile(fileparts(here), 'VERSION')));
+assert(strcmp(filly.version(), expected), 'filly.version() is %s, matlab/VERSION is %s', filly.version(), expected);
+
 % Dispatch and handles.
 expect_error(@() filly_mex(), 'filly:invalidArgument');
 expect_error(@() filly_mex('noSuchCommand'), 'filly:invalidArgument');
@@ -11,6 +16,7 @@ expect_error(@() filly_mex('get', 1, 'closed'), 'filly:invalidArgument');
 expect_error(@() filly_mex('get', uint64([1 2]), 'closed'), 'filly:invalidArgument');
 % Release is idempotent: MATLAB can delete an object after the exit handler emptied the table.
 filly_mex('release', uint64(123456789));
+assert(~filly_mex('valid', uint64(123456789)), 'an unknown handle must not be valid');
 
 % A renderer argument error raises before any engine starts.
 expect_error(@() filly.Renderer('SharedContext', 0), 'filly:interop');

@@ -30,7 +30,9 @@ classdef Renderer < filly.Object
         end
 
         function delete(obj)
-            if obj.Id ~= 0
+            % Octave 11 can call this again after Object.delete released the handle; the
+            % renderer was closed on the first call.
+            if obj.Id ~= 0 && filly_mex('valid', obj.Id)
                 try
                     close(obj);
                 catch err
