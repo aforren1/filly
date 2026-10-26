@@ -104,27 +104,26 @@ To check the libraries that a file imports and the symbols that it exports, run
 
 ### MATLAB and Mesa on Linux
 
-MATLAB's own libstdc++ can also be too old for the Mesa drivers (Intel, AMD, and software
-rendering), which link the system libstdc++. A renderer then cannot create its OpenGL context.
-CI starts MATLAB with the system copy loaded first:
+MATLAB brings two libraries that the system's Mesa drivers (Intel, AMD, and software rendering)
+do not work with:
+
+- MATLAB's own libstdc++ can be too old for the drivers, which link the system libstdc++. A
+  renderer then cannot create its OpenGL context.
+- Some releases (R2021b in CI) load an old Mesa `libGL` from MATLAB's `sys/opengl/lib` folder,
+  also with `-nosoftwareopengl`. It exports Mesa's internal `_glapi` functions, and a system Mesa
+  driver that binds to them crashes. filly checks which library provides them before it creates a
+  renderer, and raises a `filly:interop` error that names MATLAB's library instead of crashing.
+
+Start MATLAB with the system's libraries preloaded, so that the symbol lookup finds them first.
+On Debian and Ubuntu:
 
 ```bash
-LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 matlab
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6:/usr/lib/x86_64-linux-gnu/libGL.so.1:/usr/lib/x86_64-linux-gnu/libglapi.so.0 matlab
 ```
 
-This is the configuration of the CI job. It was not tested on a local MATLAB installation.
-
-Without a usable GPU driver, for example under Xvfb or in a virtual machine, MATLAB can select
-its bundled software OpenGL. That is an old Mesa `libGL` in MATLAB's `sys/opengl/lib` folder,
-and the system's Mesa driver crashes when it binds to it. filly then refuses to create a
-renderer and names the library in the error. Start MATLAB with `-nosoftwareopengl`:
-
-```bash
-LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 matlab -nosoftwareopengl
-```
-
-In CI, R2021b under Xvfb selected the software OpenGL and crashed before filly had this check.
-The latest MATLAB did not select it.
+Leave out `libglapi.so.0` if the system does not have it: newer Mesa releases do not. On other
+distributions, the libraries are in another folder, for example `/usr/lib64`. CI uses this
+configuration. It was not tested on a local MATLAB installation.
 
 ## Set up the path
 

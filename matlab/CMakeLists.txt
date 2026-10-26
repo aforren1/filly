@@ -45,6 +45,8 @@ if(FILLY_MATLAB)
     # than the ones that the core is built with. Static copies make the file independent of
     # them; the export map keeps their symbols out of the process.
     target_link_options(filly_mex PRIVATE -static-libstdc++ -static-libgcc)
+    # dlsym and dladdr, for the check of which library provides Mesa's _glapi symbols.
+    target_link_libraries(filly_mex PRIVATE ${CMAKE_DL_LIBS})
   endif()
 endif()
 

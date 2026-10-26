@@ -229,17 +229,22 @@ jobs:
         run: |
           Xvfb :99 -screen 0 1024x768x24 &
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
-      # MATLAB puts its own libstdc++ first in the library path. Mesa's drivers need the newer
-      # system one (docs/how-to/matlab.md).
-      # -nosoftwareopengl: under Xvfb, R2021b selects its bundled software OpenGL, an old Mesa
-      # libGL whose glapi the system's Mesa driver then binds to, and renderer creation crashed.
+      # MATLAB puts its own libstdc++ first in the library path, and Mesa's drivers need the newer
+      # system one. R2021b also loads its own old Mesa libGL, and the system's Mesa driver crashed
+      # when it bound its _glapi symbols to that copy. Preloading the system's libraries puts them
+      # first in the symbol lookup (docs/how-to/matlab.md). Newer Mesa has no libglapi.so.0.
+      - name: Preload the system's C++ and GL libraries
+        run: |
+          preload=""
+          for lib in libstdc++.so.6 libGL.so.1 libglapi.so.0; do
+            if [ -e "/usr/lib/x86_64-linux-gnu/$lib" ]; then preload="$preload:/usr/lib/x86_64-linux-gnu/$lib"; fi
+          done
+          echo "LD_PRELOAD=${preload#:}" | tee -a "$GITHUB_ENV"
       - name: Run the offscreen tests (llvmpipe)
         uses: matlab-actions/run-command@v3
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'
-          LD_PRELOAD: /usr/lib/x86_64-linux-gnu/libstdc++.so.6
         with:
-          startup-options: -nosoftwareopengl
           command: cd matlab/tests; assert(run_tests() == 0, 'filly:test', 'offscreen tests failed')
 
   octave-test:

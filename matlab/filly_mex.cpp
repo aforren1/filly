@@ -33,7 +33,7 @@
 #endif
 
 #if defined(__linux__) && !defined(FILLY_OCTAVE)
-#include <link.h>
+#include <dlfcn.h>
 #endif
 
 using namespace filly;
@@ -830,21 +830,21 @@ template <> const Properties<Preparation>& properties() {
 void close_all() noexcept;
 
 #if defined(__linux__) && !defined(FILLY_OCTAVE)
-// In software OpenGL mode, MATLAB loads its own copy of an old Mesa libGL (sys/opengl/lib). The
-// system's Mesa driver then binds its _glapi symbols to that copy and crashes while the renderer
-// starts (seen with R2021b under Xvfb). An error with the remedy is better than the crash.
+// MATLAB (R2021b at least, also with -nosoftwareopengl) loads its own copy of an old Mesa libGL
+// from sys/opengl/lib, which exports Mesa's _glapi symbols. When the global lookup finds that
+// copy first, the system's Mesa driver binds to it and crashes while the renderer starts. The
+// symbol's provider is what matters: with the system's libraries preloaded, MATLAB's copy can
+// stay loaded and do no harm. An error with the remedy is better than the crash.
 void require_system_libgl() {
-    std::string bundled;
-    dl_iterate_phdr([](dl_phdr_info* info, size_t, void* data) {
-        const std::string_view name = info->dlpi_name ? info->dlpi_name : "";
-        if (name.find("/sys/opengl/lib/") == std::string_view::npos || name.find("/libGL.so") == std::string_view::npos)
-            return 0;
-        *static_cast<std::string*>(data) = std::string(name);
-        return 1;
-    }, &bundled);
-    if (!bundled.empty())
-        throw InteropError("MATLAB uses its software OpenGL library (" + bundled + "), which crashes the system's "
-                           "OpenGL driver. Start MATLAB with -nosoftwareopengl; see docs/how-to/matlab.md.");
+    void* symbol = dlsym(RTLD_DEFAULT, "_glapi_add_dispatch");
+    Dl_info info{};
+    if (!symbol || !dladdr(symbol, &info) || !info.dli_fname) return;
+    const std::string_view provider = info.dli_fname;
+    if (provider.find("/sys/opengl/lib/") == std::string_view::npos) return;
+    throw InteropError("The system's OpenGL driver would bind to MATLAB's own Mesa library (" + std::string(provider)
+                       + ") and crash. Start MATLAB with the system's GL libraries preloaded, for example "
+                         "LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libGL.so.1:/usr/lib/x86_64-linux-gnu/libglapi.so.0; "
+                         "see docs/how-to/matlab.md.");
 }
 #else
 void require_system_libgl() {}
