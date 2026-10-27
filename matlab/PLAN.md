@@ -335,8 +335,9 @@ cam.lookAt([0 0 0]);
 scene.camera = cam;
 helmet = scene.load('DamagedHelmet.glb');
 
+start = GetSecs;
 while ~KbCheck
-    helmet.rotationEulerDeg = [0 30 * GetSecs 0];
+    helmet.rotationEulerDeg = [0 30 * (GetSecs - start) 0];
     r.render(scene, tgt);
     tgt.draw();
     Screen('Flip', win);
@@ -742,6 +743,7 @@ Done when: the frontend tests pass in Octave for Windows.
 | MATLAB's bundled software OpenGL on Linux | CI run 40386224972: R2021b under Xvfb loaded `sys/opengl/lib/glnxa64/libGL.so.1`; the system's `swrast_dri.so` bound `_glapi_add_dispatch` to it and crashed in renderer creation. The latest MATLAB passed. | `-nosoftwareopengl` did not stop R2021b from loading the library (second CI run). The gateway now checks which library provides `_glapi_add_dispatch` and raises `filly:interop` if it is MATLAB's. An earlier check by file name showed its error in CI instead of the crash; the symbol check is not yet run in CI. CI preloads the system's libstdc++, libGL, and libglapi; that remedy is not yet verified in CI. |
 | Octave 10 and later reload a MEX file with a fresh time stamp during the session | Measured 2026-10-26 in the gnuoctave images, with the files copied just before Octave started: Octave 10.1 crashed in 3 of 3 runs, Octave 11.3 lost the MEX lock in 3 of 3 runs (`mislocked` false). With the files backdated by one hour: 6 of 6 passed. Octave 6.4 and 9.4 were not affected. | CI backdates the downloaded packages; the how-to tells users not to replace the file during a session. Releases keep old time stamps. A fix inside the gateway is not known. |
 | Octave 11 runs a subclass `delete` again after an explicit `delete` | `Renderer.delete` then saw a released handle and warned | `Renderer.delete` checks `filly_mex('valid', id)` first |
+| The Octave GUI deletes objects on another thread at exit | Reported 2026-10-27: "Renderer close failed: Use the renderer on its creating thread" after the PTB example, which calls `close(r)`. `octave-cli` (9.4, 11.3) deletes on the interpreter thread. | `Renderer::close` on a closed renderer now does nothing on any thread. An open renderer cannot close from another thread; the how-to tells GUI users to call `close(r)` before they quit. |
 | Octave 11 keeps the MEX lock on a function object | A second function object for the same file can be unlocked | The gateway calls `mexLock` for every renderer, not once |
 | A new PTB window whose context gets the HGLRC value of a closed one would look current to a closed target | Not observed | The PTB classes also compare the OpenGL texture name before they close a PTB texture |
 | Rare crash when two processes create shared-context renderers at the same time (see the filly validation reference) | Open | Low priority here: a MATLAB and PTB session is one process |

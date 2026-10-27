@@ -13,6 +13,10 @@ assert(max(abs(model.transform(:) - T(:))) < 1e-6);
 % The translation is the fourth column, as for column vectors.
 assert(max(abs(model.position - [1 2 3])) < 1e-6);
 assert(max(abs(model.rotationEulerDeg - [0 0 30])) < 1e-4);
+% A rate times GetSecs, which counts seconds since 1970 on Linux: in single precision only
+% multiples of 4096 degrees remain at this size, so the angle must reach the core in double.
+model.rotationEulerDeg = [0 360 * 1e8 + 30 0];
+assert(max(abs(model.rotationEulerDeg - [0 30 0])) < 1e-3, 'a large angle must keep its fraction of a turn');
 
 % single input is accepted as well.
 model.transform = single(translation);

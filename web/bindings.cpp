@@ -304,6 +304,8 @@ std::optional<double> plane(const val& value) {
 EMSCRIPTEN_BINDINGS(filly) {
     value_array<Vec3>("Vec3").element(emscripten::index<0>()).element(emscripten::index<1>())
         .element(emscripten::index<2>());
+    value_array<Vec3d>("Vec3d").element(emscripten::index<0>()).element(emscripten::index<1>())
+        .element(emscripten::index<2>());
     value_array<Vec4>("Vec4").element(emscripten::index<0>()).element(emscripten::index<1>())
         .element(emscripten::index<2>()).element(emscripten::index<3>());
     value_array<std::array<float, 2>>("Vec2").element(emscripten::index<0>()).element(emscripten::index<1>());
@@ -443,7 +445,7 @@ EMSCRIPTEN_BINDINGS(filly) {
         }))
         .function("textureTransform", &texture_transform)
         .function("setTextureTransform", optional_override([](Material& material, int slot, std::array<float, 2> offset,
-                                                             std::array<float, 2> scale, float rotation_deg) {
+                                                             std::array<float, 2> scale, double rotation_deg) {
             material.set_texture_transform(slot, UvTransform{offset, scale, rotation_deg});
         }));
 
@@ -541,7 +543,7 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("rotationEulerDeg", optional_override([](const Model& model) {
             return model.root().rotation_euler_deg();
         }))
-        .function("setRotationEulerDeg", optional_override([](Model& model, Vec3 value) {
+        .function("setRotationEulerDeg", optional_override([](Model& model, Vec3d value) {
             model.root().set_rotation_euler_deg(value);
         }))
         .function("nodeByName", select_overload<Node(const std::string&) const>(&Model::node))

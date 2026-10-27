@@ -16,6 +16,9 @@ void set_log_level(const std::string& level);
 
 using Vec3 = std::array<float, 3>;
 using Vec4 = std::array<float, 4>;
+// Angles that wrap: the setters reduce them modulo 360 in double precision before any float
+// conversion, so a caller can pass a large angle, such as a rate times a clock reading.
+using Vec3d = std::array<double, 3>;
 using Matrix = std::array<float, 16>;
 
 struct FillyError : std::runtime_error { using runtime_error::runtime_error; };
@@ -176,7 +179,7 @@ private:
 // KHR_texture_transform of a runtime texture: offset and scale in UV units, rotation in degrees.
 struct UvTransform {
     std::array<float, 2> offset = {0, 0}, scale = {1, 1};
-    float rotation_deg = 0;
+    double rotation_deg = 0;
 };
 
 class Material {
@@ -196,7 +199,7 @@ public:
     // Empty for a slot without a runtime texture, where setting it throws. Assigning a texture
     // keeps the transform; removing it resets the transform.
     std::optional<UvTransform> texture_transform(int slot) const;
-    void set_texture_transform(int slot, const UvTransform& value);
+    void set_texture_transform(int slot, UvTransform value);
     // For tests: the name of the Filament material behind this handle, and whether it refracts
     // in screen space.
     std::pair<std::string, bool> shader() const;
@@ -228,7 +231,7 @@ public:
     Vec4 quaternion() const;
     void set_quaternion(Vec4 value);
     Vec3 rotation_euler_deg() const;
-    void set_rotation_euler_deg(Vec3 value);
+    void set_rotation_euler_deg(Vec3d value);
     Material material(size_t slot) const;
     // Model.bounds restricted to this node and its descendants.
     std::array<Vec3, 2> bounds() const;
@@ -466,7 +469,7 @@ public:
     float environment_intensity() const;
     void set_environment_intensity(float value);
     float environment_rotation_deg() const;
-    void set_environment_rotation_deg(float value);
+    void set_environment_rotation_deg(double value);
     bool environment_visible() const;
     void set_environment_visible(bool value);
     Vec4 background() const;

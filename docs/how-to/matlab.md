@@ -159,8 +159,10 @@ scene.camera = cam;
 helmet = scene.load('DamagedHelmet.glb');
 cam.frame(helmet);
 scene.environment = r.loadEnvironment('studio.hdr');
+scene.environmentVisible = true;     % draw the environment as the background
+start = GetSecs;
 while ~KbCheck
-    helmet.rotationEulerDeg = [0 30 * GetSecs 0];
+    helmet.rotationEulerDeg = [0 30 * (GetSecs - start) 0];   % 30 degrees per second
     r.render(scene, tgt);
     tgt.draw();                      % Screen('DrawTexture') between acquire and release
     Screen('Flip', win);
@@ -244,6 +246,11 @@ and the tests do not use these forms:
   fails. Use function syntax, which works in both: `setTransforms(nodes, T)`.
 - Octave reads `clear mex` as the name of a variable. Use `clear functions` to unload MEX files.
 - Octave adds `filly_mex: ` to the start of error messages. The identifiers are the same.
+- In the Octave GUI, close each renderer (`close(r)`) before you quit. The GUI runs the
+  interpreter on a worker thread, and at exit it deletes the remaining objects on another thread,
+  where filly cannot close a renderer: Octave then shows "Renderer close failed: Use the renderer
+  on its creating thread", and the renderer stays open until the process ends. A closed renderer
+  gives no warning.
 - Do not replace `filly_mex.mex` while Octave runs, and after a build, wait a few seconds before
   you start Octave. Octave 10 and later reload a MEX file whose time stamp is close to the start
   of the session or later. With a renderer open, Octave 10 then crashes and Octave 11 loses the

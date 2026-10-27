@@ -65,6 +65,10 @@ def test_trs_conventions_and_validation(scene, triangle_glb):
     np.testing.assert_allclose(model.quaternion, [0, 0, 0, 1], atol=1e-6)
     model.rotation_euler_deg = (20, 30, 40)
     np.testing.assert_allclose(model.rotation_euler_deg, [20, 30, 40], atol=1e-4)
+    # A rate times a clock reading: in float32 only multiples of 4096 degrees remain at this size,
+    # so the core reduces the angle in double precision first.
+    model.rotation_euler_deg = (0, 360 * 1e8 + 30, 0)
+    np.testing.assert_allclose(model.rotation_euler_deg, [0, 30, 0], atol=1e-3)
     with pytest.raises(ValueError):
         model.quaternion = (0, 0, 0, 0)
     with pytest.raises(ValueError):

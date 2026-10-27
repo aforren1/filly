@@ -658,11 +658,12 @@ void Scene::set_environment_visible(bool value) {
     data_->scene->setSkybox(value ? data_->skybox : nullptr);
 }
 float Scene::environment_rotation_deg() const { data_->check(); return data_->environment_rotation_deg; }
-void Scene::set_environment_rotation_deg(float value) {
-    data_->check(); finite(value);
-    data_->environment_rotation_deg = value;
+void Scene::set_environment_rotation_deg(double value) {
+    data_->check();
+    const float degrees = float(wrap_deg(value));
+    data_->environment_rotation_deg = degrees;
     if (data_->environment_light)
-        data_->environment_light->setRotation(m::mat3f::rotation(value * 0.01745329252f, m::float3{0, 1, 0}));
+        data_->environment_light->setRotation(m::mat3f::rotation(degrees * 0.01745329252f, m::float3{0, 1, 0}));
     detail::update_diffuse_environment(*data_);
 }
 float Scene::environment_intensity() const { data_->check(); return data_->environment_intensity; }

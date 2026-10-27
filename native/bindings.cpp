@@ -820,7 +820,7 @@ NB_MODULE(_native, module) {
         .def_prop_rw("quaternion", [](const Model& self) { return self.root().quaternion(); },
             [](Model& self, Vec4 value) { self.root().set_quaternion(value); })
         .def_prop_rw("rotation_euler_deg", [](const Model& self) { return self.root().rotation_euler_deg(); },
-            [](Model& self, Vec3 value) { self.root().set_rotation_euler_deg(value); });
+            [](Model& self, Vec3d value) { self.root().set_rotation_euler_deg(value); });
 
     nb::class_<Node>(module, "Node")
         .def_prop_ro("name", &Node::name)

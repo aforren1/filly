@@ -190,6 +190,16 @@ def test_cross_renderer_and_thread_rejection(renderer, scene):
     with ThreadPoolExecutor(max_workers=1) as executor:
         with pytest.raises(filly.FillyError, match="creating thread"):
             executor.submit(renderer.create_scene).result()
+        with pytest.raises(filly.FillyError, match="creating thread"):
+            executor.submit(renderer.close).result()
+
+
+def test_closed_renderer_closes_again_on_any_thread():
+    renderer = filly.Renderer()
+    renderer.close()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(renderer.close).result()
+    assert renderer.closed
 
 
 def test_close_invalidates_children(renderer, scene, triangle_glb):

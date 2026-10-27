@@ -173,11 +173,12 @@ void read_name(const mxArray* a, Name& name, const char* what) {
         invalid(std::string(what) + " must be a char vector of at most 63 characters");
     name.view = name.value;
 }
-template <size_t N> std::array<float, N> vec(const mxArray* a, const char* name) {
+// Angles that wrap stay double: the core reduces them modulo 360 before it narrows them.
+template <size_t N, class T = float> std::array<T, N> vec(const mxArray* a, const char* name) {
     require_numeric(a, name);
     if (mxGetNumberOfElements(a) != N) invalid(std::string(name) + " must have " + std::to_string(N) + " elements");
-    std::array<float, N> result;
-    for (size_t i = 0; i < N; ++i) result[i] = float(element(a, i));
+    std::array<T, N> result;
+    for (size_t i = 0; i < N; ++i) result[i] = T(element(a, i));
     return result;
 }
 // MATLAB's column-major 4 x 4 array into the facade's row-major matrix, with the same mathematics.
@@ -596,7 +597,7 @@ template <> const Properties<Scene>& properties() {
             return environment ? put(*environment) : empty_out();
         }, [](Scene& s, const mxArray* v) { s.set_environment(mxIsEmpty(v) ? nullptr : &get<Environment>(v)); }}},
         {"environmentIntensity", {[](Scene& s) { return number_out(s.environment_intensity()); }, [](Scene& s, const mxArray* v) { s.set_environment_intensity(single(v, "environmentIntensity")); }}},
-        {"environmentRotationDeg", {[](Scene& s) { return number_out(s.environment_rotation_deg()); }, [](Scene& s, const mxArray* v) { s.set_environment_rotation_deg(single(v, "environmentRotationDeg")); }}},
+        {"environmentRotationDeg", {[](Scene& s) { return number_out(s.environment_rotation_deg()); }, [](Scene& s, const mxArray* v) { s.set_environment_rotation_deg(number(v, "environmentRotationDeg")); }}},
         {"environmentVisible", {[](Scene& s) { return bool_out(s.environment_visible()); }, [](Scene& s, const mxArray* v) { s.set_environment_visible(flag(v, "environmentVisible")); }}},
         {"background", {[](Scene& s) { return row_out(s.background()); }, [](Scene& s, const mxArray* v) { s.set_background(vec<4>(v, "background")); }}},
         {"pickBlended", {[](Scene& s) { return bool_out(s.pick_blended()); }, [](Scene& s, const mxArray* v) { s.set_pick_blended(flag(v, "pickBlended")); }}},
@@ -654,7 +655,7 @@ template <> const Properties<Model>& properties() {
         {"materialNames", {[](Model& m) { return texts_out(m.material_names()); }, nullptr}},
         {"scale", {[](Model& m) { return row_out(m.root().scale()); }, [](Model& m, const mxArray* v) { m.root().set_scale(vec<3>(v, "scale")); }}},
         {"quaternion", {[](Model& m) { return row_out(m.root().quaternion()); }, [](Model& m, const mxArray* v) { m.root().set_quaternion(vec<4>(v, "quaternion")); }}},
-        {"rotationEulerDeg", {[](Model& m) { return row_out(m.root().rotation_euler_deg()); }, [](Model& m, const mxArray* v) { m.root().set_rotation_euler_deg(vec<3>(v, "rotationEulerDeg")); }}},
+        {"rotationEulerDeg", {[](Model& m) { return row_out(m.root().rotation_euler_deg()); }, [](Model& m, const mxArray* v) { m.root().set_rotation_euler_deg(vec<3, double>(v, "rotationEulerDeg")); }}},
         {"isMesh", {[](Model& m) { return bool_out(m.is_mesh()); }, nullptr}},
         {"vertexCount", {[](Model& m) { return number_out(double(m.vertex_count())); }, nullptr}},
     };
@@ -674,7 +675,7 @@ template <> const Properties<Node>& properties() {
         {"position", {[](Node& n) { return row_out(n.position()); }, [](Node& n, const mxArray* v) { n.set_position(vec<3>(v, "position")); }}},
         {"scale", {[](Node& n) { return row_out(n.scale()); }, [](Node& n, const mxArray* v) { n.set_scale(vec<3>(v, "scale")); }}},
         {"quaternion", {[](Node& n) { return row_out(n.quaternion()); }, [](Node& n, const mxArray* v) { n.set_quaternion(vec<4>(v, "quaternion")); }}},
-        {"rotationEulerDeg", {[](Node& n) { return row_out(n.rotation_euler_deg()); }, [](Node& n, const mxArray* v) { n.set_rotation_euler_deg(vec<3>(v, "rotationEulerDeg")); }}},
+        {"rotationEulerDeg", {[](Node& n) { return row_out(n.rotation_euler_deg()); }, [](Node& n, const mxArray* v) { n.set_rotation_euler_deg(vec<3, double>(v, "rotationEulerDeg")); }}},
     };
     return value;
 }
@@ -703,7 +704,7 @@ template <int Slot> void set_uv_scale(Material& m, const mxArray* v) {
 }
 template <int Slot> void set_uv_rotation(Material& m, const mxArray* v) {
     auto t = m.texture_transform(Slot).value_or(UvTransform{});
-    t.rotation_deg = single(v, "rotationDeg");
+    t.rotation_deg = number(v, "rotationDeg");
     m.set_texture_transform(Slot, t);
 }
 

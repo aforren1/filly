@@ -273,14 +273,15 @@ std::optional<UvTransform> Material::texture_transform(int slot) const {
     if (!assignment || !assignment->textures[slot]) return std::nullopt;
     return assignment->uv[slot];
 }
-void Material::set_texture_transform(int slot, const UvTransform& value) {
+void Material::set_texture_transform(int slot, UvTransform value) {
     data_->check();
     texture_slot(slot);
-    finite(value.offset); finite(value.scale); finite(value.rotation_deg);
+    finite(value.offset); finite(value.scale);
+    value.rotation_deg = wrap_deg(value.rotation_deg);
     auto* assignment = assignment_of(*data_, index_);
     if (!assignment || !assignment->textures[slot])
         throw FillyError("Assign a texture to this slot before setting its transform");
-    const float radians = value.rotation_deg * float(3.141592653589793 / 180.0);
+    const float radians = float(value.rotation_deg * (3.141592653589793 / 180.0));
     const auto matrix = g::matrixFromUvTransform(value.offset.data(), radians, value.scale.data());
     auto* instance = material_instance(data_, index_, detail::texture_maps[slot]);
     instance->setParameter(detail::texture_matrices[slot], matrix);

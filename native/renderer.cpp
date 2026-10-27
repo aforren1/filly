@@ -2338,6 +2338,9 @@ void close_renderer(detail::State& state) {
 }
 }
 void Renderer::close() {
+    // Closing a closed renderer does nothing on any thread: a host can run destructors on another
+    // thread during its own shutdown (Octave did, after close(r) in the PTB example).
+    if (!state_->engine) return;
     state_->check_thread();
     close_renderer(*state_);
 }
@@ -3066,6 +3069,12 @@ f::MaterialInstance* material_instance(const std::shared_ptr<detail::ModelData>&
         throw AssetError(std::string("Material does not support ") + parameter);
     return material;
 }
+// An angle in degrees in [-180, 180]. In float, a large angle loses all of its fraction of a turn:
+// above about 1.7e10 degrees, only multiples of 4096 degrees remain.
+double wrap_deg(double value) {
+    finite(value);
+    return std::remainder(value, 360.0);
+}
 void unit_interval(float value) {
     finite(value);
     if (value < 0 || value > 1) throw std::invalid_argument("Value must be in [0, 1]");
@@ -3189,10 +3198,9 @@ Vec3 Node::rotation_euler_deg() const {
     for (auto& angle : angles) angle *= float(180.0 / 3.141592653589793);
     return angles;
 }
-void Node::set_rotation_euler_deg(Vec3 value) {
-    finite(value);
+void Node::set_rotation_euler_deg(Vec3d value) {
     constexpr double half = 3.141592653589793 / 360.0;
-    double x = value[0] * half, y = value[1] * half, z = value[2] * half;
+    double x = wrap_deg(value[0]) * half, y = wrap_deg(value[1]) * half, z = wrap_deg(value[2]) * half;
     double cx = std::cos(x), sx = std::sin(x), cy = std::cos(y), sy = std::sin(y);
     double cz = std::cos(z), sz = std::sin(z);
     set_quaternion({float(sx*cy*cz - cx*sy*sz), float(cx*sy*cz + sx*cy*sz),
