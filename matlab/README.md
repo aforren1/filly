@@ -50,5 +50,5 @@ close(r);
 filly is MIT licensed (`LICENSE`). The licenses of the libraries that the MEX file contains are
 in `licenses/`.
 
-`samples/wooden_playground_horse.glb` is "Wooden Playground Horse" by Batuhan13, licensed
-CC BY 4.0. Give attribution with images rendered from it; see `samples/ATTRIBUTION.md`.
+`samples/horse.glb` is "Horse" by Quaternius, in the public domain (CC0 1.0); see
+`samples/ATTRIBUTION.md`.

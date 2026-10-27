@@ -1,9 +1,9 @@
 function path = horse()
-% HORSE  Path of the bundled sample model "Wooden Playground Horse" by Batuhan13.
-%   A textured glTF binary with one animation clip, 2.2 MB. It is licensed CC BY 4.0: give
-%   attribution with images rendered from it, as samples/ATTRIBUTION.md in the package states.
+% HORSE  Path of the bundled sample model "Horse" by Quaternius.
+%   One vertex-colored mesh with a 1.5-second gallop clip that animates morph targets, 178 KB.
+%   It is in the public domain (CC0 1.0); samples/ATTRIBUTION.md in the package gives its source.
 %
-%   scene.load(filly.samples.horse())
-path = fullfile(fileparts(fileparts(fileparts(mfilename('fullpath')))), 'samples', ...
-    'wooden_playground_horse.glb');
+%   horse = scene.load(filly.samples.horse());
+%   horse.applyAnimation(1, t);   % the gallop at time t (seconds), looped
+path = fullfile(fileparts(fileparts(fileparts(mfilename('fullpath')))), 'samples', 'horse.glb');
 end

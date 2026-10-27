@@ -1,11 +1,10 @@
 function pixels = offscreen(output)
-%OFFSCREEN Render the wooden horse offscreen and save it as a PNG file.
+%OFFSCREEN Render the sample horse offscreen and save it as a PNG file.
 %   pixels = offscreen() renders a 960 x 640 image, writes it to horse.png in the current
 %   folder, and returns it as a 640 x 960 x 4 uint8 array. offscreen(output) writes to output.
 %
 %   Needs the matlab folder on the path (SetupFilly). Runs in MATLAB and Octave.
-%   The horse is "Wooden Playground Horse" by Batuhan13, CC BY 4.0; see
-%   samples/ATTRIBUTION.md.
+%   The horse is the bundled sample, "Horse" by Quaternius (CC0 1.0).
 if nargin < 1, output = 'horse.png'; end
 
 r = filly.Renderer();
@@ -17,9 +16,7 @@ scene.background = [0.025 0.035 0.055 1];
 scene.antialiasing = 'fxaa';
 scene.shadows = true;
 horse = scene.load(filly.samples.horse());
-if ~isempty(horse.animations)
-    horse.applyAnimation(1, 1.25);   % the spring rock, with the head up
-end
+horse.applyAnimation(1, 0.5);   % mid-gallop
 
 cam = r.createCamera();
 scene.camera = cam;

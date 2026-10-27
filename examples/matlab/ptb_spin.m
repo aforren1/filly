@@ -1,12 +1,11 @@
 function ptb_spin(screenNumber)
-%PTB_SPIN Show the wooden horse turning in a Psychtoolbox window until a key press.
+%PTB_SPIN Show the sample horse galloping and turning in a Psychtoolbox window until a key press.
 %   ptb_spin() opens a window on the highest-numbered screen. ptb_spin(screenNumber) opens it
 %   on that screen.
 %
 %   Needs Psychtoolbox and the matlab folder on the path (SetupFilly). filly renders into a PTB
 %   texture through the window's shared OpenGL context; see docs/how-to/matlab.md for the rules.
-%   The horse is "Wooden Playground Horse" by Batuhan13, CC BY 4.0; see
-%   samples/ATTRIBUTION.md.
+%   The horse is the bundled sample, "Horse" by Quaternius (CC0 1.0).
 if nargin < 1, screenNumber = max(Screen('Screens')); end
 
 win = Screen('OpenWindow', screenNumber, 0);
@@ -30,14 +29,11 @@ try
     % so that it stays in the framed sphere.
     bounds = horse.bounds;             % [min; max]
     center = mean(bounds, 1);
-    clips = numel(horse.animations);
 
     start = GetSecs;
     while ~KbCheck
         t = GetSecs - start;
-        if clips > 0
-            horse.applyAnimation(1, t);
-        end
+        horse.applyAnimation(1, t);       % the gallop loops
         horse.rotationEulerDeg = [0 30 * t 0];   % 30 degrees per second
         R = horse.transform(1:3, 1:3);
         horse.position = center - (R * center')';

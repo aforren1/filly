@@ -19,22 +19,35 @@ def test_sample_location_without_import():
 
 def test_horse_is_installed_with_its_attribution():
     assert filly.samples.HORSE.is_file()
-    assert filly.samples.HORSE.stat().st_size == 2204424
+    assert filly.samples.HORSE.stat().st_size == 181808
     # The wheel's attribution repeats the horse's entry from the shared samples/ folder, which the
     # MATLAB and Octave packages ship. Only the repository has that folder.
     shared = Path(__file__).resolve().parents[2] / "samples" / "ATTRIBUTION.md"
     if not shared.is_file():
         pytest.skip("no repository samples/ folder")
-    entry = shared.read_text(encoding="utf-8").split("## wooden_playground_horse.glb")[1].split("\n\n")[0]
+    entry = shared.read_text(encoding="utf-8").split("## horse.glb")[1].split("\n\n")[0]
     wheel = (Path(importlib.util.find_spec("filly").origin).parent / "samples" / "ATTRIBUTION.md").read_text(
         encoding="utf-8")
-    assert "## wooden_playground_horse.glb" + entry in wheel
+    assert "## horse.glb" + entry in wheel
 
 
 @pytest.mark.gpu
-def test_horse_loads_with_its_clip(scene):
+def test_horse_gallops_with_morph_targets(renderer, scene):
     model = scene.load(filly.samples.HORSE)
-    assert len(model.animations) == 1
+    assert [clip.duration for clip in model.animations] == [1.5]
+    camera = renderer.create_camera()
+    camera.frame(model)
+    scene.camera = camera
+    scene.add_directional_light(direction=(-1, -1, -2), intensity=100000)
+    target = renderer.create_render_target(width=64, height=64)
+    frames = []
+    for seconds in (0.0, 0.5):
+        model.apply_animation(0, seconds)
+        renderer.render(scene, target)
+        frames.append(target.read())
+    # The clip moves the legs through morph targets, so the two poses cover different pixels.
+    assert (frames[0][..., 3] > 0).sum() > 0
+    assert not np.array_equal(frames[0], frames[1])
 
 
 @pytest.mark.gpu

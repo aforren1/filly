@@ -1,15 +1,13 @@
 # Attribution
 
-## wooden_playground_horse.glb
+## horse.glb
 
-- Title: Wooden Playground Horse
-- Author: [Batuhan13](https://sketchfab.com/Batuhan13)
-- Source: <https://sketchfab.com/3d-models/wooden-playground-horse-aa1c440f48a44e558dcc9097b35a6a6d>
-- License: [Creative Commons Attribution 4.0 International (CC BY 4.0)](http://creativecommons.org/licenses/by/4.0/)
-- Note: the author made the model by following a 3dex tutorial.
-- Changes: none. The file is the unmodified Sketchfab glTF download. Its `asset.extras` also
-  records the title, author, license, and source.
+- Title: Horse
+- Author: [Quaternius](https://quaternius.com)
+- Source: <https://poly.pizza/m/qvTrSG9pZF>
+- License: Public Domain ([CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/legalcode))
+- Changes: none. The file is the poly.pizza GLB download. It has one mesh with vertex colors and
+  no normals, and a 1.5-second gallop clip that animates 15 morph targets.
 
 The Python wheel (`filly.samples.HORSE`) and the MATLAB and Octave packages
-(`filly.samples.horse()`) include this model. The examples and the README image
-(`docs/images/horse.png`) use it. Give the same attribution with images rendered from it.
+(`filly.samples.horse()`) include this model. Images rendered from it need no attribution.

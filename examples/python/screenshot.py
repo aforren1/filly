@@ -1,6 +1,6 @@
 """Render a reproducible image of the wooden playground horse for the README.
 
-The horse is "Wooden Playground Horse" by Batuhan13, CC BY 4.0; see samples/ATTRIBUTION.md.
+The horse is "Wooden Playground Horse" by Batuhan13, CC BY 4.0; see examples/assets/ATTRIBUTION.md.
 """
 
 import argparse
@@ -13,7 +13,7 @@ import filly
 
 
 ROOT = Path(__file__).resolve().parents[2]
-HORSE = filly.samples.HORSE
+HORSE = ROOT / "examples" / "assets" / "wooden_playground_horse.glb"
 # The horse's only clip, a spring rock. At this time it leans back with its head up.
 POSE_SECONDS = 1.25
 # Camera yaw and pitch in degrees. Yaw 0 looks at the horse's face; 40 is a three-quarter view.

@@ -1563,19 +1563,18 @@ program.
 Two sample models are installed with filly. Their sources and changes are in
 `samples/ATTRIBUTION.md`.
 
-`filly.samples.HORSE` is the path of `wooden_playground_horse.glb`, "Wooden Playground Horse" by
-Batuhan13: a textured model with one animation clip (2.2 MB). It is licensed CC BY 4.0, so images
-rendered from it need attribution. The MATLAB and Octave packages include the same file:
-`filly.samples.horse()` returns its path.
+`filly.samples.HORSE` is the path of `horse.glb`, Quaternius's low-poly horse: one mesh with
+vertex colors and no normals, and a 1.5-second gallop clip that animates 15 morph targets
+(178 KB). It is in the public domain (CC0 1.0), so images rendered from it need no attribution.
+The MATLAB and Octave packages include the same file: `filly.samples.horse()` returns its path.
 
 ```python
 horse = scene.load(filly.samples.HORSE)
-horse.apply_animation(0, 1.25)
+horse.apply_animation(0, seconds)  # the gallop loops
 ```
 
-`filly.samples.SUZANNE` is the path of `suzanne.glb`:
+`filly.samples.SUZANNE` is the path of `suzanne.glb`, also in the public domain:
 Blender's monkey head as one mesh with one untextured blue metal material (2,012 vertices, 73 KB).
-It is in the public domain (CC0 1.0), so images rendered from it need no attribution.
 `tools/make_suzanne.py` makes it again from the source.
 
 ```python

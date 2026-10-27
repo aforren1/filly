@@ -7,7 +7,7 @@ Run a short check from the project directory:
 uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_stress.py --cycles 4 --frames 120 --warmup 30 --transparent
 ```
 
-The default asset is the sample horse, `filly.samples.HORSE`, which the screenshot example also
+The default asset is the wooden horse in `examples/assets`, which the screenshot example also
 uses. Each cycle loads an asset, creates node-local materials, draws warmup and measured frames,
 then closes the model. A regular PsychoPy grating and text label are drawn each frame.
 The transparent option shows the grating through the Filament image.

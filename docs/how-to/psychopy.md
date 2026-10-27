@@ -31,7 +31,7 @@ uv run --no-project --python .deps/psychopy311/Scripts/python.exe python example
 The demo centers the asset and frames it with `camera.frame()`: the bounding sphere spans 85% of
 the window height at every rotation. The asset keeps its physical scale. It plays the
 first glTF animation and shows the file stem in the upper-left label. Custom assets do not spin
-unless `--spin` is supplied. Without a path, the demo shows the sample horse (`filly.samples.HORSE`) from a
+unless `--spin` is supplied. Without a path, the demo shows the wooden horse in `examples/assets` from a
 three-quarter view, spins it at 30 degrees per second, and plays its spring animation. Press Escape to stop.
 
 If the asset has cameras, the demo uses the first one. Useful options:

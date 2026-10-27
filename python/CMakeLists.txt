@@ -21,4 +21,4 @@ endif()
 install(TARGETS _native LIBRARY DESTINATION filly RUNTIME DESTINATION filly)
 filly_install_licenses(filly/licenses)
 # Shared with the MATLAB and Octave packages; filly/samples/ATTRIBUTION.md credits it.
-install(FILES "${PROJECT_SOURCE_DIR}/samples/wooden_playground_horse.glb" DESTINATION filly/samples)
+install(FILES "${PROJECT_SOURCE_DIR}/samples/horse.glb" DESTINATION filly/samples)

@@ -8,7 +8,7 @@
 | `python/` | The nanobind module (`bindings.cpp`), the `filly` package, and the test suite, which also covers the core. |
 | `web/` | The embind module, `filly.js`, the browser tests, and the web build scripts in `web/tools/`. |
 | `matlab/` | The MEX gateway, the `+filly` package, its tests, and its tools. See [MATLAB and Octave](matlab.md). |
-| `examples/` | Examples for each frontend (`python/`, `matlab/`). |
+| `examples/` | Examples for each frontend (`python/`, `matlab/`) and the README image's model (`assets/`). |
 | `samples/` | Sample models that the Python, MATLAB, and Octave packages include, with their attribution. |
 | `tools/` | Tools for more than one frontend: Filament SDK builds, import checks, profiling, and reference comparison. |
 
@@ -295,7 +295,7 @@ uv pip install --python .venv\Scripts\python.exe --no-build-isolation -e ".[exam
 uv run --no-sync python examples/python/screenshot.py
 ```
 
-The screenshot script renders the sample horse, `filly.samples.HORSE`. It needs no download.
+The screenshot script renders the wooden horse in `examples/assets`. It needs no download.
 
 ## Build a wheel
 

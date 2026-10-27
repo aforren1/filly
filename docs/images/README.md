@@ -27,8 +27,8 @@ give byte-identical files.
 The model is ["Wooden Playground Horse"](https://sketchfab.com/3d-models/wooden-playground-horse-aa1c440f48a44e558dcc9097b35a6a6d)
 by [Batuhan13](https://sketchfab.com/Batuhan13), licensed under
 [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/). The author made it by following a 3dex
-tutorial. `samples/wooden_playground_horse.glb` is the unmodified Sketchfab download; see
-[attribution](../../samples/ATTRIBUTION.md).
+tutorial. `examples/assets/wooden_playground_horse.glb` is the unmodified Sketchfab download; see
+[attribution](../../examples/assets/ATTRIBUTION.md).
 
 The script frames the rest-pose box of `model.bounds` with `camera.frame(fit="box", fill=1.0)`
 and a 30-degree perspective camera, from yaw 40 and pitch 12 degrees, and shows the `Armature|HorseSpring` clip at 1.25 seconds. It adds two directional lights
