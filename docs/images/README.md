@@ -12,9 +12,9 @@ credited to Khronos, copyright 2019 Public, under CC0.
 
 ## Wooden playground horse
 
-`horse.gif`, shown in the README, and `horse.png` are rendered by `examples/screenshot.py` with
-filly. Run `uv run --no-sync python examples/screenshot.py --gif` for the animation and
-`uv run --no-sync python examples/screenshot.py` for the still image.
+`horse.gif`, shown in the README, and `horse.png` are rendered by `examples/python/screenshot.py` with
+filly. Run `uv run --no-sync python examples/python/screenshot.py --gif` for the animation and
+`uv run --no-sync python examples/python/screenshot.py` for the still image.
 
 The animation is one cycle of the horse's spring clip, 74 frames at 15 frames per second and
 600 by 400 pixels, with a 20-degree yaw sway that has the same period, so it loops without a
@@ -27,8 +27,8 @@ give byte-identical files.
 The model is ["Wooden Playground Horse"](https://sketchfab.com/3d-models/wooden-playground-horse-aa1c440f48a44e558dcc9097b35a6a6d)
 by [Batuhan13](https://sketchfab.com/Batuhan13), licensed under
 [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/). The author made it by following a 3dex
-tutorial. `examples/assets/wooden_playground_horse.glb` is the unmodified Sketchfab download; see
-[attribution](../../examples/assets/ATTRIBUTION.md).
+tutorial. `samples/wooden_playground_horse.glb` is the unmodified Sketchfab download; see
+[attribution](../../samples/ATTRIBUTION.md).
 
 The script frames the rest-pose box of `model.bounds` with `camera.frame(fit="box", fill=1.0)`
 and a 30-degree perspective camera, from yaw 40 and pitch 12 degrees, and shows the `Armature|HorseSpring` clip at 1.25 seconds. It adds two directional lights

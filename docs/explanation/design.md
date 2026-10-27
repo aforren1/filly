@@ -1,9 +1,9 @@
 # Design and current limits
 
-The C++ interface in `native/renderer.h` does not include Python or Filament headers.
+The C++ interface in `core/renderer.h` does not include Python or Filament headers.
 Nanobind converts Python values at the boundary. Filament types stay in the native implementation.
-The Windows WGL and Linux GLX adapters are isolated in `native/gl_interop.cpp`, and the Linux
-headless EGL platform in `native/egl_platform.cpp`.
+The Windows WGL and Linux GLX adapters are isolated in `core/gl_interop.cpp`, and the Linux
+headless EGL platform in `core/egl_platform.cpp`.
 
 For how filly's concepts map to Filament and gltfio, and which code depends on Filament
 internals, see [filly and Filament](filament.md).
@@ -250,7 +250,7 @@ Two paths write the output, selected by `Scene.output_path`:
 
 - Exact (`"exact"`, the default): the scene view renders scene-linear color into an RGBA16F
   buffer, and filly's encode pass writes the target. The pass is one full-screen triangle with a
-  filly material (`native/output_pass.cpp`). It clamps to `[0, 1]` (the linear tone mapper), applies
+  filly material (`core/output_pass.cpp`). It clamps to `[0, 1]` (the linear tone mapper), applies
   the analytic sRGB transfer function in fp32 (or none for linear encoding), applies the alpha
   rule, and rounds explicitly to 8-bit levels. `GL_FRAMEBUFFER_SRGB` stays off, so the pass
   writes its values raw into any RGBA8 or sRGB8 storage.
@@ -379,7 +379,7 @@ renders would keep it unused (8 bytes per pixel). It shares the target's depth t
 material parameters only when they change, before `beginFrame()`: Filament commits material
 instances when the frame's first view renders, so a change set between views reached the GPU
 inside a render pass and was lost. The encode and FXAA materials are compiled at build time from
-`native/materials/encode.mat.in` and `fxaa.mat` and embedded in the module, as the material
+`core/materials/encode.mat.in` and `fxaa.mat` and embedded in the module, as the material
 archive is. The renderer creates the encode material when it is created, and the FXAA material
 when a scene first sets `antialiasing = "fxaa"`, and the graded encode material when a scene
 first lets Filament encode (see above), so none of them falls on a frame.
@@ -500,8 +500,8 @@ premultiplied program in place. Other backends need separate tests.
 ## Dependencies
 
 The initial build uses the [official Filament 1.77.1 SDK](https://github.com/google/filament/releases/tag/v1.77.1).
-glTF materials come from filly's own material provider (`native/archive_materials.cpp`), not
-from gltfio's providers. The build compiles `native/materials` with the SDK's `matc` and packs
+glTF materials come from filly's own material provider (`core/archive_materials.cpp`), not
+from gltfio's providers. The build compiles `core/materials` with the SDK's `matc` and packs
 the packages with `uberz` into one zstd archive, which the module embeds. The provider maps each
 glTF material to an entry by its preparation plan (below), sets defaults, binds the extension
 textures to the entry's generic samplers, and clears the extension texture bits and unsupported
@@ -517,14 +517,14 @@ wheel.
 ## glTF preparation
 
 gltfio loads what Filament supports. The rest is preparation in the native core
-(`native/gltf_prepare.cpp`), so that every frontend of the core gets the same features. Python
+(`core/gltf_prepare.cpp`), so that every frontend of the core gets the same features. Python
 only binds it: the binding converts the source, releases the GIL for the whole load, and turns the
 returned messages into `AssetCompatibilityWarning`. Unknown optional extensions produce warnings;
 unsupported required extensions fail. Strict mode turns warnings into errors. Metadata-only XMP
 extensions cannot change the image and are ignored. The checks do not replace a glTF validator.
 
 The core reads the document with cgltf. It does not compile cgltf: the header in
-`native/vendor/cgltf` is the one that Filament 1.77.1 builds into `gltfio_core`, which exports
+`core/vendor/cgltf` is the one that Filament 1.77.1 builds into `gltfio_core`, which exports
 the functions, so both parses have the same structure layout. Accessors are read with
 `cgltf_accessor_unpack_floats`, which applies sparse values and normalization.
 
@@ -580,7 +580,7 @@ JSON model that keeps the source text of numbers, and parses the result again. C
 indices.
 
 WebP images decode through a `TextureProvider` for `image/webp` built on libwebp 1.5.0
-(`native/webp_provider.cpp`), because the SDK is built without WebP. It follows gltfio's own
+(`core/webp_provider.cpp`), because the SDK is built without WebP. It follows gltfio's own
 WebP provider: RGBA8 texels, sRGB when requested, and a full mip chain. filly's material
 provider uses it for the WebP textures that it decodes itself. Runtime textures take pixel arrays, so they need
 no image provider.
@@ -601,7 +601,7 @@ otherwise thickness and occlusion maps sample the wrong parts of an atlas.
 The SDK has anisotropy and iridescence shading inputs, but its glTF loader does not expose them.
 filly's archive entries have their parameters, and their textures use the entries' generic
 samplers. Filament still supplies direct lighting, environment lighting, and the surface model.
-Review `native/materials/surface.mat.in` when upgrading the SDK. Custom diffuse transmission
+Review `core/materials/surface.mat.in` when upgrading the SDK. Custom diffuse transmission
 remains a separate entry with its documented combination restrictions. The unratified
 `KHR_materials_retroreflection` extension is not implemented.
 
@@ -728,7 +728,7 @@ in a host process that loaded an older copy first, such as MATLAB or a Qt applic
 code built with Visual Studio 2022 17.10 or later needs the newer `std::mutex` implementation.
 The UCRT is part of Windows 10 and later, and one shared copy gives all modules in the process
 one heap. The static runtime adds about 0.3 MB to the module.
-`tools/check_native_imports.py` and `tests/test_native_imports.py` reject any other runtime import.
+`tools/check_native_imports.py` and `python/tests/test_native_imports.py` reject any other runtime import.
 
 The Linux source build applies four local corrections. Two concern fence waits. glibc 2.28, the
 manylinux_2_28 baseline, lacks `pthread_cond_clockwait`, so libstdc++ converts a steady-clock

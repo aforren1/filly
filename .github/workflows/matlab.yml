@@ -24,28 +24,26 @@ on:
   pull_request:
     paths:
       - 'matlab/**'
-      - 'native/**'
+      - 'core/**'
       - 'CMakeLists.txt'
-      - 'tools/ci_matlab_linux.sh'
       - 'tools/ci_linux.sh'
       - 'tools/build_filament_linux.py'
       - 'tools/fetch_filament.py'
       - 'tools/check_native_imports.py'
-      - 'examples/assets/**'
+      - 'samples/**'
       - '.github/workflows/matlab.yml'
   push:
     branches: [main, master]
     tags: ['matlab-v*']
     paths:
       - 'matlab/**'
-      - 'native/**'
+      - 'core/**'
       - 'CMakeLists.txt'
-      - 'tools/ci_matlab_linux.sh'
       - 'tools/ci_linux.sh'
       - 'tools/build_filament_linux.py'
       - 'tools/fetch_filament.py'
       - 'tools/check_native_imports.py'
-      - 'examples/assets/**'
+      - 'samples/**'
       - '.github/workflows/matlab.yml'
 
 permissions:
@@ -176,7 +174,7 @@ jobs:
           docker run --rm -v "$PWD:/project" -v "$MATLAB_ROOT:$MATLAB_ROOT:ro" -w /project \
             -e MATLAB_ROOT -e "OCTAVE6_INCLUDE=/project/.deps/octave/octave-$OCTAVE_FLOOR" \
             -e "OCTAVE10_INCLUDE=/project/.deps/octave/octave-$OCTAVE10_FLOOR" -e OCTAVE10_LIB=/project/.deps/octave/lib10 \
-            quay.io/pypa/manylinux_2_28_x86_64 bash tools/ci_matlab_linux.sh
+            quay.io/pypa/manylinux_2_28_x86_64 bash matlab/tools/ci_matlab_linux.sh
           sudo chown -R "$(id -u):$(id -g)" dist build .deps
       - name: Check MEX libraries and exports
         run: |
@@ -271,7 +269,7 @@ jobs:
       # session: Octave 10 then crashes with a renderer open, and Octave 11 drops the lock.
       # Unzipped releases keep their old time stamps; a fresh download does not.
       - name: Backdate the package files
-        run: find matlab examples -exec touch -d '1 hour ago' {} +
+        run: find matlab -exec touch -d '1 hour ago' {} +
       - name: Run the offscreen tests (llvmpipe)
         run: |
           docker run --rm -i -v "$PWD:/work" -w /work/matlab/tests "gnuoctave/octave:${{ matrix.octave }}" bash -s <<'EOF'
@@ -297,7 +295,7 @@ jobs:
           path: matlab
       # As in octave-test. Octave 8.4 did not need it in testing; the step keeps the jobs alike.
       - name: Backdate the package files
-        run: find matlab examples -exec touch -d '1 hour ago' {} +
+        run: find matlab -exec touch -d '1 hour ago' {} +
       # Octave 8.4, Psychtoolbox 3.0.19, and Mesa from the Ubuntu archive. dbus: Psychtoolbox's
       # GameMode support aborts the process at exit without a session bus.
       - name: Install Octave, Psychtoolbox, and Mesa

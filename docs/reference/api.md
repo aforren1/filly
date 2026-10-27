@@ -229,7 +229,7 @@ was 0.1 to 0.3 ms per call.
 `pick(scene, x, y)` asks which model surface a frame shows at a pixel, and where that surface
 is. It returns a `PickQuery` at once. The next `render()` of the scene takes the query: Filament
 draws that frame's geometry into a picking buffer and reads one pixel back. The answer arrives
-one or more frames later, without a CPU wait. `examples/pick.py` shows it in a pyglet window.
+one or more frames later, without a CPU wait. `examples/python/pick.py` shows it in a pyglet window.
 
 ```python
 query = renderer.pick(scene, x, y)
@@ -1009,7 +1009,7 @@ raise `FillyError`.
 gltfio fills a model's morph target buffers only for the first model of an asset. filly fills
 them for each later model in the same way: positions from the morph targets, and tangent frames
 from gltfio's own tangent generation, for the same targets. This uses gltfio's `TangentsJob`,
-which the Filament SDK library contains but does not declare in its headers; `native/renderer.cpp`
+which the Filament SDK library contains but does not declare in its headers; `core/renderer.cpp`
 declares it for Filament 1.77.1.
 
 ### Memory
@@ -1558,20 +1558,33 @@ current. Otherwise the host objects stay until their window closes. The same rul
 mask of a PsychoPy stimulus from `create_image_stim()`. The stimuli of a window share one shader
 program.
 
-## Sample model
+## Sample models
 
-`filly.samples.SUZANNE` is the path of `suzanne.glb`, a sample model installed with filly:
+Two sample models are installed with filly. Their sources and changes are in
+`samples/ATTRIBUTION.md`.
+
+`filly.samples.HORSE` is the path of `wooden_playground_horse.glb`, "Wooden Playground Horse" by
+Batuhan13: a textured model with one animation clip (2.2 MB). It is licensed CC BY 4.0, so images
+rendered from it need attribution. The MATLAB and Octave packages include the same file:
+`filly.samples.horse()` returns its path.
+
+```python
+horse = scene.load(filly.samples.HORSE)
+horse.apply_animation(0, 1.25)
+```
+
+`filly.samples.SUZANNE` is the path of `suzanne.glb`:
 Blender's monkey head as one mesh with one untextured blue metal material (2,012 vertices, 73 KB).
-It is in the public domain (CC0 1.0), so images rendered from it need no attribution. Its source
-and changes are in `samples/ATTRIBUTION.md`. `tools/make_suzanne.py` makes it again from the
-source.
+It is in the public domain (CC0 1.0), so images rendered from it need no attribution.
+`tools/make_suzanne.py` makes it again from the source.
 
 ```python
 model = scene.load(filly.samples.SUZANNE)
 ```
 
-Code that must not import filly's native module, such as a PsychoPy Builder component, finds the
-file next to `importlib.util.find_spec("filly").origin`, in `samples/`.
+Code that must not import filly's native module, such as a PsychoPy Builder component, finds
+`suzanne.glb` next to `importlib.util.find_spec("filly").origin`, in `samples/`. This does not apply
+to the horse: in an editable install, it is in the build's install folder.
 
 ## Exceptions
 

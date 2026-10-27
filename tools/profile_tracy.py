@@ -111,7 +111,7 @@ target_link_libraries(filly_core PRIVATE ws2_32 dbghelp)
 """
     cmake.write_text(text)
 
-    renderer = src / "native" / "renderer.cpp"
+    renderer = src / "core" / "renderer.cpp"
     text = renderer.read_text()
     text = replace_once(text, '#include "renderer.h"\n', '#include "renderer.h"\n#include <tracy/Tracy.hpp>\n',
                         "renderer.cpp include")
@@ -139,7 +139,7 @@ target_link_libraries(filly_core PRIVATE ws2_32 dbghelp)
                         "interop.wait_on_host(data_->ready); }\n", "wait_on_host")
     renderer.write_text(text)
 
-    interop = src / "native" / "gl_interop.cpp"
+    interop = src / "core" / "gl_interop.cpp"
     text = interop.read_text()
     text = replace_once(text, '#include "gl_interop.h"\n',
                         '#include "gl_interop.h"\n#include <tracy/Tracy.hpp>\n#include <tracy/TracyC.h>\n',
@@ -177,7 +177,7 @@ def cmd_build(args):
     p["src"].mkdir(parents=True)
     for item in ("CMakeLists.txt", "pyproject.toml", "README.md"):
         shutil.copy2(source / item, p["src"] / item)
-    for item in ("native", "src"):
+    for item in ("core", "python"):
         shutil.copytree(source / item, p["src"] / item, ignore=shutil.ignore_patterns("__pycache__"))
     instrument(p["src"], tracy_source, tracy=not args.no_tracy)
     if not p["python"].exists():

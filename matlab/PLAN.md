@@ -44,7 +44,7 @@ How to build, use, and test the frontend: [docs/how-to/matlab.md](../docs/how-to
 | The C++ facade in `renderer.h` | Yes | It has no Python or Filament types. The MEX gateway uses it directly. |
 | Batch calls (`Node::set_transforms`, `Node::set_morph_weights`, `Material::set_parameters`) | Yes | They are in the facade, so that all frontends validate the same way. Each frontend passes its arrays as a strided `ValueArray` without a copy. |
 | A C ABI (`filly_core.h`) | Only if necessary | See [When to add a C ABI](#when-to-add-a-c-abi). |
-| Host adapters (`src/filly/integrations/`, `+filly/PTBTarget.m`) | No | Each host has its own texture and draw rules. The lifecycle rules carry over; the code does not. |
+| Host adapters (`python/filly/integrations/`, `+filly/PTBTarget.m`) | No | Each host has its own texture and draw rules. The lifecycle rules carry over; the code does not. |
 | Diagnostics (`_memory.py`, `benchmark.py`, `_stress.py`) | No | Not needed for the first release. |
 
 The cost of sharing is coupling. Each API change must land in both frontends, and the MATLAB
@@ -53,7 +53,7 @@ so this is acceptable.
 
 ### Repository
 
-One repository. The MATLAB frontend is in `matlab/`:
+One repository. The shared renderer is in `core/`, and the MATLAB frontend is in `matlab/`:
 
 | Path | Content |
 | --- | --- |
@@ -63,7 +63,8 @@ One repository. The MATLAB frontend is in `matlab/`:
 | `matlab/SetupFilly.m` | Adds the folder to the path and checks that the MEX file loads |
 | `matlab/tests/` | Offscreen tests (`run_tests.m`) |
 | `matlab/tests/ptb/` | PTB tests (`run_ptb_tests.m`) |
-| `matlab/tools/` | The phase 0 spike (`ptb_spike.m`) and the call benchmark (`benchmark_calls.m`) |
+| `matlab/tools/` | The phase 0 spike (`ptb_spike.m`), the call benchmark (`benchmark_calls.m`), and the Linux package build (`ci_matlab_linux.sh`) |
+| `examples/matlab/` | Offscreen and PTB examples |
 
 ## Architecture
 
@@ -179,7 +180,7 @@ or 4.6. Only macOS limits a legacy context to 2.1. PTB 3.0.22 on Intel Iris Xe r
 (driver 32.0.101.7088).
 
 filly does not render in the host context. `GlInterop::create_engine()` in
-[gl_interop.cpp](../native/gl_interop.cpp) gives the host context to Filament as
+[gl_interop.cpp](../core/gl_interop.cpp) gives the host context to Filament as
 `sharedContext`. Filament then creates its own 4.x core context on its driver thread, in the same
 share group. The host context must supply only these items:
 
@@ -291,7 +292,7 @@ PTB users calibrate displays and often use 16-bit or floating-point framebuffers
 
 Render two views into two targets, or into two viewports of one target with the per-render camera
 and viewport. Draw each target after `Screen('SelectStereoDrawBuffer', win, eye)`. Base this on
-`examples/stereo.py`. Phase 0 and phase 3 tested stereo mode 4 (side by side) with one target
+`examples/python/stereo.py`. Phase 0 and phase 3 tested stereo mode 4 (side by side) with one target
 drawn to both eyes, inside one `acquire()` and `release()`.
 
 ### Timing
@@ -476,8 +477,8 @@ Conclusions:
 
 ### Phase 1: move the glTF preparation into C++
 
-Done (filly commit b4bdd32): the preparation is `native/gltf_prepare.cpp`, the shapes are
-`native/shapes.cpp`, libwebp is linked, and the core reads external files through wide paths.
+Done (filly commit b4bdd32): the preparation is `core/gltf_prepare.cpp`, the shapes are
+`core/shapes.cpp`, libwebp is linked, and the core reads external files through wide paths.
 
 ### Phase 2: MATLAB frontend
 
@@ -578,7 +579,7 @@ Python suite on Linux, current tree (`-m "not psychopy"`, under `xvfb-run`):
 | llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1`, as the wheel CI) | 544 passed, 60 skipped |
 | Zink on lavapipe | 544 passed, 60 skipped |
 
-Before the fence fix below, three tests in `tests/test_interop.py` failed under Zink.
+Before the fence fix below, three tests in `python/tests/test_interop.py` failed under Zink.
 
 Octave (`matlab/tests`, Octave 8.4):
 
@@ -680,7 +681,7 @@ Done when: the frontend tests pass in Octave for Windows.
 ## Tests
 
 - **Core.** The Python test suite and the gltf_viewer parity harness (`tools/compare_reference.py`)
-  cover the shared renderer. `tests/test_batch.py` covers the batch calls.
+  cover the shared renderer. `python/tests/test_batch.py` covers the batch calls.
 - **Frontend.** Script tests with `assert` in `matlab/tests`, without `matlab.unittest`, so that
   Octave can run them. `run_tests.m` runs each script in its own function workspace and checks
   that no gateway handle remains afterwards.

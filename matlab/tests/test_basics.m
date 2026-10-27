@@ -82,9 +82,9 @@ assert(mesh.vertexCount == size(sphere.positions, 1));
 stats = r.stats;
 assert(stats.framesRendered >= 3);
 
-% A model from a file, with nodes, names, and bounds.
-horse = scene.load(fullfile(fileparts(fileparts(fileparts(mfilename('fullpath')))), 'examples', 'assets', ...
-    'wooden_playground_horse.glb'));
+% A model from a file, with nodes, names, and bounds: the bundled sample.
+assert(isfile(filly.samples.horse()));
+horse = scene.load(filly.samples.horse());
 assert(numel(horse.nodes) >= 1);
 assert(iscell(horse.nodeNames) && iscell(horse.materialNames));
 bounds = horse.bounds;
@@ -93,8 +93,7 @@ distance = cam.frame(horse, 'Fill', 0.5);
 assert(distance > 0);
 
 % An asset adds instances to any scene of the renderer.
-asset = r.loadAsset(fullfile(fileparts(fileparts(fileparts(mfilename('fullpath')))), 'examples', 'assets', ...
-    'wooden_playground_horse.glb'));
+asset = r.loadAsset(filly.samples.horse());
 second = r.createScene();
 copy = second.add(asset);
 assert(copy ~= horse);
@@ -105,8 +104,7 @@ assert(asset.memory.models == 1);
 name = native2unicode(uint8([195 188 110 105 99 111 100 101 45 230 181 139 232 175 149]), 'UTF-8');
 folder = fullfile(tempdir, ['filly-' name]);
 if ~isfolder(folder), mkdir(folder); end
-copyfile(fullfile(fileparts(fileparts(fileparts(mfilename('fullpath')))), 'examples', 'assets', ...
-    'wooden_playground_horse.glb'), fullfile(folder, 'horse.glb'));
+copyfile(filly.samples.horse(), fullfile(folder, 'horse.glb'));
 unicode = scene.load(fullfile(folder, 'horse.glb'));
 assert(isequal(unicode.nodeNames, horse.nodeNames));
 rmdir(folder, 's');

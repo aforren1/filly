@@ -33,7 +33,7 @@ See [Host integrations](../reference/api.md#host-integrations) for sizes and err
 
 The integrations were tested on Windows 11 with an Intel Iris Xe GPU and pyglet 1.4.11,
 moderngl 5.12.0, and zengl 2.7.3. They also passed on Linux GLX (Ubuntu 22.04 under WSL, with the
-Mesa D3D12 driver and with Xvfb and llvmpipe). On 2026-10-12, `tests/test_gl_hosts.py` passed on
+Mesa D3D12 driver and with Xvfb and llvmpipe). On 2026-10-12, `python/tests/test_gl_hosts.py` passed on
 Windows with the oldest and newest versions that have Python 3.10 wheels: pyglet 1.4.11 with
 moderngl 5.7.0 and zengl 2.1.0, and pyglet 2.1.9 with moderngl 5.13.0 and zengl 2.7.3. moderngl
 5.6.4 has no `Context.external_texture`. The tests call `zengl.cleanup()`, which starts in
@@ -221,7 +221,7 @@ origin. Texture row 0 is the bottom row of the image.
 
 ## Compare the hosts
 
-Timing data comes from `examples/*_shared.py` at 960 x 640, 600 frames, 60 warm-up frames,
+Timing data comes from `examples/python/*_shared.py` at 960 x 640, 600 frames, 60 warm-up frames,
 without vsync. Values are medians (p50). "Draw" is the time for the host draw calls only. It
 does not include entering or leaving `acquire()`. The GPU time comes from `GL_TIME_ELAPSED`
 queries.
@@ -244,7 +244,7 @@ were not measured again: then the pyglet integration copied the texture with
 blend, and `acquire()` was not yet in the core `ImportedTarget`. The fence operations are the
 same. The line counts exclude `integrations/_host.py` (186 lines), which holds the size and
 viewport checks, `draw()`, `close()`, and the close callback for all adapters, including
-PsychoPy, and the native quad in `native/gl_interop.cpp`. The core `ImportedTarget.acquire()` counts nesting, so the adapters
+PsychoPy, and the native quad in `core/gl_interop.cpp`. The core `ImportedTarget.acquire()` counts nesting, so the adapters
 keep no state of their own. Entering the outermost `acquire()` blocks the CPU until Filament's
 driver thread has processed the frame and published its fence. It does not wait for the GPU to
 finish.
@@ -260,9 +260,9 @@ Each example spins the wooden horse and plays its spring animation. pyglet's eve
 percentiles as JSON.
 
 ```powershell
-.venv\Scripts\python.exe examples\pyglet_shared.py --frames 120
-.venv\Scripts\python.exe examples\moderngl_shared.py --frames 120
-.venv\Scripts\python.exe examples\zengl_shared.py --frames 120 --no-vsync
+.venv\Scripts\python.exe examples\python\pyglet_shared.py --frames 120
+.venv\Scripts\python.exe examples\python\moderngl_shared.py --frames 120
+.venv\Scripts\python.exe examples\python\zengl_shared.py --frames 120 --no-vsync
 ```
 
 With vsync, a GPU timer that also included leaving `acquire()` measured about 15 ms. Without

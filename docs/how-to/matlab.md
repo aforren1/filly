@@ -84,7 +84,7 @@ Build with the Octave that you run, or with an Octave from the same side of the 
 change (see [Install a release](#install-a-release)). Without `mkoctfile`, set
 `-DFILLY_OCTAVE_INCLUDE_DIRS` (the `octave-<version>/octave` and `octave-<version>` folders) and,
 for Octave 10 and later, `-DFILLY_OCTAVE_LIBRARY_DIR` (the folder of `liboctmex`). The release
-build does this in the manylinux container: see `tools/ci_matlab_linux.sh`.
+build does this in the manylinux container: see `matlab/tools/ci_matlab_linux.sh`.
 
 For MATLAB, run:
 
@@ -132,12 +132,15 @@ checks that the MEX file loads. `SetupFilly(true)` also saves the path.
 
 ## Render offscreen
 
+`examples/matlab/offscreen.m` is a complete version of this example, with lights and an
+environment.
+
 ```matlab
 r = filly.Renderer();
 scene = r.createScene();
 cam = r.createCamera();
 scene.camera = cam;
-horse = scene.load('examples/assets/wooden_playground_horse.glb');
+horse = scene.load(filly.samples.horse());
 cam.frame(horse);
 scene.addDirectionalLight([0 -1 -1]);
 target = r.createRenderTarget(640, 480);
@@ -148,6 +151,9 @@ close(r);
 ```
 
 ## Render into a Psychtoolbox window
+
+`examples/matlab/ptb_spin.m` runs a version of this example with the sample horse,
+`filly.samples.horse()`, so it needs no download.
 
 ```matlab
 win = Screen('OpenWindow', 0, 0);

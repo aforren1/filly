@@ -64,4 +64,4 @@ Assign the matrix back to the property after changing it.
 
 `camera.frame()` places the camera once, for the model's transform at that time. After you move
 or rotate the model, call it again, or rotate the model about its center as
-`examples/screenshot.py` does. See [framing](../reference/api.md#framing).
+`examples/python/screenshot.py` does. See [framing](../reference/api.md#framing).

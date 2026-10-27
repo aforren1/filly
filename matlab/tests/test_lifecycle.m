@@ -51,16 +51,14 @@ expect_error(@() scene2.background, 'filly:error');
 
 % Asset compatibility messages become warnings with an identifier (none for this file).
 % The path first: Octave 11 warns about its own mix of string types in fullfile.
-horsePath = fullfile(fileparts(fileparts(fileparts(mfilename('fullpath')))), 'examples', 'assets', ...
-    'wooden_playground_horse.glb');
+horsePath = filly.samples.horse();
 lastwarn('');
 horse = scene.load(horsePath);
 [~, warningId] = lastwarn();
 assert(isempty(warningId) || strcmp(warningId, 'filly:assetCompatibility'));
 
 % GLB bytes load as well as paths.
-fid = fopen(fullfile(fileparts(fileparts(fileparts(mfilename('fullpath')))), 'examples', 'assets', ...
-    'wooden_playground_horse.glb'), 'r');
+fid = fopen(horsePath, 'r');
 bytes = fread(fid, Inf, '*uint8');
 fclose(fid);
 fromBytes = scene.load(bytes);

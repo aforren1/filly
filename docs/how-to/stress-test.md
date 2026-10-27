@@ -4,10 +4,10 @@ Install the [PsychoPy dependencies](psychopy.md) and build the renderer first.
 Run a short check from the project directory:
 
 ```powershell
-uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_stress.py --cycles 4 --frames 120 --warmup 30 --transparent
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_stress.py --cycles 4 --frames 120 --warmup 30 --transparent
 ```
 
-The default asset is the wooden horse in `examples/assets`, which the screenshot example also
+The default asset is the sample horse, `filly.samples.HORSE`, which the screenshot example also
 uses. Each cycle loads an asset, creates node-local materials, draws warmup and measured frames,
 then closes the model. A regular PsychoPy grating and text label are drawn each frame.
 The transparent option shows the grating through the Filament image.
@@ -15,7 +15,7 @@ The transparent option shows the grating through the Filament image.
 For a longer run, use a new output directory:
 
 ```powershell
-uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_stress.py --cycles 100 --frames 600 --warmup 60 --copies 4 --transparent --output .deps/stress-long
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_stress.py --cycles 100 --frames 600 --warmup 60 --copies 4 --transparent --output .deps/stress-long
 ```
 
 Alternate your own assets by supplying multiple paths. The first animation clip plays at
@@ -25,13 +25,13 @@ authored material animation, so the option does not change what animates. The de
 node-local material, on the first mesh node.
 
 ```powershell
-uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_stress.py C:/models/watch.glb C:/models/plant.glb --copies 0 --cycles 30 --frames 600
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_stress.py C:/models/watch.glb C:/models/plant.glb --copies 0 --cycles 30 --frames 600
 ```
 
 To test a 120 Hz display, select that mode in Windows, then run:
 
 ```powershell
-uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_stress.py --fullscreen --screen 0 --width 1920 --height 1080 --refresh-hz 120 --cycles 30 --frames 1200
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_stress.py --fullscreen --screen 0 --width 1920 --height 1080 --refresh-hz 120 --cycles 30 --frames 1200
 ```
 
 `--refresh-hz` sets the analysis budget and animation sampling rate. It does not change the display

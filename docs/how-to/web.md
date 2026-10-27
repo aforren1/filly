@@ -337,7 +337,7 @@ SIMD build uses the SIMD code of meshoptimizer's decoders and of libwebp, for me
 before version 89, or Safari before version 16.4. To make a SIMD build, set `FILLY_WEB_SIMD`:
 
 ```sh
-FILLY_WEB_SIMD=ON tools/build_filly_web.sh build/web-simd
+FILLY_WEB_SIMD=ON web/tools/build_filly_web.sh build/web-simd
 ```
 
 The option applies to filly's code, meshoptimizer's decoders, and libwebp. The Filament SDK keeps

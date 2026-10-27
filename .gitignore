@@ -7,8 +7,10 @@ __pycache__/
 *.egg-info/
 *.pyd
 *.so
-tests/web/node_modules/
+web/tests/node_modules/
 # MEX files of the MATLAB frontend, built into matlab/
 *.mexw64
 *.mexa64
 *.mex
+# Sample models that the MATLAB build copies from samples/
+matlab/samples/

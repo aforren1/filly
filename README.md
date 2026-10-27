@@ -11,7 +11,7 @@ such as PsychoPy experiments or pyglet, moderngl, and zengl programs.
 ![A wooden playground horse rocking on its spring, rendered with filly](docs/images/horse.gif)
 
 *"[Wooden Playground Horse](https://sketchfab.com/3d-models/wooden-playground-horse-aa1c440f48a44e558dcc9097b35a6a6d)" by [Batuhan13](https://sketchfab.com/Batuhan13),
-[CC BY 4.0](http://creativecommons.org/licenses/by/4.0/). See [attribution](examples/assets/ATTRIBUTION.md).*
+[CC BY 4.0](http://creativecommons.org/licenses/by/4.0/). See [attribution](samples/ATTRIBUTION.md).*
 
 ## Install
 
@@ -27,7 +27,7 @@ from PIL import Image  # only to save the image
 
 with filly.Renderer() as renderer:
     scene = renderer.create_scene()
-    horse = scene.load("examples/assets/wooden_playground_horse.glb")
+    horse = scene.load(filly.samples.HORSE)
     horse.apply_animation(0, 1.25) # a pose from its spring animation
 
     scene.camera = renderer.create_camera()
@@ -50,7 +50,7 @@ from filly.integrations.psychopy import HostTarget, create_renderer
 win = visual.Window((1024, 768), units="pix")
 renderer = create_renderer(win) # shares the window's OpenGL context
 scene = renderer.create_scene()
-horse = scene.load("examples/assets/wooden_playground_horse.glb")
+horse = scene.load(filly.samples.HORSE)
 scene.camera = renderer.create_camera()
 scene.camera.frame(horse)
 scene.add_directional_light(direction=(-1, -1, -2), intensity=100_000)
@@ -91,10 +91,12 @@ Close the renderer before the window. The same pattern works with a
 
 ## Examples
 
-See the `examples/` folder.
+Python examples are in `examples/python/`, and MATLAB and Octave examples in `examples/matlab/`.
 
 | Example | Shows |
 | --- | --- |
+| `matlab/offscreen.m` | The still image, rendered offscreen from MATLAB or Octave. |
+| `matlab/ptb_spin.m` | The horse turning in a Psychtoolbox window. |
 | `screenshot.py` | The animation above (`--gif`), or a still image, rendered offscreen. |
 | `psychopy_shared.py` | A model in a PsychoPy window with all the bells and whistles. Pass your own GLB path. |
 | `psychopy_stress.py` | Repeated PsychoPy trials, with frame timing and memory reports. See [measure timing](docs/how-to/stress-test.md). |
@@ -131,4 +133,6 @@ It links [Filament](https://github.com/google/filament) (Apache 2.0),
 [libwebp](https://chromium.googlesource.com/webm/libwebp) (BSD), and
 [cgltf](https://github.com/jkuhlmann/cgltf) (MIT). Their licenses are installed with the package.
 The sample model `filly.samples.SUZANNE` is modified from Suzanne by Norbert Nopper (UX3D), from
-the Khronos glTF Sample Assets, under CC0 1.0.
+the Khronos glTF Sample Assets, under CC0 1.0. The sample model `filly.samples.HORSE`, also in the MATLAB and Octave
+packages, is "Wooden Playground Horse" by Batuhan13 under CC BY 4.0; see
+[attribution](samples/ATTRIBUTION.md).

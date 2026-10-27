@@ -93,7 +93,7 @@ Python application
     nanobind
         │
         ▼
-Small C++ facade (native/renderer.h)
+Small C++ facade (core/renderer.h)
  ┌─────────────────────────┐
  │ Renderer                │
  │ Scene                   │
@@ -126,7 +126,7 @@ The C++ facade is the stable public implementation API. Its header includes neit
 
 Python must not directly manage Filament resource lifetimes.
 
-glTF preparation runs in the native core as part of loading (`native/gltf_prepare.cpp`). It checks extensions, decodes data that the pinned `gltfio` cannot read, and builds the tables for the features that this project adds (section 7). Python only binds it.
+glTF preparation runs in the native core as part of loading (`core/gltf_prepare.cpp`). It checks extensions, decodes data that the pinned `gltfio` cannot read, and builds the tables for the features that this project adds (section 7). Python only binds it.
 
 ---
 
@@ -305,7 +305,7 @@ This is particularly useful for articulated experimental stimuli.
 
 **Decision (assets).** `renderer.load_asset(source)` returns an `Asset` that the renderer owns, as it owns cameras and environments; `scene.add(asset)` returns a new `Model` that shares the asset's geometry, textures, and compiled materials, in any scene of the renderer. `scene.load(source)` is the shortcut that loads, adds once, and releases the source data. An open asset keeps its source data, about the file size in CPU memory, because Filament needs it to create instances; `asset.close()` releases it, and existing models keep the GPU data. This replaced `scene.load(source, clonable=True)` and `model.clone(scene=...)`, which could create a clonable asset only through a scene: keeping a prototype needed a hidden model in some scene, and closing that scene closed it. A clone of an edited model copied none of the edits, so `clone()` had no use that `add()` lacks. Generated meshes stay one model each: an asset for them would add a renderer method and shared-buffer rules for a use that no caller had.
 
-**Decision (geometry from arrays).** `scene.create_mesh(positions, indices, normals=..., uvs=..., colors=...)` returns a `Model` from NumPy arrays. It has the glTF metallic-roughness material that the loader makes for the same factors, through the same material provider, so it renders like a glTF mesh with equal parameters and supports nodes and material handles. Missing normals are area-weighted vertex normals. Tangent frames come from Filament's geometry library (`SurfaceOrientation`). `model.update_mesh()` replaces vertex data of the same size in place without per-frame allocation. Native functions in `filly.shapes` (`native/shapes.cpp`) return arrays for a plane, a box, a UV sphere, and a cylinder. Geometry processing stays a non-goal (section 3).
+**Decision (geometry from arrays).** `scene.create_mesh(positions, indices, normals=..., uvs=..., colors=...)` returns a `Model` from NumPy arrays. It has the glTF metallic-roughness material that the loader makes for the same factors, through the same material provider, so it renders like a glTF mesh with equal parameters and supports nodes and material handles. Missing normals are area-weighted vertex normals. Tangent frames come from Filament's geometry library (`SurfaceOrientation`). `model.update_mesh()` replaces vertex data of the same size in place without per-frame allocation. Native functions in `filly.shapes` (`core/shapes.cpp`) return arrays for a plane, a box, a UV sphere, and a cylinder. Geometry processing stays a non-goal (section 3).
 
 ---
 
@@ -563,7 +563,7 @@ X11:     GLXContext
 EGL:     EGLContext
 ```
 
-The exact conversion lives in platform-specific integration code (`native/gl_interop.cpp`).
+The exact conversion lives in platform-specific integration code (`core/gl_interop.cpp`).
 
 The handle is supplied to Filament through:
 
@@ -1146,7 +1146,7 @@ Include representative tests at:
 
 These budgets are not performance targets for Filament alone; the host application's entire frame must remain below them.
 
-**Status.** The benchmark reports CPU submission percentiles, batch time per frame, and readback cost. `examples/psychopy_stress.py` records per-frame CPU, synchronization, and flip timing and memory over repeated trials. **Open.** GPU render time (section 21), per-frame completion latency, and validated display deadlines at 120 and 144 Hz.
+**Status.** The benchmark reports CPU submission percentiles, batch time per frame, and readback cost. `examples/python/psychopy_stress.py` records per-frame CPU, synchronization, and flip timing and memory over repeated trials. **Open.** GPU render time (section 21), per-frame completion latency, and validated display deadlines at 120 and 144 Hz.
 
 ---
 

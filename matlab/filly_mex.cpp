@@ -1,4 +1,4 @@
-// MATLAB and Octave gateway over the C++ facade in native/renderer.h. The gateway converts types
+// MATLAB and Octave gateway over the C++ facade in core/renderer.h. The gateway converts types
 // and keeps the handle table; behavior belongs in the core, so that both frontends share it.
 // Only the C MEX API is used: the same file builds with MATLAB's mex and with Octave's
 // mkoctfile --mex.

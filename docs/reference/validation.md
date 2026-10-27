@@ -25,8 +25,8 @@ The environment table lists the Windows setup; Linux setups are listed with thei
 
 ### Draco (October 12)
 
-filly had no Draco test. `tests/test_draco.py` now loads the Khronos Box sample with and without
-`KHR_draco_mesh_compression` (fixtures in `tests/data`). The bounds agree within 0.001 (Draco
+filly had no Draco test. `python/tests/test_draco.py` now loads the Khronos Box sample with and without
+`KHR_draco_mesh_compression` (fixtures in `python/tests/data`). The bounds agree within 0.001 (Draco
 quantization), and less than 1% of the pixels differ by more than 2 levels, all on the
 silhouette. The browser test `test_draco_matches_desktop` passed in Chrome, Edge, and Firefox. A
 manual check of the Khronos Avocado sample (Draco against GLB, with textures) gave the same
@@ -98,9 +98,9 @@ This revision:
   each, exit code 0, resources restored.
 - Packaging: the sdist includes `examples/assets/wooden_playground_horse.glb` with
   `examples/assets/ATTRIBUTION.md` and `docs/images/horse.png`; the wheel contains only
-  `src/filly` and the native module.
+  `python/filly` and the native module.
 
-Runs of `tests/test_encoding.py` alone under `xvfb-run` failed to open the X display for 4 to 16
+Runs of `python/tests/test_encoding.py` alone under `xvfb-run` failed to open the X display for 4 to 16
 tests, with the previous wheel as well; the same file passed on headless EGL (llvmpipe), and the
 full suite passed under Xvfb. PsychoPy was not run on Linux.
 
@@ -120,7 +120,7 @@ bloom, depth of field, or vignette, and then writes linear color. See
 | Windows, Python 3.12, Intel Iris Xe | Runtime (default), `.venv` | 470 passed, 14 skipped, 23 deselected, 395 s |
 | Windows, Python 3.12, Intel Iris Xe | Archive, scratch venv | 457 passed, 27 skipped, 23 deselected; the scratch venv has no Pillow, so more image tests skip |
 | Windows, Python 3.11, PsychoPy | Runtime (default), `.deps\psychopy311` | 23 passed |
-| Windows, Python 3.12, NVIDIA RTX A500 | Runtime, `tests/test_encoding.py` only | 63 passed, 2 skipped |
+| Windows, Python 3.12, NVIDIA RTX A500 | Runtime, `python/tests/test_encoding.py` only | 63 passed, 2 skipped |
 | manylinux_2_28 container, Xvfb, Mesa 23.1.4 llvmpipe (GLX) | Runtime wheel, cp312 abi3 | 470 passed, 14 skipped, 23 deselected, 369 s |
 | WSL Ubuntu 22.04, WSLg, Mesa 23.2.1 D3D12 (Intel Iris Xe), offscreen EGL | Same wheel | 470 passed, 14 skipped, 23 deselected, 383 s |
 | WSL Ubuntu 22.04, Xvfb, `LIBGL_ALWAYS_SOFTWARE=1`, llvmpipe | Same wheel | 470 passed, 14 skipped, 23 deselected, 311 s |
@@ -209,7 +209,7 @@ bytes and the wheel 5,636,783 bytes. The build-tree copy with its symbol table i
 
 Three defects were found and corrected:
 
-- `native/gltf_prepare.cpp` used `std::exchange` without `<utility>`; libstdc++ does not include it
+- `core/gltf_prepare.cpp` used `std::exchange` without `<utility>`; libstdc++ does not include it
   transitively.
 - The first `RenderTarget.read()` after a render hung. Filament's frame-info thread waits on a
   fence with `FENCE_WAIT_FOR_EVER`; with glibc 2.28, libstdc++ converts the maximum deadline to
@@ -401,7 +401,7 @@ view window. The defect is independent of filly:
 | Same tests, with window classes unregistered on close | 0 of 30 runs |
 | 3,000 shared-context renderer creations on one window | 0 |
 
-pyglet 2.1.16 has the same unregistration gap but did not crash in these runs. PsychoPy 2026.2.4 pins pyglet 1.4.11. `tests/conftest.py` unregisters both
+pyglet 2.1.16 has the same unregistration gap but did not crash in these runs. PsychoPy 2026.2.4 pins pyglet 1.4.11. `python/tests/conftest.py` unregisters both
 classes on close for pyglet 1.x on Windows. The library does not change pyglet.
 
 A second, rarer crash remains open. `test_shared_texture_handoff_under_contention` starts two
@@ -662,7 +662,7 @@ The earlier Python 3.12 tests did not create a `TextStim`, so they missed pyglet
 glyph-buffer error. The adapter no longer patches pyglet. The examples draw their labels with
 `visual.TextBox2`, anchored top-left with left alignment. The display tests create and draw the
 regular Suzanne label before checking its pixels, including front-buffer pixels with `useFBO=False`.
-After the `TextBox2` change, `examples/psychopy_shared.py --frames 60` completed on Windows
+After the `TextBox2` change, `examples/python/psychopy_shared.py --frames 60` completed on Windows
 Python 3.12. The PsychoPy display tests were not rerun for that change.
 
 One test submits 10,000 model transform updates and checks the final image and submission count.

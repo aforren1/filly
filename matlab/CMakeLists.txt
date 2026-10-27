@@ -24,8 +24,13 @@ function(_filly_package target component)
   install(TARGETS ${target} LIBRARY DESTINATION . ${_where} RUNTIME DESTINATION . ${_where})
   install(DIRECTORY +filly DESTINATION . ${_where})
   install(FILES SetupFilly.m VERSION README.md "${PROJECT_SOURCE_DIR}/LICENSE" DESTINATION . ${_where})
+  install(DIRECTORY "${PROJECT_SOURCE_DIR}/samples/" DESTINATION samples ${_where})
   filly_install_licenses(licenses ${_where})
 endfunction()
+
+# The packages have the sample models next to +filly. The build copies them there too, so that
+# filly.samples.horse() also works in a build's output folder.
+file(COPY "${PROJECT_SOURCE_DIR}/samples/" DESTINATION "${FILLY_MEX_OUTPUT_DIR}/samples")
 
 if(FILLY_MATLAB)
   find_package(Matlab REQUIRED COMPONENTS MX_LIBRARY)

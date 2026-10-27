@@ -1,5 +1,21 @@
 # Build and test
 
+## Source layout
+
+| Folder | Contents |
+| --- | --- |
+| `core/` | The C++ renderer over Filament (`renderer.h`), its materials, and vendored code. CMake target `filly_core`. |
+| `python/` | The nanobind module (`bindings.cpp`), the `filly` package, and the test suite, which also covers the core. |
+| `web/` | The embind module, `filly.js`, the browser tests, and the web build scripts in `web/tools/`. |
+| `matlab/` | The MEX gateway, the `+filly` package, its tests, and its tools. See [MATLAB and Octave](matlab.md). |
+| `examples/` | Examples for each frontend (`python/`, `matlab/`). |
+| `samples/` | Sample models that the Python, MATLAB, and Octave packages include, with their attribution. |
+| `tools/` | Tools for more than one frontend: Filament SDK builds, import checks, profiling, and reference comparison. |
+
+The root `CMakeLists.txt` adds `core/` and then the frontends that the options select:
+`FILLY_PYTHON` (default on), `FILLY_MATLAB`, and `FILLY_OCTAVE`. An Emscripten configuration
+builds `web/` only. `pyproject.toml` stays in the root, so that the sdist contains the core.
+
 ## Windows requirements
 
 - Windows x64 with an OpenGL driver.
@@ -43,13 +59,13 @@ uv run --no-project tools/check_native_imports.py .venv\Lib\site-packages\filly\
 ```
 
 The tool lists the imported DLLs. It exits with status 1 if a DLL is not in its allowed list.
-`tests/test_native_imports.py` does the same check on the installed module.
+`python/tests/test_native_imports.py` does the same check on the installed module.
 
 ## libwebp
 
 The Filament SDK is built without WebP, so the build adds libwebp 1.5.0 for `EXT_texture_webp`.
 CMake `FetchContent` downloads the release archive from `storage.googleapis.com/downloads.webmproject.org`
-at the first configure and checks its SHA-256 hash (`7d6fab70...c2a5c92c`, in `native/libwebp.cmake`).
+at the first configure and checks its SHA-256 hash (`7d6fab70...c2a5c92c`, in `core/libwebp.cmake`).
 The archive is signed with the WebP release key `6B0E 6B70 976D E303 EDF2 F601 F9C3 D6BD B823 2B5D`.
 Only the static decoder library (`webpdecoder`) is built, with the same MSVC runtime (`/MT`) as the
 extension on Windows and position-independent code on Linux. Its tools are not built or
@@ -66,7 +82,7 @@ The hash check does not apply to a local folder. Use only the verified release.
 ## Material archive
 
 glTF materials use filly's precompiled material archive. The build compiles it from
-`native/materials` with the SDK's `matc` and `uberz` and embeds it in the module. The module
+`core/materials` with the SDK's `matc` and `uberz` and embeds it in the module. The module
 has no material compiler, so nothing is compiled at run time. The design and the entry list are
 in [material precompilation](../explanation/material-precompilation.md).
 
@@ -179,8 +195,8 @@ The web build compiles filly's core with Emscripten for WebGL2 into `filly-core.
 [the web build](../explanation/web.md) for the design and [use filly in a web
 page](web.md) for the API.
 
-Two scripts do the build. `tools/build_filament_web.sh` builds the Filament WebAssembly SDK
-once. `tools/build_filly_web.sh` builds filly's module with that SDK. They download a pinned
+Two scripts do the build. `web/tools/build_filament_web.sh` builds the Filament WebAssembly SDK
+once. `web/tools/build_filly_web.sh` builds filly's module with that SDK. They download a pinned
 CMake (3.31.6) and Emscripten (emsdk 5.0.4, the version that Filament 1.77.1 uses), and check
 the archives' SHA-256 hashes. No native compiler is necessary: the host tools come from
 Filament's Linux release archive. These tools need glibc 2.38 or later.
@@ -192,29 +208,29 @@ WSL 3.0.1. Reserve 5 GB of disk space for the image and the volume. From the pro
 in PowerShell, run:
 
 ```powershell
-tools\build_web_container.ps1
+web\tools\build_web_container.ps1
 ```
 
 The script does these steps:
 
-1. It builds the `filly-web-build` image from `tools/web/Dockerfile` (Ubuntu 24.04).
+1. It builds the `filly-web-build` image from `web/tools/Dockerfile` (Ubuntu 24.04).
 2. It creates the `filly-web` volume, if it does not exist. The volume holds the work folder: the
    SDK, emsdk, CMake, the host tools, and filly's build tree.
-3. If the volume has no SDK, it runs `tools/build_filament_web.sh`. On the test laptop
+3. If the volume has no SDK, it runs `web/tools/build_filament_web.sh`. On the test laptop
    (16 jobs), this took 9 minutes, including the downloads. Later runs use the SDK in the
    volume.
-4. It runs `tools/build_filly_web.sh` and writes the output to `build\web`. A full build took
+4. It runs `web/tools/build_filly_web.sh` and writes the output to `build\web`. A full build took
    1 minute.
 
 To write the output to a different folder, use `-OutDir`, for example
-`tools\build_web_container.ps1 -OutDir C:\tmp\filly-web`. The container mounts the project
+`web\tools\build_web_container.ps1 -OutDir C:\tmp\filly-web`. The container mounts the project
 read-only. To change the number of jobs or to build with SIMD, set `JOBS` or `FILLY_WEB_SIMD`
 in the environment before you run the script. The script passes them to the container.
 
 To build the SDK again, for example after a change to its version pin, remove the volume
 (`wslc volume remove filly-web`) and run the script again.
 
-From Git Bash, run `powershell -File tools/build_web_container.ps1`.
+From Git Bash, run `powershell -File web/tools/build_web_container.ps1`.
 
 ### Build on Linux
 
@@ -225,7 +241,7 @@ Requirements: Linux x86_64 with glibc 2.38 or later (for example, Ubuntu 24.04),
    (8 cores):
 
    ```bash
-   tools/build_filament_web.sh ~/filly-web
+   web/tools/build_filament_web.sh ~/filly-web
    ```
 
    To use local copies of the pinned archives, set `FILAMENT_SOURCE_TGZ` and
@@ -234,7 +250,7 @@ Requirements: Linux x86_64 with glibc 2.38 or later (for example, Ubuntu 24.04),
 2. Build filly's module:
 
    ```bash
-   tools/build_filly_web.sh build/web ~/filly-web
+   web/tools/build_filly_web.sh build/web ~/filly-web
    ```
 
    `build/web` then holds `filly.js`, `filly-core.js`, `filly-core.wasm`, and `licenses/`.
@@ -243,8 +259,8 @@ Requirements: Linux x86_64 with glibc 2.38 or later (for example, Ubuntu 24.04),
 The build tree is in `~/filly-web/filly-build`. Keep the work folder on the Linux file system:
 in WSL, a build in `/mnt/c` is slow.
 
-For a debugging build, configure `web/` yourself with
-`-DFILLY_WEB_EXTRA_FLAGS="-fsanitize=address -g"`.
+For a debugging build, configure the project folder yourself with `emcmake cmake` and
+`-DFILLY_WEB_EXTRA_FLAGS="-fsanitize=address -g"`, as `build_filly_web.sh` does.
 
 ## Test
 
@@ -259,12 +275,12 @@ or `psychopy-lib`).
 These optional tests skip when their dependencies are absent. The PsychoPy setup includes both.
 To compare images with Filament's own `gltf_viewer`, see [reference comparison](reference-comparison.md).
 
-`tests/test_web.py` runs the web build's JavaScript API in a browser and compares its output
+`web/tests/test_web.py` runs the web build's JavaScript API in a browser and compares its output
 with the desktop module. It needs the [web build](#build-for-the-web) in `build/web`, Node.js,
 and an installed browser, and skips otherwise:
 
 ```powershell
-cd tests\web; npm install; cd ..\..
+cd web\tests; npm install; cd ..\..
 uv run --no-sync python -m pytest -q -m browser
 ```
 
@@ -276,10 +292,10 @@ To generate the README screenshot, install the examples extra and run:
 
 ```powershell
 uv pip install --python .venv\Scripts\python.exe --no-build-isolation -e ".[examples]"
-uv run --no-sync python examples/screenshot.py
+uv run --no-sync python examples/python/screenshot.py
 ```
 
-The screenshot script renders the horse in `examples/assets`. It needs no download.
+The screenshot script renders the sample horse, `filly.samples.HORSE`. It needs no download.
 
 ## Build a wheel
 

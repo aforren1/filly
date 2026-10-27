@@ -310,7 +310,7 @@ have no GPU frame column because the PsychoPy venv has no instrumented build.
 ## Headless swap chain
 
 **Status (September 30, 2026): fixed in the main build.** `SyncPlatform::commit()` in
-`native/gl_interop.cpp` now calls `glFlush()` instead of `SwapBuffers()` for every platform. The
+`core/gl_interop.cpp` now calls `glFlush()` instead of `SwapBuffers()` for every platform. The
 measurements below come from the `w-ns` scratch build, which made the same change. The full test
 suites pass with it on Windows; Linux was not retested.
 
@@ -595,7 +595,7 @@ driver thread reaches that frame's start, so it sees the answer one render later
 outlier per run (4 renders, 84 ms) is the first pick of the renderer, measured before
 `prepare()` rendered a hidden pick.
 
-In browsers (`tests/test_web.py`, one render per `requestAnimationFrame`, Intel), the answer
+In browsers (`web/tests/test_web.py`, one render per `requestAnimationFrame`, Intel), the answer
 arrived 2 or 3 frames after the render that took the query in Chrome, Edge, and Firefox: WebGL
 signals fences only after the page returns to the event loop.
 
@@ -660,7 +660,7 @@ independent measures on both GPUs (DamagedHelmet, 1920 x 1080, AC, 60 Hz pacing 
   upper bound in every run. The nsys workload trace could not split Filament's frames in this
   build (the last range of a frame runs to the next frame), so it gave no third measure.
 - The frame number matches the timed frame: frames that alternate between a 16 x 16 and a
-  2048 x 2048 MSAA target report times that alternate with them (`tests/test_renderer.py`).
+  2048 x 2048 MSAA target report times that alternate with them (`python/tests/test_renderer.py`).
 - Other scenarios on Intel, 200 frames: ACES tone mapping 3.31 ms, direct output 1.59 ms, FXAA
   3.47 ms, MSAA 4x 4.35 ms, shadows 3.83 ms. The values follow the
   [output path](#output-path-september-30-2026) results.

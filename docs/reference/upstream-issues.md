@@ -70,14 +70,14 @@ strength multiplies the emissive value once.
 **Reproduction.** A black, lit triangle with `emissiveFactor` (0.05, 0.1, 0.02) and
 `emissiveStrength` 4 must render like `emissiveFactor` (0.2, 0.4, 0.08) without the extension.
 In 1.77.1 it renders like a factor of (0.8, 1.6, 0.32). filly test:
-`tests/test_material_paths.py::test_emissive_strength_applies_once`. Sample assets:
+`python/tests/test_material_paths.py::test_emissive_strength_applies_once`. Sample assets:
 EmissiveStrengthTest and CompareEmissiveStrength. With `tools/compare_reference.py`, filly differs
 from `gltf_viewer` by MAE 0.0998 (max 32) and MAE 0.549 (max 87) on these assets. See
 [compare with gltf_viewer](../how-to/reference-comparison.md).
 
-**filly workaround.** `initialize_model()` in `native/renderer.cpp` sets the unscaled glTF
+**filly workaround.** `initialize_model()` in `core/renderer.cpp` sets the unscaled glTF
 `emissiveFactor` on each material instance after gltfio creates the instance.
-`MaterialSource::emissive_factor` in `native/gltf_prepare.h` keeps the unscaled value.
+`MaterialSource::emissive_factor` in `core/gltf_prepare.h` keeps the unscaled value.
 
 **If upstream fixes it.** Delete the restore loop in `initialize_model()` and
 `MaterialSource::emissive_factor`. Update the extension table in
@@ -142,11 +142,11 @@ reference).
 3. A sheen material with `alphaMode` `BLEND` and a `sheenColorTexture`.
 
 filly test of its own provider for item 1:
-`tests/test_material_paths.py::test_specular_only_material_is_not_refractive`. Analysis:
+`python/tests/test_material_paths.py::test_specular_only_material_is_not_refractive`. Analysis:
 [material precompilation](../explanation/material-precompilation.md#matching).
 
 **filly workaround.** filly does not use the SDK archive. It builds its own archive
-(`native/materials/`) and uses its own `MaterialProvider` (`native/archive_materials.cpp`), in the
+(`core/materials/`) and uses its own `MaterialProvider` (`core/archive_materials.cpp`), in the
 Python and the web builds.
 
 **If upstream fixes it.** Nothing in filly. filly needs its own archive for other reasons
@@ -184,17 +184,17 @@ does not state a limit for morph targets. Morph targets are part of the mesh (gl
 **Reproduction.** Load an asset with one morph target (for example, a triangle whose target
 moves its vertices by 0.5 in Y). Call `loadResources()`. Call `createInstance()`. Set weight 1 on
 the new instance. The triangle does not move. filly tests:
-`tests/test_asset.py::test_morph_targets_of_every_model` and
-`tests/test_asset.py::test_lit_morph_targets_match_across_models`.
+`python/tests/test_asset.py::test_morph_targets_of_every_model` and
+`python/tests/test_asset.py::test_lit_morph_targets_match_across_models`.
 
 **filly workaround.**
 
 - Loading creates one spare instance before `loadResources()`, so the first model has gltfio's
-  own morph data (`AssetData::Spare` in `native/renderer.cpp`).
-- For each later instance, `fill_morph_targets()` in `native/renderer.cpp` uploads the positions
+  own morph data (`AssetData::Spare` in `core/renderer.cpp`).
+- For each later instance, `fill_morph_targets()` in `core/renderer.cpp` uploads the positions
   of each target and computes tangent frames with gltfio's `TangentsJob`, under the same
   conditions as `loadResources()`.
-- The SDK does not ship `TangentsJob.h`, so `native/renderer.cpp` declares `TangentsJob` with the
+- The SDK does not ship `TangentsJob.h`, so `core/renderer.cpp` declares `TangentsJob` with the
   1.77.1 layout. A layout change in a later SDK is undefined behavior.
 
 **If upstream fixes it.** Delete the spare instance, `fill_morph_targets()`, and the local
@@ -225,10 +225,10 @@ skips that sampler or that animation, not all animations.
 **Reproduction.** An asset with two animations. Animation 0 moves a node with a normal sampler.
 Animation 1 uses a sampler whose output accessor is sparse. `Animator::getAnimationCount()`
 returns 0. filly tests that load sparse and pointer samplers next to node animation:
-`tests/test_animation_pointer.py::test_accessor_sparse_stride_external_and_data_uri` and
-`tests/test_animation_pointer.py::test_mixed_node_and_pointer_timeline`.
+`python/tests/test_animation_pointer.py::test_accessor_sparse_stride_external_and_data_uri` and
+`python/tests/test_animation_pointer.py::test_mixed_node_and_pointer_timeline`.
 
-**filly workaround.** Partial. `prepare_animations()` in `native/gltf_prepare.cpp` finds samplers
+**filly workaround.** Partial. `prepare_animations()` in `core/gltf_prepare.cpp` finds samplers
 that only filly's property tracks use. `patch_source()` points their input and output at an
 accessor that gltfio accepts (`quiet_samplers`), and `gltfio_reads()` repeats gltfio's check.
 filly reads the real data itself. Node channels with sparse accessors are not worked around
@@ -265,7 +265,7 @@ materials, the two paths differed by at most 1. See
 [material precompilation](../explanation/material-precompilation.md), cause "IOR default".
 
 **filly workaround.** filly's provider sets `ior` to 1.5 when the material has no IOR
-(`native/archive_materials.cpp`).
+(`core/archive_materials.cpp`).
 
 **If upstream fixes it.** Nothing to delete. filly output then matches `gltf_viewer` for these
 assets.
@@ -293,12 +293,12 @@ result.
 **Reproduction.** A glass mesh with `KHR_materials_volume` (`thicknessFactor` 0.6,
 `attenuationDistance` 0.2) under a parent node. Scale the mesh node by 0.25 and render. Reset it,
 scale the parent by 0.25, and render again. The images differ in 1.77.1. filly test:
-`tests/test_volume.py::test_volume_thickness_uses_parent_and_model_scale`.
+`python/tests/test_volume.py::test_volume_thickness_uses_parent_and_model_scale`.
 
 **filly workaround.** filly's volume entries compute the average scale of
 `getWorldFromModelMatrix()` in the vertex shader and pass it in the `volumeScale` variable
-(`_volume_vertex` in `native/materials/materials.cmake`, `native/materials/surface.mat.in`,
-`native/materials/diffuse_transmission.mat.in`).
+(`_volume_vertex` in `core/materials/materials.cmake`, `core/materials/surface.mat.in`,
+`core/materials/diffuse_transmission.mat.in`).
 
 **If upstream fixes it.** If `getObjectUserData()` holds the world scale, or the engine gives a
 dedicated world-scale value, replace `volumeScale` with it. That removes the vertex code from the
@@ -323,11 +323,11 @@ infinite projection is used.
 
 **Reproduction.** An asset with a perspective camera with `yfov` 0.8 and no `aspectRatio`.
 Render it into a 64 x 32 viewport. The image is stretched horizontally by a factor of 2. filly
-test: `tests/test_camera_aspect.py::test_imported_camera_without_aspect_follows_target`.
+test: `python/tests/test_camera_aspect.py::test_imported_camera_without_aspect_follows_target`.
 
 **filly workaround.** filly reads the camera from its own parse (`CameraSource` in
-`native/gltf_prepare.cpp`). A perspective camera without an authored aspect follows the render
-target (`commit_properties()` and `initialize_cameras()` in `native/animation.inc`).
+`core/gltf_prepare.cpp`). A perspective camera without an authored aspect follows the render
+target (`commit_properties()` and `initialize_cameras()` in `core/animation.inc`).
 
 **If upstream fixes it.** Little. filly keeps its own camera table, because
 `KHR_animation_pointer` can animate camera projections ([F3](#f3)).
@@ -354,7 +354,7 @@ output `[[1, 0, 0]]`. After `applyAnimation(0, 0)` the node is still at its auth
 translation. No filly test covers this case.
 
 **filly workaround.** None. filly follows gltfio's rule so that its rest animation matches what
-gltfio applies (`append_rest_animation()` in `native/gltf_prepare.cpp`).
+gltfio applies (`append_rest_animation()` in `core/gltf_prepare.cpp`).
 
 **If upstream fixes it.** Change the rule in `append_rest_animation()` to match. One-keyframe
 node animations then work in filly.
@@ -412,9 +412,9 @@ documentation says so and `Engine::createSync()` reports it.
 **Reproduction.** On Windows, create an engine with the default platform, call
 `Engine::createSync()`, flush, and call `Sync::getExternalHandle()`. The callback receives no
 fence. filly's shared-texture tests show why an application needs the fence:
-`tests/test_interop.py`, `tests/test_gl_hosts.py`, and `tests/test_imported_texture.py`.
+`python/tests/test_interop.py`, `python/tests/test_gl_hosts.py`, and `python/tests/test_imported_texture.py`.
 
-**filly workaround.** `SyncPlatform` in `native/gl_interop.cpp` subclasses `PlatformWGL`,
+**filly workaround.** `SyncPlatform` in `core/gl_interop.cpp` subclasses `PlatformWGL`,
 `PlatformGLX`, and filly's EGL platform. Its `createSync()` runs queued requests on the driver
 thread: `glFenceSync`, `glWaitSync` on host fences, and the `GL_FRAMEBUFFER_SRGB` setting. See
 [shared OpenGL textures](../explanation/design.md#shared-opengl-textures).
@@ -445,7 +445,7 @@ Windows `gltfio_core.lib` variants and the Linux `libgltfio_core.a` contain
 
 **filly workaround.** filly cannot restore entity extras after it reads its node markers
 ([F1](#f1)), so entities keep the marker strings. filly does not expose extras. See
-`create_instance()` in `native/renderer.cpp`.
+`create_instance()` in `core/renderer.cpp`.
 
 **If upstream fixes it.** filly can restore the authored node extras after `createInstance()` and
 can then expose them. A fix for [F1](#f1) makes the markers unnecessary.
@@ -472,13 +472,13 @@ label, and the extras, but not the glTF material index
 pass the glTF material index to `createMaterialInstance()`, or add an equivalent map per
 instance.
 
-**filly workaround.** While `createInstance()` runs, `create_instance()` in `native/renderer.cpp`
+**filly workaround.** While `createInstance()` runs, `create_instance()` in `core/renderer.cpp`
 points gltfio's parse at a string of index markers (`#n<index>` for nodes, `#m<index>` for
 materials). gltfio copies node extras to each entity and passes material extras to the provider
 (`AssetLoader.cpp:623-628` and `:1564-1574`). filly reads the markers back with
-`FilamentAsset::getExtras()` and `material_marker()` in `native/archive_materials.cpp`. The parse
+`FilamentAsset::getExtras()` and `material_marker()` in `core/archive_materials.cpp`. The parse
 is restored before the function returns. A missing marker raises `AssetError`. Test:
-`tests/test_node_tree.py::test_nodes_names_indices_and_hierarchy`.
+`python/tests/test_node_tree.py::test_nodes_names_indices_and_hierarchy`.
 
 **If upstream adds it.** Delete the marker code in `create_instance()` and `material_marker()`,
 and the first row of the maintenance table in
@@ -502,9 +502,9 @@ interest in seconds" (`libs/gltfio/include/gltfio/Animator.h:41-48`).
 `applyAnimation(index, time, bool loop = true)`. glTF 2.0, section "Animations", defines
 values from the first to the last keyframe and leaves looping to the application.
 
-**filly workaround.** `Model::apply_animation()` in `native/features.inc` takes `loop`. With
+**filly workaround.** `Model::apply_animation()` in `core/features.inc` takes `loop`. With
 `loop=False` it clamps the time to just below gltfio's duration (`std::nextafter`), so that
-`fmod` does not wrap it. Tests: `tests/test_animation_pointer.py` and `tests/test_features.py`
+`fmod` does not wrap it. Tests: `python/tests/test_animation_pointer.py` and `python/tests/test_features.py`
 use `loop=False`.
 
 **If upstream adds it.** Replace the `nextafter` clamp with the option.
@@ -527,11 +527,11 @@ still disable all animations ([B4](#b4)).
 **Request.** Apply pointer channels for node properties at least (the same as the core paths),
 and for material, light, and camera properties if possible.
 
-**filly workaround.** `prepare_animations()` in `native/gltf_prepare.cpp` reads the pointer from
+**filly workaround.** `prepare_animations()` in `core/gltf_prepare.cpp` reads the pointer from
 the raw JSON. Pointers to node translation, rotation, scale, and weights become ordinary node
 channels in gltfio's parse (`patch_source()`). Other targets (materials, texture transforms,
 lights, cameras, node visibility) are filly's property tracks. Tests:
-`tests/test_animation_pointer.py`, `tests/test_light_pointer.py`.
+`python/tests/test_animation_pointer.py`, `python/tests/test_light_pointer.py`.
 
 **If upstream adds it.** Node pointers: delete the `node_channels` patch. Other targets: depends
 on the scope of the upstream support.
@@ -551,11 +551,11 @@ per instance.
 **Request.** Create one renderable per instance, or use Filament's instancing
 (`RenderableManager::Builder::instances()` with an `InstanceBuffer`).
 
-**filly workaround.** `expand_instances()` in `native/gltf_prepare.cpp` rewrites the document
+**filly workaround.** `expand_instances()` in `core/gltf_prepare.cpp` rewrites the document
 before gltfio reads it: each instance becomes a child node. The children share a primitive and
 a material instance, so Filament's automatic instancing (`Engine::setAutomaticInstancingEnabled`,
 on in filly) draws up to 64 of them per call. Tests:
-`tests/test_scene_extensions.py::test_instances_match_explicit_hierarchy` and the other instance
+`python/tests/test_scene_extensions.py::test_instances_match_explicit_hierarchy` and the other instance
 tests in that file.
 
 **If upstream adds it.** Delete `expand_instances()`.
@@ -579,9 +579,9 @@ JIT generator, and the ubershader archive. Consider diffuse transmission as cust
 shading.
 
 **filly workaround.** filly's archive has entries for these extensions, and its provider binds
-their textures through generic sampler slots (`native/materials/`,
-`native/archive_materials.cpp`). Tests: `tests/test_gltf_surface_camera.py::test_anisotropy_iridescence_clearcoat_and_sheen_load_strictly`,
-`tests/test_material_paths.py`, and `tests/test_features.py::test_diffuse_transmission_backlight`.
+their textures through generic sampler slots (`core/materials/`,
+`core/archive_materials.cpp`). Tests: `python/tests/test_gltf_surface_camera.py::test_anisotropy_iridescence_clearcoat_and_sheen_load_strictly`,
+`python/tests/test_material_paths.py`, and `python/tests/test_features.py::test_diffuse_transmission_backlight`.
 
 **If upstream adds it.** Little. filly keeps its own archive for the reasons in [B2](#b2). gltfio
 would then decode these textures, and filly's provider could use gltfio's bindings.

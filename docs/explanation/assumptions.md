@@ -315,7 +315,7 @@ still compiles GL programs at the first draw. See
 **Claim.** Intel WGL can return a black front buffer on the first visible presentation, also with
 a plain PsychoPy rectangle and no Filament engine.
 
-**Experiment.** `p2_psychopy.py` with the window arguments of `tests/test_psychopy.py`, except a
+**Experiment.** `p2_psychopy.py` with the window arguments of `python/tests/test_psychopy.py`, except a
 256 x 256 size. There is no warm-up flip. The front buffer is read after the first flip. This ran
 10 times on Intel. On NVIDIA, the standard probe window ran with and without a warm-up flip.
 
@@ -334,7 +334,7 @@ can stay because the test counts swaps after it.
 
 ## Other findings
 
-- `tests/test_refraction.py::test_volume_filter_is_invariant_to_scene_units[45-fast]` fails on
+- `python/tests/test_refraction.py::test_volume_filter_is_invariant_to_scene_units[45-fast]` fails on
   NVIDIA with and without the recommended changes. 2.1% of pixels differ by 3, and the tolerance is 2.
   The test was removed on September 29 with the volume-distance filter that it checked.
 - PsychoPy tests did not run with the recommended changes. That needs a Python 3.11 build.

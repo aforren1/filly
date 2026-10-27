@@ -32,7 +32,7 @@ r = filly.Renderer();
 scene = r.createScene();
 cam = r.createCamera();
 scene.camera = cam;
-model = scene.load('model.glb');
+model = scene.load(filly.samples.horse());   % or the path of your own glTF file
 cam.frame(model);
 scene.addDirectionalLight([0 -1 -1]);
 target = r.createRenderTarget(640, 480);
@@ -49,3 +49,6 @@ close(r);
 
 filly is MIT licensed (`LICENSE`). The licenses of the libraries that the MEX file contains are
 in `licenses/`.
+
+`samples/wooden_playground_horse.glb` is "Wooden Playground Horse" by Batuhan13, licensed
+CC BY 4.0. Give attribution with images rendered from it; see `samples/ATTRIBUTION.md`.

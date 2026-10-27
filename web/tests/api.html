@@ -1,0 +1,628 @@
+<!doctype html>
+<!-- Exercises filly's JavaScript API. Each check stores its data or its error in
+     window.testResult; web/tests/test_web.py compares them with desktop filly. -->
+<html><body><canvas width="16" height="16"></canvas>
+<script type="module">
+import { AssetError, createRenderer, FillyError, ImportedTexture, setMaterialParameters, setMorphWeights, setTransforms,
+	shapes, Texture } from "./filly/filly.js";
+
+const gl = document.querySelector("canvas").getContext("webgl2");
+const renderer = await createRenderer(gl);
+const initialStats = renderer.stats;
+const results = {};
+const SIZE = 64;
+
+async function check(name, fn)
+{
+	try
+	{
+		results[name] = { ok: true, value: await fn() };
+	}
+	catch (error)
+	{
+		results[name] = { ok: false, error: `${error.name}: ${error.message}`, stack: String(error.stack) };
+	}
+}
+
+// An unlit 2 x 2 plane that fills an orthographic view of height 2, read back offscreen.
+async function plane({ baseColor = [1, 1, 1, 1], texture = null, setup = null } = {})
+{
+	const scene = renderer.createScene();
+	const model = scene.createMesh({ ...shapes.plane({ width: 2, height: 2 }), unlit: true, baseColor });
+	const material = model.material("mesh");
+	if (texture)
+	{
+		material.baseColorTexture = texture;
+	}
+	const camera = renderer.createCamera();
+	camera.setOrthographic({ height: 2, near: 0.1, far: 10 });
+	camera.position = [0, 0, 1];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	setup?.({ scene, model, material });
+	const target = renderer.createRenderTarget(SIZE, SIZE);
+	renderer.render(scene, target);
+	const pixels = await target.read();
+	target.close();
+	scene.close();
+	return pixels;
+}
+
+const pixel = (pixels, x, y, width = SIZE) => Array.from(pixels.slice(4 * (y * width + x), 4 * (y * width + x) + 4));
+
+// First, so that no earlier check has compiled the programs. After prepare(), the first render
+// should create no programs, when the browser compiles in parallel.
+await check("prepare", async () =>
+{
+	const scene = renderer.createScene();
+	scene.antialiasing = "fxaa";
+	scene.environment = renderer.createEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8);
+	scene.environmentIntensity = 20000;
+	scene.createMesh({ ...shapes.uvSphere({ radius: 0.6 }), baseColor: [0.8, 0.6, 0.4, 1], roughness: 0.4 });
+	scene.addDirectionalLight({ direction: [-1, -1, -2], intensity: 100000 });
+	const camera = renderer.createCamera();
+	camera.setPerspective({ fovYDeg: 40, near: 0.1, far: 10 });
+	camera.position = [0, 0, 2.2];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	const target = renderer.createRenderTarget(SIZE, SIZE);
+	let compiled = 0;
+	const shaderSource = gl.shaderSource;
+	gl.shaderSource = (...args) => { compiled++; return shaderSource.apply(gl, args); };
+	try
+	{
+		await renderer.prepare(scene);
+		const duringPrepare = compiled;
+		renderer.render(scene, target);
+		const center = pixel(await target.read(), 32, 32);
+		return { parallel: Boolean(gl.getExtension("KHR_parallel_shader_compile")), duringPrepare,
+			duringRender: compiled - duringPrepare, center, framesRendered: renderer.stats.framesRendered };
+	}
+	finally
+	{
+		gl.shaderSource = shaderSource;
+		target.close();
+		scene.close();
+	}
+});
+
+await check("solid", async () => pixel(await plane({ baseColor: [0.5, 0.5, 0.5, 1] }), 32, 32));
+
+// An explicit camera and a viewport in the left half.
+await check("render_options", async () =>
+{
+	const scene = renderer.createScene();
+	scene.createMesh({ ...shapes.plane({ width: 2, height: 2 }), unlit: true, baseColor: [0.5, 0.5, 0.5, 1] });
+	const camera = renderer.createCamera();
+	camera.setOrthographic({ height: 2, near: 0.1, far: 10 });
+	camera.position = [0, 0, 1];
+	camera.lookAt([0, 0, 0]);
+	const target = renderer.createRenderTarget(SIZE, SIZE);
+	renderer.render(scene, target, { camera, viewport: [0, 0, SIZE / 2, SIZE], clear: true });
+	const pixels = await target.read();
+	target.close();
+	scene.close();
+	return pixel(pixels, SIZE / 4, SIZE / 2);
+});
+
+// 2 x 2 sRGB texture, nearest filter: red, green / blue, white, rows from the top.
+const quadrants = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]);
+await check("texture_u8", async () =>
+{
+	const texture = renderer.createTexture(quadrants, { width: 2, height: 2, colorSpace: "srgb", filter: "nearest" });
+	const pixels = await plane({ texture });
+	const info = { width: texture.width, height: texture.height, channels: texture.channels, dtype: texture.dtype,
+		colorSpace: texture.colorSpace, mipmaps: texture.mipmaps, isTexture: texture instanceof Texture };
+	texture.update(new Uint8Array(16).fill(0).map((_, i) => (i % 4 === 2 || i % 4 === 3 ? 255 : 0)));
+	const updated = await plane({ texture });
+	texture.close();
+	return { pixels: Array.from(pixels), info, updatedCenter: pixel(updated, 32, 32), closed: texture.closed };
+});
+
+await check("texture_float", async () =>
+{
+	const texture = renderer.createTexture(new Float32Array(16).fill(0.5), { width: 2, height: 2, colorSpace: "linear" });
+	return { center: pixel(await plane({ texture }), 32, 32), dtype: texture.dtype };
+});
+
+await check("texture_single_channel", async () =>
+{
+	const texture = renderer.createTexture(new Uint8Array(4).fill(128), { width: 2, height: 2, channels: 1, colorSpace: "linear" });
+	return pixel(await plane({ texture }), 32, 32);
+});
+
+// Page textures that materials sample: RGBA8 (linear) and SRGB8_ALPHA8 (sRGB), filled with 128.
+function pageTexture(format)
+{
+	const texture = gl.createTexture();
+	renderer.handBack();
+	gl.bindTexture(gl.TEXTURE_2D, texture);
+	gl.texStorage2D(gl.TEXTURE_2D, 1, format, 2, 2);
+	gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 2, 2, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(16).fill(128));
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+	return texture;
+}
+await check("host_linear", async () =>
+{
+	const host = renderer.importTexture(pageTexture(gl.RGBA8), 2, 2, { colorSpace: "linear" });
+	const center = pixel(await plane({ texture: host }), 32, 32);
+	return { center, isHost: host instanceof ImportedTexture, colorSpace: host.colorSpace };
+});
+await check("host_srgb", async () =>
+{
+	const host = renderer.importTexture(pageTexture(gl.SRGB8_ALPHA8), 2, 2, { colorSpace: "srgb" });
+	let wrote = false;
+	host.write(() => { wrote = true; });
+	const center = pixel(await plane({ texture: host }), 32, 32);
+	host.close();
+	return { center, wrote, writing: host.writing };
+});
+
+await check("material_texture_slots", async () =>
+{
+	const texture = renderer.createTexture(quadrants, { width: 2, height: 2, colorSpace: "srgb" });
+	let slots;
+	await plane({ setup: ({ material }) =>
+	{
+		material.baseColorTexture = texture;
+		material.baseColorTextureOffset = [0.5, 0];
+		material.baseColorTextureScale = [0.5, 1];
+		slots = {
+			base: material.baseColorTexture?.equals(texture), emissive: material.emissiveTexture,
+			offset: material.baseColorTextureOffset, scale: material.baseColorTextureScale,
+			rotationDeg: material.baseColorTextureRotationDeg, emissiveOffset: material.emissiveTextureOffset,
+		};
+		material.baseColorTexture = null;
+		slots.cleared = material.baseColorTexture;
+		slots.clearedOffset = material.baseColorTextureOffset;
+	} });
+	return slots;
+});
+
+// A triangle in the left half, then moved to the right half with updateMesh().
+await check("mesh_update", async () =>
+{
+	const left = new Float32Array([-0.9, -0.9, 0, -0.1, -0.9, 0, -0.5, 0.9, 0]);
+	const right = left.map((v, i) => (i % 3 === 0 ? v + 1 : v));
+	const scene = renderer.createScene();
+	scene.background = [0, 0, 0, 1];
+	const model = scene.createMesh({ positions: left, indices: new Uint32Array([0, 1, 2]), unlit: true, baseColor: [1, 1, 1, 1] });
+	const camera = renderer.createCamera();
+	camera.setOrthographic({ height: 2, near: 0.1, far: 10 });
+	camera.position = [0, 0, 1];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	const target = renderer.createRenderTarget(SIZE, SIZE);
+	renderer.render(scene, target);
+	const before = await target.read();
+	model.updateMesh({ positions: right });
+	renderer.render(scene, target);
+	const after = await target.read();
+	const half = (pixels, side) =>
+	{
+		let lit = 0;
+		for (let y = 0; y < SIZE; y++)
+			for (let x = side * SIZE / 2; x < (side + 1) * SIZE / 2; x++)
+				if (pixels[4 * (y * SIZE + x)] > 128) lit++;
+		return lit;
+	};
+	const result = { isMesh: model.isMesh, vertexCount: model.vertexCount,
+		before: [half(before, 0), half(before, 1)], after: [half(after, 0), half(after, 1)] };
+	target.close();
+	scene.close();
+	return result;
+});
+
+await check("batch", () =>
+{
+	// Two scenes of one renderer in one batch.
+	const scenes = [renderer.createScene(), renderer.createScene()];
+	const models = scenes.map((scene) => scene.createMesh({ ...shapes.box({ width: 0.2, height: 0.2, depth: 0.2 }) }));
+	const nodes = models.map((model) => model.nodes[0]);
+	const matrix = (x) => [1, 0, 0, x, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+	setTransforms(nodes, new Float32Array([...matrix(0.25), ...matrix(-0.5)]));
+	const flat = nodes.map((node) => Array.from(node.transform));
+	setTransforms(nodes, [matrix(1), matrix(2)]);
+	const nested = nodes.map((node) => Array.from(node.transform));
+	const materials = nodes.map((node) => node.material(0));
+	setMaterialParameters(materials, "baseColor", [[1, 0, 0, 1], [0, 0, 1, 0.5]]);
+	setMaterialParameters(materials, "roughness", [0.25, 0.75]);
+	const errorOf = (fn) =>
+	{
+		try
+		{
+			fn();
+			return null;
+		}
+		catch (error)
+		{
+			return `${error.name}: ${error.message}`;
+		}
+	};
+	const result = {
+		flat, nested,
+		baseColors: materials.map((material) => Array.from(material.baseColor)),
+		roughness: materials.map((material) => material.roughness),
+		countError: errorOf(() => setTransforms(nodes, matrix(0))),
+		rangeError: errorOf(() => setMaterialParameters(materials, "metallic", [0.5, 2])),
+		metallicAfterError: materials.map((material) => material.metallic),
+		morphError: errorOf(() => setMorphWeights(nodes, [1, 1])),
+	};
+	scenes.forEach((scene) => scene.close());
+	return result;
+});
+
+await check("shapes", () =>
+{
+	const summary = (shape) => Object.fromEntries(Object.entries(shape).map(([key, values]) =>
+		[key, { type: values.constructor.name, length: values.length, sum: values.reduce((a, b) => a + b, 0) }]));
+	return { plane: summary(shapes.plane({ width: 2, height: 1, segments: [3, 2] })), box: summary(shapes.box()),
+		uvSphere: summary(shapes.uvSphere({ segments: 8, rings: 4 })), cylinder: summary(shapes.cylinder({ caps: false })) };
+});
+
+// A lit box in perspective, as desktop filly renders it in the test.
+await check("lit_box", async () =>
+{
+	const scene = renderer.createScene();
+	scene.background = [0.1, 0.2, 0.3, 1];
+	const model = scene.createMesh({ ...shapes.box(), baseColor: [0.8, 0.5, 0.2, 1], roughness: 0.6 });
+	model.rotationEulerDeg = [20, 35, 0];
+	const camera = renderer.createCamera();
+	camera.setPerspective({ fovYDeg: 35, near: 0.5, far: 10 });
+	camera.position = [0, 0, 3];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	scene.addDirectionalLight({ direction: [-1, -2, -1], intensity: 80000 });
+	scene.environment = renderer.createEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8);
+	scene.environmentIntensity = 15000;
+	const target = renderer.createRenderTarget(160, 120);
+	renderer.render(scene, target);
+	const pixels = await target.read();
+	target.close();
+	scene.close();
+	return Array.from(pixels);
+});
+
+await check("instances", async () =>
+{
+	const scene = renderer.createScene();
+	scene.background = [0.1, 0.2, 0.3, 1];
+	await scene.loadUrl("instances.glb");
+	const camera = renderer.createCamera();
+	camera.setPerspective({ fovYDeg: 35, near: 0.5, far: 20 });
+	camera.position = [1, 2, 5];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	scene.addDirectionalLight({ direction: [-1, -2, -1], intensity: 80000 });
+	scene.environment = renderer.createEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8);
+	scene.environmentIntensity = 15000;
+	const target = renderer.createRenderTarget(160, 120);
+	renderer.render(scene, target);
+	const pixels = await target.read();
+	target.close();
+	camera.close();
+	scene.close();
+	return Array.from(pixels);
+});
+
+// The scene of render_box() in python/tests/test_draco.py.
+await check("draco", async () =>
+{
+	const scene = renderer.createScene();
+	scene.background = [0.1, 0.2, 0.3, 1];
+	await scene.loadUrl("draco-box/Box.gltf");
+	const camera = renderer.createCamera();
+	camera.setPerspective({ fovYDeg: 35, near: 0.5, far: 20 });
+	camera.position = [1.5, 1.2, 2.5];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	scene.addDirectionalLight({ direction: [-1, -2, -1], intensity: 80000 });
+	scene.environment = renderer.createEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8);
+	scene.environmentIntensity = 15000;
+	const target = renderer.createRenderTarget(160, 120);
+	renderer.render(scene, target);
+	const pixels = await target.read();
+	target.close();
+	camera.close();
+	scene.close();
+	return Array.from(pixels);
+});
+
+await check("model_tree", async () =>
+{
+	const scene = renderer.createScene();
+	const model = await scene.loadUrl("tree.glb");
+	const nodes = model.nodes;
+	const root = model.node("root");
+	const triangle = model.node(1);
+	const camera = model.camera("front");
+	const result = {
+		names: nodes.map((node) => node.name), indices: nodes.map((node) => node.index),
+		rootParent: root.parent, rootChildren: root.children.map((node) => node.name),
+		triangleParent: triangle.parent.name, meshName: triangle.meshName,
+		sameNode: model.node("triangle").equals(triangle), differentNode: root.equals(triangle),
+		cameraNode: camera.node.name, sceneCameraNode: renderer.createCamera().node,
+		morphTargets: triangle.morphTargetCount, rotationEulerDeg: model.rotationEulerDeg,
+		liveModels: renderer.stats.liveModels,
+	};
+	const asset = await renderer.loadAssetUrl("tree.glb");
+	const added = scene.add(asset);
+	added.position = [1, 0, 0];
+	result.addedLiveModels = renderer.stats.liveModels;
+	result.addedPosition = added.position;
+	result.originalPosition = model.position;
+	added.close();
+	asset.close();
+	result.afterCloseLiveModels = renderer.stats.liveModels;
+	scene.close();
+	return result;
+});
+
+// Through the in-memory file system, which uses the bytes without a copy; they stay unchanged.
+await check("load_files", async () =>
+{
+	const scene = renderer.createScene();
+	const bytes = new Uint8Array(await (await fetch("tree.glb")).arrayBuffer());
+	const before = bytes.slice();
+	const model = scene.loadFiles("tree.glb", { "tree.glb": bytes });
+	const result = { names: model.nodeNames, unchanged: bytes.every((value, index) => value === before[index]) };
+	scene.close();
+	return result;
+});
+
+// A model cache: an Asset that the renderer keeps, models of it in two scenes, and the memory
+// estimate of what they share. Closing a scene keeps the asset; closing the asset keeps models.
+await check("model_cache", async () =>
+{
+	const first = renderer.createScene();
+	const second = renderer.createScene();
+	const asset = await renderer.loadAssetUrl("tree.glb");
+	const kept = asset.memory;
+	const model = first.add(asset);
+	const other = second.add(asset);
+	const result = { fetchedBytes: asset.fetchedBytes, kept, memory: asset.memory, liveModels: renderer.stats.liveModels };
+	first.close();
+	result.firstClosed = model.closed;
+	result.modelsAfterClose = asset.memory.models;
+	const again = second.add(asset);
+	result.againModels = again.memory.models;
+	asset.close();
+	result.assetClosed = asset.closed;
+	result.afterAssetClose = other.memory;
+	second.close();
+	result.liveAfter = renderer.stats.liveModels;
+	return result;
+});
+
+// Scenes share an Environment; each keeps its own intensity, and closing it removes it.
+await check("environment", async () =>
+{
+	const first = renderer.createScene();
+	const second = renderer.createScene();
+	const defaults = { environment: first.environment, intensity: first.environmentIntensity,
+		rotationDeg: first.environmentRotationDeg };
+	const environment = renderer.createEnvironment(new Float32Array(8 * 16 * 3).fill(1), 16, 8);
+	first.environment = environment;
+	second.environment = environment;
+	second.environmentIntensity = 15000;
+	const result = { defaults, shared: first.environment.equals(second.environment),
+		intensities: [first.environmentIntensity, second.environmentIntensity] };
+	environment.close();
+	result.afterClose = [first.environment, second.environment, environment.closed];
+	first.close();
+	second.close();
+	return result;
+});
+
+await check("scene_effects", async () =>
+{
+	const scene = renderer.createScene();
+	const values = {};
+	for (const name of ["ssao", "bloom", "fog", "depthOfField", "vignette"])
+	{
+		scene[name] = true;
+		values[name] = scene[name];
+	}
+	scene.fogColor = [1, 0, 0];
+	scene.fogDensity = 0.5;
+	scene.vignetteMidpoint = 0.25;
+	for (const name of ["fogColor", "fogDensity", "fogStart", "vignetteMidpoint", "vignetteRoundness",
+		"vignetteFeather", "vignetteColor", "environmentIntensity", "environmentRotationDeg"])
+	{
+		values[name] = scene[name];
+	}
+	const point = scene.addPointLight({ position: [0, 0, 5], intensity: 0 });
+	const sun = scene.addSunLight({ direction: [0, -1, 0], intensity: 0 });
+	const spot = scene.addSpotLight({ position: [0, 0, 5], direction: [0, 0, -1], intensity: 0 });
+	spot.shadowNormalBias = 0.5;
+	values.lights = {
+		pointDirection: point.direction, pointRange: point.range, sunPosition: sun.position,
+		sunRange: sun.range, sunCone: sun.coneDeg, spotCone: spot.coneDeg,
+		spotShadow: [spot.shadowMapSize, spot.shadowNormalBias],
+	};
+	spot.coneDeg = [10, 20];
+	values.lights.spotConeAfter = spot.coneDeg;
+	const camera = renderer.createCamera();
+	camera.focusDistance = 2.5;
+	camera.aperture = 4;
+	values.focusDistance = camera.focusDistance;
+	values.aperture = camera.aperture;
+	camera.setPerspective({ fovYDeg: 35, near: 0.5, far: 10 });
+	camera.position = [0, 0, 3];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	scene.createMesh({ ...shapes.box(), baseColor: [0.8, 0.8, 0.8, 1] });
+	const target = renderer.createRenderTarget(SIZE, SIZE);
+	renderer.render(scene, target);
+	values.center = pixel(await target.read(), 32, 32);
+	target.close();
+	scene.close();
+	return values;
+});
+
+await check("errors", async () =>
+{
+	const scene = renderer.createScene();
+	const caught = {};
+	const attempt = async (name, fn) =>
+	{
+		try { await fn(); caught[name] = "no error"; }
+		catch (error) { caught[name] = error.name; }
+	};
+	await attempt("badBytes", () => scene.load(new Uint8Array([1, 2, 3, 4])));
+	await attempt("badFill", () => renderer.createCamera().frame([[0, 0, 0], [1, 1, 1]], { fill: 2 }));
+	await attempt("badMesh", () => scene.createMesh({ positions: new Float32Array([0, 0, 0, 1, 0]), indices: new Uint32Array([0, 1, 2]) }));
+	await attempt("noTexture", () => { scene.createMesh({ ...shapes.box() }).material("mesh").emissiveTextureOffset = [0, 0]; });
+	await attempt("lightLacks", () => { scene.addDirectionalLight({ direction: [0, -1, 0] }).position = [0, 0, 0]; });
+	await attempt("badUpdate", () => renderer.createTexture(quadrants, { width: 2, height: 2, colorSpace: "srgb" }).update(new Float32Array(16)));
+	await attempt("missingUrl", () => scene.loadUrl("missing.glb"));
+	let unknownMaterial = null;
+	try { scene.createMesh({ ...shapes.box() }).material("wood"); }
+	catch (error) { unknownMaterial = error.message; }
+	scene.close();
+	return { caught, unknownMaterial, assetIsFilly: new AssetError("x") instanceof FillyError };
+});
+
+// A new camera, framed before the first render, frames again for the target's aspect. Planes
+// given to a projection call stay through frame(). A scene names how it lost its camera.
+await check("camera_defaults", async () =>
+{
+	const scene = renderer.createScene();
+	const errors = {};
+	const target = renderer.createRenderTarget(128, 64);
+	try { renderer.render(scene, target); }
+	catch (error) { errors.none = error.message; }
+	scene.createMesh({ ...shapes.uvSphere({ radius: 1, segments: 128, rings: 64 }), unlit: true });
+	scene.camera = renderer.createCamera();
+	const half = 1 / Math.sqrt(3);
+	scene.camera.frame([[-half, -half, -half], [half, half, half]], { fill: 0.5 });
+	renderer.render(scene, target);
+	const pixels = await target.read();
+	const lit = (x, y) => pixels[4 * (y * 128 + x)] > 128;
+	let across = 0;
+	let down = 0;
+	for (let x = 0; x < 128; x++) across += lit(x, 32);
+	for (let y = 0; y < 64; y++) down += lit(64, y);
+	const camera = scene.camera;
+	camera.setPerspective({ fovYDeg: 30, near: 0.5, far: 40 });
+	camera.frame([[-1, -1, -1], [1, 1, 1]]);
+	const p = camera.projection;
+	const keptNear = p[11] / (p[10] - 1);
+	camera.close();
+	try { renderer.render(scene, target); }
+	catch (error) { errors.closed = error.message; }
+	target.close();
+	scene.close();
+	return { across, down, keptNear, errors };
+});
+
+// Frames alternate between a small and a large target, so the reported frame number can be
+// checked against the reported time. Query results arrive only after the page yields.
+await check("gpu_frame_time", async () =>
+{
+	const scene = renderer.createScene();
+	scene.msaa = 4;
+	scene.createMesh({ ...shapes.uvSphere({ radius: 0.6 }), baseColor: [0.8, 0.6, 0.4, 1] });
+	scene.addDirectionalLight({ direction: [-1, -1, -2], intensity: 100000 });
+	const camera = renderer.createCamera();
+	camera.position = [0, 0, 3];
+	scene.camera = camera;
+	const small = renderer.createRenderTarget(16, 16);
+	const large = renderer.createRenderTarget(2048, 2048);
+	const times = [];
+	const before = renderer.stats.framesRendered;
+	for (let i = 0; i < 40; i++)
+	{
+		renderer.render(scene, (before + i) % 2 === 0 ? small : large);
+		renderer.handBack();
+		await new Promise((resolve) => requestAnimationFrame(resolve));
+		const stats = renderer.stats;
+		if (stats.gpuFrameMs !== null && stats.gpuFrameNumber > before)
+		{
+			times.push([stats.gpuFrameNumber, stats.gpuFrameMs, stats.framesRendered]);
+		}
+	}
+	small.close();
+	large.close();
+	camera.close();
+	scene.close();
+	return { initial: [initialStats.gpuFrameMs, initialStats.gpuFrameNumber], times,
+		timer: Boolean(gl.getExtension("EXT_disjoint_timer_query_webgl2")) };
+});
+
+// Picks in two scenes, compared with desktop: generated meshes with a blended square, and the
+// instanced boxes, whose instances are nodes. Then the latency of a pick in a requestAnimationFrame
+// loop that renders every frame and polls ready() at the start of each.
+await check("pick", async () =>
+{
+	const scene = renderer.createScene();
+	const back = scene.createMesh({ ...shapes.plane({ width: 1.6, height: 1.6 }), unlit: true, baseColor: [0, 1, 0, 1] });
+	back.position = [0, 0, -0.5];
+	const front = scene.createMesh({ ...shapes.box({ width: 0.8, height: 0.8, depth: 0.8 }), unlit: true });
+	front.rotationEulerDeg = [20, 30, 0];
+	const glass = scene.createMesh({ ...shapes.plane({ width: 0.4, height: 0.4 }), unlit: true,
+		baseColor: [1, 0, 0, 0.3], alphaMode: "blend" });
+	glass.position = [0.55, -0.55, 0.1];
+	const camera = renderer.createCamera();
+	camera.setPerspective({ fovYDeg: 40, near: 0.1, far: 20 });
+	camera.position = [0.3, 0.4, 3];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	const models = [front, back, glass];
+	const target = renderer.createRenderTarget(SIZE, SIZE);
+	const describe = (result) => result && { model: models.findIndex((model) => model.equals(result.model)),
+		node: result.node.index, position: result.position, depth: result.depth };
+	const pickAll = async (points, scene, target) =>
+	{
+		const queries = points.map(([x, y]) => renderer.pick(scene, x, y));
+		const queued = queries[0].ready();
+		renderer.render(scene, target);
+		const frame = renderer.stats.framesRendered;
+		const hits = [];
+		for (const query of queries)
+		{
+			hits.push(describe(await query.wait()));
+		}
+		return { queued, frames: queries.map((query) => query.frameNumber - frame), hits };
+	};
+	const layers = await pickAll([[32, 32], [48, 15], [49, 49], [5, 5]], scene, target);
+	scene.pickBlended = true;
+	const blended = await pickAll([[48, 15]], scene, target);
+
+	const instanced = renderer.createScene();
+	const model = await instanced.loadUrl("instances.glb");
+	models.push(model);
+	const view = renderer.createCamera();
+	view.setPerspective({ fovYDeg: 35, near: 0.5, far: 20 });
+	view.position = [1, 2, 5];
+	view.lookAt([0, 0, 0]);
+	instanced.camera = view;
+	const wide = renderer.createRenderTarget(160, 120);
+	const instances = await pickAll([[80, 60], [40, 30], [120, 90], [100, 40], [60, 85], [5, 5]], instanced, wide);
+
+	const latency = [];
+	for (let trial = 0; trial < 10; trial++)
+	{
+		const query = renderer.pick(instanced, 80, 60);
+		let frames = 0;
+		do
+		{
+			renderer.render(instanced, wide);
+			renderer.handBack();
+			await new Promise((resolve) => requestAnimationFrame(resolve));
+			frames++;
+		} while (!query.ready());
+		latency.push(frames);
+	}
+	target.close();
+	wide.close();
+	scene.close();
+	instanced.close();
+	return { layers, blended, instances, latency };
+});
+
+results.platform = renderer.glPlatform;
+results.framesRendered = renderer.stats.framesRendered;
+renderer.close();
+window.testResult = results;
+</script></body></html>

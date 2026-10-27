@@ -1,4 +1,4 @@
-// Embind bindings of filly's core for the web build. They stay close to native/renderer.h;
+// Embind bindings of filly's core for the web build. They stay close to core/renderer.h;
 // web/filly.js adds the JavaScript API: option objects, name-or-index keys, error types, and
 // the hand-over of the page's WebGL2 context. C++ exceptions reach JavaScript as WebAssembly
 // exceptions, which filly.js converts with getExceptionMessage().

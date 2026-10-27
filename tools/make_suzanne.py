@@ -1,4 +1,4 @@
-"""Make filly's sample model, src/filly/samples/suzanne.glb, from Khronos's Suzanne.
+"""Make filly's sample model, python/filly/samples/suzanne.glb, from Khronos's Suzanne.
 
 Usage: python tools/make_suzanne.py
 
@@ -17,7 +17,7 @@ import numpy as np
 
 COMMIT = "c6a6bd13ab2b3c685c7903d03561b8a9392f38b8"
 SOURCE = f"https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/{COMMIT}/Models/Suzanne/glTF/"
-OUTPUT = Path(__file__).resolve().parents[1] / "src" / "filly" / "samples" / "suzanne.glb"
+OUTPUT = Path(__file__).resolve().parents[1] / "python" / "filly" / "samples" / "suzanne.glb"
 FLOAT, UINT16, UINT32 = 5126, 5123, 5125
 
 

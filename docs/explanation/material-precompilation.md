@@ -35,10 +35,10 @@ it.
 
 | Source | What it compiles | When |
 | --- | --- | --- |
-| `native/surface_material.cpp` | An adapted copy of gltfio's `JitShaderProvider` generator: one material per `MaterialKey` and UV layout. It adds anisotropy and iridescence (with three extra samplers, the "extended" material), a model-to-world volume thickness scale (`CUSTOM0` vertex variable), alpha 1 for unlit `OPAQUE`, and the orthographic refraction LOD hook from `native/refraction.h`. It compiles with `Optimization::NONE`. | Transmission and volume materials, unlit `OPAQUE` materials, anisotropy and iridescence materials, in both shader modes. With `precompiled_shaders=True`, also every key that the SDK archive does not match exactly. |
-| `native/materials.cpp`, `diffuse_material()` | The diffuse-transmission material (`KHR_materials_diffuse_transmission`): custom surface shading, a backlight cubemap, 8 2D samplers and 1 cube sampler. One material per alpha mode. | Assets with that extension. |
+| `core/surface_material.cpp` | An adapted copy of gltfio's `JitShaderProvider` generator: one material per `MaterialKey` and UV layout. It adds anisotropy and iridescence (with three extra samplers, the "extended" material), a model-to-world volume thickness scale (`CUSTOM0` vertex variable), alpha 1 for unlit `OPAQUE`, and the orthographic refraction LOD hook from `core/refraction.h`. It compiles with `Optimization::NONE`. | Transmission and volume materials, unlit `OPAQUE` materials, anisotropy and iridescence materials, in both shader modes. With `precompiled_shaders=True`, also every key that the SDK archive does not match exactly. |
+| `core/materials.cpp`, `diffuse_material()` | The diffuse-transmission material (`KHR_materials_diffuse_transmission`): custom surface shading, a backlight cubemap, 8 2D samplers and 1 cube sampler. One material per alpha mode. | Assets with that extension. |
 | gltfio `JitShaderProvider` | All other glTF keys. | Default mode (`precompiled_shaders=False`). |
-| `native/slots.inc`, `assign_texture()` | A new variant of the glTF key with a base color or emissive slot and texture transforms added. | The first runtime texture assignment to a material that lacks the slot. |
+| `core/slots.inc`, `assign_texture()` | A new variant of the glTF key with a base color or emissive slot and texture transforms added. | The first runtime texture assignment to a material that lacks the slot. |
 | `Scene.create_mesh()` | A one-triangle glTF placeholder with the requested factors, so the same provider path as a loaded asset. | Each new combination of unlit, alpha mode, double-sided, and vertex colors. |
 
 Features that do not compile materials: fog (a Filament variant, present in every package), the
@@ -92,7 +92,7 @@ texture), and a `mat3` UV transform.
    that spec 0 may lack. Missing uniforms are ignored silently; a missing texture sampler fails a
    Filament precondition, which aborts the process or throws. See [upstream issue
    B2](../reference/upstream-issues.md#b2). filly avoids this path: its own provider
-   (`native/archive_materials.cpp`) selects entries from filly's archive and never falls back to
+   (`core/archive_materials.cpp`) selects entries from filly's archive and never falls back to
    spec 0.
 
 Consequences, *measured* by reading the shipped archive (`uberarchive.lib`) and by a JSON-level
@@ -340,7 +340,7 @@ Measured parts of this design:
 
 - `filly_lit.mat` (all lobes, 5 + 3 samplers, uniform branches) compiles at feature level 1 for
   desktop GLSL and GLSL ES 3.00. `filly_refr.mat` with the volume scale variable and the
-  refraction hook from `native/refraction.h` compiles for both, and the optimized GLSL keeps the
+  refraction hook from `core/refraction.h` compiles for both, and the optimized GLSL keeps the
   hook. The diffuse-transmission material compiles unchanged as a `.mat` file.
 - A 21-entry prototype archive: 2,115,674 bytes of packages, 127,589 bytes as uberz (desktop GL,
   optimized). With the variant filter `stereo,ssr,vsm` (filly uses none of them): 1,425,768 and
@@ -488,8 +488,8 @@ first use of a large entry. Two points stay open for phase 3:
 - The `.mat` sources use Filament's `MaterialInputs` fields, property names, and blending
   defines. Review them with the release notes.
 - The refraction hook depends on the name `sampler0_ssr` and on the order of the generated shader.
-  Review `native/refraction.h`. Add a build check that the
-  optimized GLSL still contains the hook. *Done: `native/materials/check_refraction.cmake`.*
+  Review `core/refraction.h`. Add a build check that the
+  optimized GLSL still contains the hook. *Done: `core/materials/check_refraction.cmake`.*
 - The provider depends on gltfio's texture parameter names for the core roles and on the order of
   `createMaterialInstance()` and texture binding in `AssetLoader`.
 - It does not depend on `UbershaderProvider`, `ArchiveCache`, `prepareConfig()`, or
@@ -533,12 +533,12 @@ own harness scene; the regression test scene gives 1.
 
 ### Phase 2: the archive at build time
 
-`native/materials` has four templates (`surface.mat.in` for the lit and refractive entries,
+`core/materials` has four templates (`surface.mat.in` for the lit and refractive entries,
 `unlit.mat.in`, `specular_glossiness.mat.in`, `diffuse_transmission.mat.in`) and
 `materials.cmake`. CMake writes one `.mat` file per entry and blending mode, runs `matc -a opengl
 -p desktop -V stereo,ssr,vsm` on each, packs them with `uberz`, and embeds the archive as a C
 array. Each uberz spec has a flag with the entry name, which the provider looks up. The refraction
-code comes from the three strings in `native/refraction.h`, so both paths share one copy. When
+code comes from the three strings in `core/refraction.h`, so both paths share one copy. When
 `matinfo` is available, the build fails if the optimized refraction shader no longer calls the
 hook (`check_refraction.cmake`; it looks for `textureSize(sampler0_ssr` or, in unoptimized
 shaders, `fpTextureLod`).
@@ -598,8 +598,8 @@ Filament computes with `std::hash` (different in MSVC and libstdc++), and the pa
 
 ### Phase 3: the filly material provider
 
-`native/archive_materials.cpp` replaces both gltfio providers on the archive path. Preparation
-(`plan_archive_materials()` in `native/gltf_prepare.cpp`) gives each glTF material a plan: the
+`core/archive_materials.cpp` replaces both gltfio providers on the archive path. Preparation
+(`plan_archive_materials()` in `core/gltf_prepare.cpp`) gives each glTF material a plan: the
 entry, the generic sampler of each extension texture role, and the image bytes of those textures.
 The provider:
 
@@ -632,7 +632,7 @@ Warmup (removed on September 30): a new renderer called `Material::compile()` fo
 blended, and masked core lit entries and the opaque and blended unlit entries, with the
 directional and dynamic lighting variants, and did not wait. `FILLY_MATERIAL_WARMUP=0` skipped
 it. Program binary cache (removed on September 30): filly implemented `Platform::setBlobFunc()`
-with an on-disk cache (`native/program_cache.cpp`), off by default. `EglPlatform` now creates
+with an on-disk cache (`core/program_cache.cpp`), off by default. `EglPlatform` now creates
 shared contexts for Filament's compiler thread (`isExtraContextSupported()`, `createContext()`,
 `releaseContext()`); this stays.
 
@@ -875,7 +875,7 @@ Five gaps from phases 1 to 3 were closed before phase 4. Measurements are on the
 `emissive.w` is 1, and it scales emission by `mix(1, exposure, emissive.w)`, so the glTF emission
 was multiplied by the camera exposure and came out nearly black.
 
-**Fix** (`native/materials/diffuse_transmission.mat.in`, `native/materials.cpp`): `emissive.w` is
+**Fix** (`core/materials/diffuse_transmission.mat.in`, `core/materials.cpp`): `emissive.w` is
 0, as in the other lit materials. The environment backlight term, which is IBL light, is
 multiplied by `getExposure()` in the shader, so it keeps its previous value.
 
@@ -922,8 +922,8 @@ isotropic lobe uses `pixel.f90 = metallic + specularFactor * (1 - metallic)` ins
 metals and dielectrics with low IOR. Indirect light and F0 are the same at the defaults. The
 anisotropic lobe always uses the F90 from F0.
 
-**Fix** (`native/materials/materials.cmake`, `surface.mat.in`, `native/gltf_prepare.cpp`,
-`native/gltf_prepare.h`, `native/archive_materials.cpp`). A uniform cannot select the F90: the
+**Fix** (`core/materials/materials.cmake`, `surface.mat.in`, `core/gltf_prepare.cpp`,
+`core/gltf_prepare.h`, `core/archive_materials.cpp`). A uniform cannot select the F90: the
 value is computed in Filament's `getCommonPixelParams()` from the material inputs, and a metallic
 material gets F90 = 1 for every `specularFactor`. The lobe entries were split instead:
 `LitExtended`, `RefractionThin`, and `RefractionSolid` have no specular inputs, and the new
@@ -1054,7 +1054,7 @@ Warmup with an idle application (renderer created, 3 s pause, then loading), 3 r
   frames of 67 ms or less, 3 of 5 had no gain, and 1 of 5 warm runs took 2,051 ms. On NVIDIA it
   saved 0.2 s of 2.9 s. On the warm-cache measurement of phase 3 it made the Intel first frame
   slower. It also cannot help after a driver update, when drivers can reject old binaries (from
-  the GL specification; not measured). **Decision: removed** (`native/program_cache.cpp`,
+  the GL specification; not measured). **Decision: removed** (`core/program_cache.cpp`,
   `FILLY_SHADER_CACHE`, `_program_cache`).
 - The completion callback of `Material::compile()`: Filament's `CallbackManager` runs it when every
   program token issued up to the call is released. A token is released at the program's first
@@ -1135,13 +1135,13 @@ only material path in every build.
   everything that filly's provider uses; the web build already linked only `gltfio_core`. The
   Linux SDK tool no longer stages these libraries or `uberarchive.h`. It still builds `filamat`,
   because `matc` needs it.
-- `native/materials.cpp` (613 lines): `ArchiveSpecs`, `reduce_for_archive()`, the provider that
+- `core/materials.cpp` (613 lines): `ArchiveSpecs`, `reduce_for_archive()`, the provider that
   wrapped `JitShaderProvider` and `UbershaderProvider`, the runtime diffuse-transmission builder,
   the material cache, and `create_material_instance()`.
-- `native/surface_material.cpp` (611 lines): the generator adapted from `JitShaderProvider`.
-- The key-based variant logic of `assign_texture()` in `native/slots.inc`, the key in each
+- `core/surface_material.cpp` (611 lines): the generator adapted from `JitShaderProvider`.
+- The key-based variant logic of `assign_texture()` in `core/slots.inc`, the key in each
   runtime texture assignment, and the "compiled without texture transforms" error.
-- The texture-count preflight in `native/gltf_prepare.cpp` (the 8- and 5-texture rules). The
+- The texture-count preflight in `core/gltf_prepare.cpp` (the 8- and 5-texture rules). The
   archive path never ran it. Every entry has fixed samplers for the five core textures, and
   extension textures share the entry's generic samplers; `plan_archive_materials()` drops the
   least important extension textures with a warning when they do not fit. No other sampler
@@ -1153,10 +1153,10 @@ only material path in every build.
   `MaterialSource::root_label`, `PreparedAsset::custom_materials()`, and the `custom` flag of
   `MaterialRecord`.
 
-`native/archive_materials.cpp` needed nothing from the deleted files. It already had its own
+`core/archive_materials.cpp` needed nothing from the deleted files. It already had its own
 copies of the small helpers (the material marker, the sampler and matrix conversions, texture
-decoding, and the WebP texture provider). `native/materials.h` keeps the provider interface.
-`native/refraction.h` stays as the source of the refraction code that `materials.cmake` reads;
+decoding, and the WebP texture provider). `core/materials.h` keeps the provider interface.
+`core/refraction.h` stays as the source of the refraction code that `materials.cmake` reads;
 no C++ file includes it now.
 
 ### Results
@@ -1166,7 +1166,7 @@ no C++ file includes it now.
 | Item | Before | After |
 | --- | ---: | ---: |
 | Module (`_native.pyd`, editable build) | 15,207,424 bytes (runtime path) | 7,421,952 bytes |
-| C++ and CMake lines in `native/` and `CMakeLists.txt` | 9,059 | 7,632 |
+| C++ and CMake lines in `core/` and `CMakeLists.txt` | 9,059 | 7,632 |
 | Windows suite without the browser tests | 545 passed, 14 skipped | 529 passed, 6 skipped |
 | PsychoPy suite (Python 3.11) | 23 passed | 23 passed |
 
@@ -1176,7 +1176,7 @@ archive-only tests. Tests whose only subject was the runtime path or Filament's 
 were removed (the 9-texture `AssetError`, the generated-material limits, and the "other slots"
 error). Tests that compared the two paths now check the archive path alone.
 
-The browser tests (`tests/test_web.py`) need a new web build: the build in `build/web` predates
+The browser tests (`web/tests/test_web.py`) need a new web build: the build in `build/web` predates
 phase 4, and its `Renderer` constructor still takes two arguments. With the old glue they pass
 (16 passed).
 
@@ -1203,7 +1203,7 @@ The scratch files are in `C:\tmp\mat` and are not part of the repository.
 
 | Experiment | Method |
 | --- | --- |
-| Module size | Scratch copy of `native/` and `CMakeLists.txt`, own build directories and venv, Visual Studio 2022, `/MAP`. Baseline, then a copy with `filamat` and `shaders` removed from the link and the two compile paths stubbed. Map attribution by symbol address. |
+| Module size | Scratch copy of `core/` and `CMakeLists.txt`, own build directories and venv, Visual Studio 2022, `/MAP`. Baseline, then a copy with `filamat` and `shaders` removed from the link and the two compile paths stubbed. Map attribution by symbol address. |
 | SDK archive | The zstd frame from `uberarchive.lib`, parsed with the `ReadableArchive` layout; packages extracted and read with `matinfo`. Flag order checked against exact matching for all specs and features. |
 | Sample-asset variants | JSON of the 150 assets in `.deps/sample-audit`, with Python models of `getMaterialKey()`, `constrainMaterial()`, `prepareConfig()`, the archive match, and filly's routing. Not an instrumented build. |
 | Sampler limits and sizes | SDK `matc` and `uberz` on `base.mat.in`, `filly_lit.mat`, `filly_refr.mat`, and a `.mat` port of the diffuse-transmission material, in desktop and mobile configurations. |

@@ -19,19 +19,19 @@ for that Python version, which avoids a source build.
 uv venv --python 3.11 .deps/psychopy311
 uv pip install --python .deps/psychopy311/Scripts/python.exe nanobind scikit-build-core ninja pytest
 uv pip install --python .deps/psychopy311/Scripts/python.exe --no-build-isolation -e ".[psychopy,examples]"
-uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_shared.py
 ```
 
 To display a local GLB instead of the wooden horse, pass its path:
 
 ```powershell
-uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py "C:/models/stimulus.glb" --frames 600
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_shared.py "C:/models/stimulus.glb" --frames 600
 ```
 
 The demo centers the asset and frames it with `camera.frame()`: the bounding sphere spans 85% of
 the window height at every rotation. The asset keeps its physical scale. It plays the
 first glTF animation and shows the file stem in the upper-left label. Custom assets do not spin
-unless `--spin` is supplied. Without a path, the demo shows the horse in `examples/assets` from a
+unless `--spin` is supplied. Without a path, the demo shows the sample horse (`filly.samples.HORSE`) from a
 three-quarter view, spins it at 30 degrees per second, and plays its spring animation. Press Escape to stop.
 
 If the asset has cameras, the demo uses the first one. Useful options:
@@ -77,7 +77,7 @@ preview defaults; adjust exposure for your stimulus. Animation clip names and va
 For MosquitoInAmber, use a perspective camera and a brighter background:
 
 ```powershell
-uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py path/to/MosquitoInAmber.glb --background 0.5 0.5 0.5
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_shared.py path/to/MosquitoInAmber.glb --background 0.5 0.5 0.5
 ```
 
 The environment lights the object. Add `--show-environment` to display it as an opaque skybox,
@@ -215,7 +215,7 @@ as `draw()` gives in the other integrations. PsychoPy has its own drawing pipeli
 conversion is the one difference.
 
 ```powershell
-uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py --transparent --frames 300
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_shared.py --transparent --frames 300
 ```
 
 This draws the horse over a regular PsychoPy grating, with the text label above both.
@@ -242,7 +242,7 @@ lighting and the skybox. For asset lights, the demo uses a dim environment inten
 To run the cached TrafficCone asset with point shadows and the studio skybox:
 
 ```powershell
-uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py .deps/sample-audit/assets/Models/TrafficCone/glTF/TrafficCone.gltf --shadows --shadow-map-size 512 --show-environment --environment-rotation-deg 45 --frames 90 --warmup 10 --profile lighting.csv
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_shared.py .deps/sample-audit/assets/Models/TrafficCone/glTF/TrafficCone.gltf --shadows --shadow-map-size 512 --show-environment --environment-rotation-deg 45 --frames 90 --warmup 10 --profile lighting.csv
 ```
 
 ## Inspect dielectric iridescence
@@ -251,7 +251,7 @@ To inspect `IridescenceDielectricSpheres`, use an angled camera and environment 
 The front view overlaps the sphere rows. The default directional light can wash out the film colors.
 
 ```powershell
-uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py .deps/sample-audit/assets/Models/IridescenceDielectricSpheres/glTF/IridescenceDielectricSpheres.gltf --lighting environment --projection orthographic --view 35 22 --spin 0 --frames 600
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_shared.py .deps/sample-audit/assets/Models/IridescenceDielectricSpheres/glTF/IridescenceDielectricSpheres.gltf --lighting environment --projection orthographic --view 35 22 --spin 0 --frames 600
 ```
 
 This improves the preview. Filament's remaining thin-film shading approximation is described in
@@ -260,7 +260,7 @@ the [sample audit](../reference/sample-assets.md#dielectric-iridescence).
 ## Record frame timing
 
 ```powershell
-uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/psychopy_shared.py --frames 600 --profile timing.csv --warmup 60
+uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_shared.py --frames 600 --profile timing.csv --warmup 60
 ```
 
 The CSV records every frame. The printed p50, p95, and p99 summary excludes warmup frames.
