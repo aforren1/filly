@@ -31,7 +31,10 @@ if(FILLY_MATLAB)
   find_package(Matlab REQUIRED COMPONENTS MX_LIBRARY)
   # On Linux, matlab_add_mex also applies MATLAB's export map, so the file exports only
   # mexFunction and the API version symbols.
-  matlab_add_mex(NAME filly_mex MODULE SRC filly_mex.cpp LINK_TO filly_core R2018a)
+  # CMAKE_DL_LIBS: dlsym and dladdr, for the check of which library provides Mesa's _glapi
+  # symbols. Through LINK_TO, because FindMatlab links with the plain target_link_libraries
+  # signature, which a keyword call on the same target cannot mix with.
+  matlab_add_mex(NAME filly_mex MODULE SRC filly_mex.cpp LINK_TO filly_core ${CMAKE_DL_LIBS} R2018a)
   target_compile_features(filly_mex PRIVATE cxx_std_20)
   _filly_mex_output(filly_mex)
   _filly_package(filly_mex matlab)
@@ -45,8 +48,6 @@ if(FILLY_MATLAB)
     # than the ones that the core is built with. Static copies make the file independent of
     # them; the export map keeps their symbols out of the process.
     target_link_options(filly_mex PRIVATE -static-libstdc++ -static-libgcc)
-    # dlsym and dladdr, for the check of which library provides Mesa's _glapi symbols.
-    target_link_libraries(filly_mex PRIVATE ${CMAKE_DL_LIBS})
   endif()
 endif()
 
