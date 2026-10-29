@@ -342,10 +342,33 @@ Source archives are pinned and hash checked; build dependencies and container im
 
 ## Publish a release
 
-A pushed tag `vX.Y.Z` publishes the wheels and the sdist of that run to PyPI, after all builds
-and tests pass. The tag must match the version in `pyproject.toml`; otherwise the sdist job
-fails and nothing is published. `filly.__version__` reads the installed version, so
-`pyproject.toml` is the only place to change it.
+One tag `vX.Y.Z` releases all frontends. The wheel workflow publishes the wheels and the sdist of
+that run to PyPI, after all builds and tests pass. The MATLAB workflow publishes the toolbox
+packages to a GitHub release; see [MATLAB and Octave](matlab.md#publish-a-release).
+
+The tags are the only source of the version. No file holds it. setuptools-scm computes the
+Python version from the newest `vX.Y.Z` tag before the commit, and `matlab/CMakeLists.txt`
+computes the same string for the MEX files:
+
+| Commit | Version |
+| --- | --- |
+| The tagged commit `v0.2.1`, with no uncommitted changes | `0.2.1` |
+| The tagged commit `v0.2.1`, with uncommitted changes to tracked files | `0.2.2.dev0` |
+| 5 commits after `v0.2.1` | `0.2.2.dev5` |
+| No `vX.Y.Z` tag in the history, for example a shallow clone | `0.0.1.devN`, N commits |
+| No git history, for example a GitHub source archive | `0.0.0` |
+
+A build from the sdist reads the version from the sdist's `PKG-INFO`, so it does not need git.
+An editable install keeps the version of its last build until it builds again. The MATLAB build
+computes the version at configure time; to set it by hand, give `-DFILLY_VERSION=X.Y.Z`. CI
+fetches the full history (`fetch-depth: 0`) to get the tags. On a tag push, CI stops the
+release if a computed version does not match the tag.
+
+To see the version of the working tree:
+
+```powershell
+uv run --no-project --with "setuptools-scm>=9" python -m setuptools_scm
+```
 
 The workflow publishes with PyPI trusted publishing: PyPI trusts this repository's workflow, and
 no API token is stored in GitHub.
@@ -360,15 +383,21 @@ Set up once:
 
 Publish:
 
-1. Set `version` in `pyproject.toml`, for example `0.1.0`, and commit.
-2. Optional rehearsal: run **Build wheels** by hand (Actions, then **Run workflow**) with
-   **Publish the build to TestPyPI** selected. TestPyPI does not accept a version twice.
-3. Tag the commit and push the tag:
+1. Commit all changes, and wait for green CI runs of both workflows on `main`.
+2. Do the manual MATLAB tests in [MATLAB and Octave](matlab.md#publish-a-release).
+3. Optional rehearsal: run **Build wheels** by hand (Actions, then **Run workflow**) with
+   **Publish the build to TestPyPI** selected. The run publishes a `.devN` version. TestPyPI
+   does not accept a version twice, so a second rehearsal needs a new commit.
+4. Tag the commit and push the tag:
 
    ```powershell
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag v0.3.0
+   git push origin v0.3.0
    ```
+
+To repeat a failed release, delete the tag on both sides, fix the cause, and push the tag again.
+After PyPI accepts a version, it does not accept that version again; release a new patch version
+instead.
 
 Publish filly before psychopy-filly: the plugin's release workflow installs filly from PyPI.
 PyPI shows `README.md` as the project description. Relative links and images in it do not work

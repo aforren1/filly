@@ -14,6 +14,9 @@ cd "$(dirname "$0")/../.."
 dnf install -y clang libX11-devel mesa-libGL-devel mesa-libEGL-devel libstdc++-static
 export PATH="/opt/python/cp312-cp312/bin:$PATH"
 python -m pip install 'ninja>=1.11'
+# The checkout belongs to the runner's user, not to root. git refuses such a repository, and the
+# version from the tags (matlab/CMakeLists.txt) would fall back to 0.0.0.
+git config --global --add safe.directory "$PWD"
 
 configure() {
     local dir=$1

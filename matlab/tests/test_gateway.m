@@ -2,10 +2,15 @@
 % identifiers. Hosted CI runners have no usable OpenGL device, so CI runs only this file.
 assert(filly_mex('handleCount') == 0, 'a fresh session must have no handles');
 
-% The MEX file carries the frontend's version, which the release tag must match.
-here = fileparts(mfilename('fullpath'));
-expected = strtrim(fileread(fullfile(fileparts(here), 'VERSION')));
-assert(strcmp(filly.version(), expected), 'filly.version() is %s, matlab/VERSION is %s', filly.version(), expected);
+% The MEX file carries the version from the git tags. On a tag push, CI sets FILLY_RELEASE_TAG,
+% so that a package built from wrong or missing git history cannot be released.
+tag = getenv('FILLY_RELEASE_TAG');
+if isempty(tag)
+    assert(~isempty(regexp(filly.version(), '^\d+\.\d+\.\d+(\.dev\d+)?$', 'once')), ...
+        'filly.version() is %s, not X.Y.Z or X.Y.Z.devN', filly.version());
+else
+    assert(strcmp(['v' filly.version()], tag), 'filly.version() is %s, the release tag is %s', filly.version(), tag);
+end
 
 % Dispatch and handles.
 expect_error(@() filly_mex(), 'filly:invalidArgument');

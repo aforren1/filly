@@ -12,18 +12,46 @@ function(_filly_mex_output target)
   endforeach()
 endfunction()
 
-# The frontend has its own version, apart from the Python package: filly.version reports it,
-# and the release tag matlab-v<version> must match it.
-file(STRINGS VERSION FILLY_FRONTEND_VERSION LIMIT_COUNT 1)
+# filly.version reports the version of the vX.Y.Z tags, the string that setuptools-scm computes
+# for the Python package (pyproject.toml): X.Y.Z on a clean tagged commit, else X.Y.(Z+1).devN,
+# N commits after the tag. It is computed at configure time, so a new commit shows after the
+# next configure. A source tree without git history needs FILLY_VERSION, or reports 0.0.0.
+set(FILLY_VERSION "" CACHE STRING "Version to report instead of the one from the git tags")
+if(NOT FILLY_VERSION)
+  set(FILLY_VERSION 0.0.0)
+  find_package(Git QUIET)
+  if(Git_FOUND)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" describe --dirty --tags --long --match "v[0-9]*"
+                    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" OUTPUT_VARIABLE _describe
+                    RESULT_VARIABLE _result OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(_result EQUAL 0 AND _describe MATCHES "^v([0-9]+)\\.([0-9]+)\\.([0-9]+)-([0-9]+)-g[0-9a-f]+(-dirty)?$")
+      if(CMAKE_MATCH_4 EQUAL 0 AND NOT CMAKE_MATCH_5)
+        set(FILLY_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
+      else()
+        math(EXPR _patch "${CMAKE_MATCH_3} + 1")
+        set(FILLY_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${_patch}.dev${CMAKE_MATCH_4}")
+      endif()
+    else()
+      # No tag in the history, for example in a shallow clone: setuptools-scm counts from 0.0.
+      execute_process(COMMAND "${GIT_EXECUTABLE}" rev-list --count HEAD
+                      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" OUTPUT_VARIABLE _count
+                      RESULT_VARIABLE _result OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+      if(_result EQUAL 0)
+        set(FILLY_VERSION "0.0.1.dev${_count}")
+      endif()
+    endif()
+  endif()
+endif()
+message(STATUS "filly version ${FILLY_VERSION}")
 
 # One toolbox package per MEX file, which users unzip and add to the path with SetupFilly:
 #   cmake --install <build> --component <matlab|octave> --prefix <folder>
 function(_filly_package target component)
-  target_compile_definitions(${target} PRIVATE FILLY_FRONTEND_VERSION="${FILLY_FRONTEND_VERSION}")
+  target_compile_definitions(${target} PRIVATE FILLY_VERSION="${FILLY_VERSION}")
   set(_where COMPONENT ${component} EXCLUDE_FROM_ALL)
   install(TARGETS ${target} LIBRARY DESTINATION . ${_where} RUNTIME DESTINATION . ${_where})
   install(DIRECTORY +filly DESTINATION . ${_where})
-  install(FILES SetupFilly.m VERSION README.md "${PROJECT_SOURCE_DIR}/LICENSE" DESTINATION . ${_where})
+  install(FILES SetupFilly.m README.md "${PROJECT_SOURCE_DIR}/LICENSE" DESTINATION . ${_where})
   install(DIRECTORY "${PROJECT_SOURCE_DIR}/samples/" DESTINATION samples ${_where})
   filly_install_licenses(licenses ${_where})
 endfunction()

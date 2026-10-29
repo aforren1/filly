@@ -706,8 +706,9 @@ Done when: the frontend tests pass in Octave for Windows.
     be in the same folder: MATLAB loads `.mexa64` and Octave loads `.mex`.
 - Releases (done 2026-10-26, not yet run): `.github/workflows/matlab.yml` builds one package for
   each platform on the oldest supported release, tests that exact file on the oldest and the
-  newest release, and publishes the packages on a `matlab-v<version>` tag. `matlab/VERSION`
-  holds the frontend's own version, which `filly.version` reports. Each package is a
+  newest release, and publishes the packages on a `v<version>` tag. Since 2026-10-29 the
+  frontend has no version of its own: the `v<version>` tags of the Python package are the only
+  source, and `filly.version` reports the version that CMake computes from them. Each package is a
   `cmake --install --component matlab|octave` folder: the MEX file, `+filly`, `SetupFilly.m`, a
   README, and the licenses. PTB users get a drop-in install without a compiler.
   - MATLAB: built on R2021b. MEX files load in later releases.

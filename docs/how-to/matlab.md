@@ -13,7 +13,7 @@ Supported now:
 
 ## Install a release
 
-Each `matlab-v<version>` release on GitHub has one zip file for each package:
+Each `v<version>` release on GitHub has one zip file for each package:
 
 | Package | Runs on |
 | --- | --- |
@@ -358,21 +358,13 @@ measures the call overhead.
 
 ## Publish a release
 
-The frontend releases apart from the Python package, with `matlab-v<version>` tags. The Python
-package keeps the `v<version>` tags.
+The frontend releases together with the Python package, with one `v<version>` tag. The version
+comes from the tag; see [publish a release](build.md#publish-a-release) for the steps and for how
+the version is computed.
 
-1. Set the new version in `matlab/VERSION`.
-2. Run the parity test and the Psychtoolbox tests in MATLAB on a machine with a GPU. CI cannot
-   run them.
-3. Commit, and wait for a green CI run on `main`.
-4. Push the tag:
+Before you push the tag, run the parity test and the Psychtoolbox tests in MATLAB on a machine
+with a GPU. CI cannot run them.
 
-   ```bash
-   git tag matlab-v0.1.0
-   git push origin matlab-v0.1.0
-   ```
-
-CI then builds and tests every package again. When all jobs pass, the release job checks that
-the tag matches `matlab/VERSION`, zips each package, and creates a GitHub release that is not
-marked as the latest release. To repeat a failed release, delete the tag on both sides, fix the
-cause, and push the tag again.
+After the tag push, CI builds and tests every package again. The gateway tests check that
+`filly.version()` matches the tag. When all jobs pass, the release job zips each package and
+creates the GitHub release for the tag.

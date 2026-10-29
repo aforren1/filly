@@ -1,10 +1,10 @@
 [build-system]
-requires = ["scikit-build-core>=0.11,<2", "nanobind>=2.4,<4"]
+requires = ["scikit-build-core>=0.11,<2", "nanobind>=2.4,<4", "setuptools-scm>=9"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "filly"
-version = "0.2.1"
+dynamic = ["version"]
 description = "A Python 3D renderer for glTF scenes, built on Google Filament"
 readme = "README.md"
 license = "MIT"
@@ -29,15 +29,27 @@ moderngl = ["pyglet>=1.4.11", "moderngl>=5.7"]
 zengl = ["pyglet>=1.4.11", "zengl>=2.1"]
 
 [dependency-groups]
-dev = ["pytest>=8", "nanobind>=2.4,<4", "scikit-build-core>=0.11,<2", "ninja>=1.11"]
+dev = ["pytest>=8", "nanobind>=2.4,<4", "scikit-build-core>=0.11,<2", "setuptools-scm>=9", "ninja>=1.11"]
 
 [tool.scikit-build]
 minimum-version = "0.11"
+metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
 cmake.version = ">=3.28"
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["python/filly"]
 wheel.py-api = "cp312"
 sdist.exclude = [".deps", ".venv", "build", "dist", "Microsoft", ".vscode", "matlab", "web", "examples/matlab"]
+
+# The vX.Y.Z tags are the only source of the version, for every frontend; matlab/CMakeLists.txt
+# computes the same string. Five commits after v0.2.1, the version is 0.2.2.dev5. PyPI rejects
+# local versions (+g<hash>), so there are none.
+[tool.setuptools_scm]
+tag_regex = '^v(?P<version>\d+\.\d+\.\d+)$'
+local_scheme = "no-local-version"
+fallback_version = "0.0.0"
+
+[tool.setuptools_scm.scm.git]
+describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests", "web/tests"]

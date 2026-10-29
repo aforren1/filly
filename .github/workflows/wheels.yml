@@ -1,7 +1,7 @@
 name: Build wheels
 
-# Every run builds and tests the wheels and the sdist. A pushed tag vX.Y.Z whose version matches
-# pyproject.toml also publishes them to PyPI. A manual run can publish to TestPyPI instead, to
+# Every run builds and tests the wheels and the sdist. A pushed tag vX.Y.Z also publishes them to
+# PyPI; the version comes from the tags (pyproject.toml). A manual run can publish to TestPyPI instead, to
 # rehearse a release. Publishing uses PyPI trusted publishing: no token is stored here.
 on:
   workflow_dispatch:
@@ -33,9 +33,22 @@ jobs:
         os: [ubuntu-24.04, windows-2022]
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # The tags, for the version.
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      # Once, on the runner: in the manylinux container, git refuses the runner's checkout.
+      - name: Compute the version
+        shell: bash
+        run: |
+          python -m pip install 'setuptools-scm>=9'
+          version=$(python -m setuptools_scm)
+          if [[ $GITHUB_REF == refs/tags/v* && "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "Version $version does not match the tag $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION=$version" | tee -a "$GITHUB_ENV"
       - name: Cache Linux SDK
         if: runner.os == 'Linux'
         uses: actions/cache@v6
@@ -58,6 +71,7 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_BEFORE_ALL_LINUX: bash {package}/tools/ci_linux.sh
           CIBW_BEFORE_ALL_WINDOWS: python {package}/tools/fetch_filament.py
+          CIBW_ENVIRONMENT_PASS_LINUX: SETUPTOOLS_SCM_PRETEND_VERSION
           CIBW_ENVIRONMENT_LINUX: 'CC=clang CXX=clang++ CMAKE_ARGS="-DFILAMENT_ROOT=/project/.deps/filament-linux" LIBGL_ALWAYS_SOFTWARE=1'
           CIBW_TEST_REQUIRES: 'pytest pillow pyglet==1.4.11'
           CIBW_TEST_COMMAND_LINUX: 'timeout 600 xvfb-run -a python -m pytest {project}/python/tests -q -m "not psychopy" -o faulthandler_timeout=60'
@@ -77,19 +91,20 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # The tags, for the version.
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - name: Check that the tag matches the version
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: python
+      - name: Compute the version
         run: |
-          import os, tomllib
-          with open("pyproject.toml", "rb") as file:
-              version = tomllib.load(file)["project"]["version"]
-          tag = os.environ["GITHUB_REF_NAME"]
-          if tag != f"v{version}":
-              raise SystemExit(f"Tag {tag} does not match version {version} in pyproject.toml")
+          python -m pip install 'setuptools-scm>=9'
+          version=$(python -m setuptools_scm)
+          if [[ $GITHUB_REF == refs/tags/v* && "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "Version $version does not match the tag $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION=$version" | tee -a "$GITHUB_ENV"
       - name: Build the sdist
         run: pipx run build --sdist
       - uses: actions/upload-artifact@v7

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28...3.31)
-project(filly VERSION 0.1.0 LANGUAGES C CXX)
+project(filly LANGUAGES C CXX)
 # filly uses no C++ modules. Without this, CMake 3.28 with Ninja and C++20 needs clang-scan-deps,
 # which Ubuntu ships in a separate package (clang-tools).
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)

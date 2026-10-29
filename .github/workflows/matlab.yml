@@ -1,7 +1,8 @@
 name: MATLAB and Octave
 
 # Builds the toolbox packages on the oldest supported release, tests those exact files on the
-# oldest and the newest release, and publishes them on a matlab-v<version> tag.
+# oldest and the newest release, and publishes them on a v<version> tag, the tag of the Python
+# package too.
 #
 # - MATLAB MEX files load in later releases, so one build per OS on R2021b covers R2021b and
 #   later.
@@ -17,8 +18,8 @@ name: MATLAB and Octave
 #   so Windows runs only the tests that need no renderer. Parity and the Psychtoolbox tests in
 #   MATLAB run on a machine with a GPU (docs/how-to/matlab.md).
 #
-# The Python wheels have their own workflow and v<version> tags; the paths below keep this one
-# off changes that cannot affect the MEX files. Path filters do not apply to tag pushes.
+# The Python wheels have their own workflow; the paths below keep this one off changes that
+# cannot affect the MEX files. Path filters do not apply to tag pushes.
 on:
   workflow_dispatch:
   pull_request:
@@ -34,7 +35,7 @@ on:
       - '.github/workflows/matlab.yml'
   push:
     branches: [main, master]
-    tags: ['matlab-v*']
+    tags: ['v*']
     paths:
       - 'matlab/**'
       - 'core/**'
@@ -57,6 +58,8 @@ env:
   MATLAB_FLOOR: R2021b
   OCTAVE_FLOOR: 6.4.0
   OCTAVE10_FLOOR: 10.1.0
+  # On a tag push, test_gateway.m checks that filly.version() matches the tag.
+  FILLY_RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
 
 jobs:
   # ============================================================== Windows =====
@@ -66,6 +69,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # The tags, for the version.
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -148,6 +153,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # The tags, for the version.
       - uses: actions/cache/restore@v6
         with:
           path: .deps/filament-linux
@@ -272,7 +279,8 @@ jobs:
         run: find matlab -exec touch -d '1 hour ago' {} +
       - name: Run the offscreen tests (llvmpipe)
         run: |
-          docker run --rm -i -v "$PWD:/work" -w /work/matlab/tests "gnuoctave/octave:${{ matrix.octave }}" bash -s <<'EOF'
+          docker run --rm -i -v "$PWD:/work" -w /work/matlab/tests -e FILLY_RELEASE_TAG \
+            "gnuoctave/octave:${{ matrix.octave }}" bash -s <<'EOF'
           set -e
           if ! command -v xvfb-run >/dev/null; then
             apt-get update
@@ -314,24 +322,18 @@ jobs:
             octave-cli --no-gui --no-init-file --quiet --eval "exit(run_ptb_tests() > 0)"
 
   # ============================================================== Release =====
-  # On a matlab-v<version> tag, publish the packages that every test above ran on.
+  # On a v<version> tag, publish the packages that every test above ran on. The gateway tests
+  # checked that their version matches the tag.
   release:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/matlab-v')
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [windows-build, windows-forward, linux-build, matlab-linux-test, octave-test, octave-ptb]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - name: Check that the tag matches matlab/VERSION
-        run: |
-          version=$(head -1 matlab/VERSION)
-          if [ "${GITHUB_REF_NAME#matlab-v}" != "$version" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match version $version in matlab/VERSION" >&2
-            exit 1
-          fi
-          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
           path: packages
@@ -344,10 +346,9 @@ jobs:
             (cd "$name" && zip -qr "../$name-$VERSION.zip" .)
           done
           ls -la ./*.zip
-      # Not the repository's latest release: that stays with the Python package's tags.
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" packages/*.zip --repo "$GITHUB_REPOSITORY" \
-            --title "filly for MATLAB and Octave $VERSION" --generate-notes --latest=false
+            --title "filly $VERSION" --generate-notes

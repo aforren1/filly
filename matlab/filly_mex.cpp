@@ -959,7 +959,7 @@ const std::unordered_map<std::string_view, Handler>& commands() {
         // Octave 11 runs a subclass destructor again after an explicit delete, when the handle can
         // already be released; the destructors check first.
         {"valid", [](Call& c) { c.out(0, bool_out(table().objects.count(handle_id(c[0])) > 0)); }},
-        {"version", [](Call& c) { c.out(0, text_out(FILLY_FRONTEND_VERSION)); }},
+        {"version", [](Call& c) { c.out(0, text_out(FILLY_VERSION)); }},
         {"kind", [](Call& c) { c.out(0, text_out(kind_names[lookup(c[0]).index()])); }},
         {"same", [](Call& c) {
             auto& a = lookup(c[0]);
