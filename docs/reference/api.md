@@ -65,6 +65,7 @@ Assets with roughly 18,000 or more meshes can still exceed the ring and abort th
 | `create_scene()` | Return an empty `Scene`. |
 | `create_camera()` | Return a [`Camera`](#camera) with a default projection. Any scene of this renderer can use it. |
 | `load_asset(source, *, strict=False)` | Return an [`Asset`](#assets) that any scene of this renderer can `add()`. |
+| `create_mesh_asset(positions, indices, *, ...)` | Return an `Asset` made from arrays, whose models share its vertex and index buffers. It takes the arguments of `scene.create_mesh()`. See [shared meshes](#shared-meshes). |
 | `load_environment(path)` | Return an [`Environment`](#environment-lighting) from a 2:1 Radiance HDR, PNG, or JPEG panorama. |
 | `create_environment(pixels)` | Return an `Environment` from a NumPy panorama. |
 | `load_environment_ktx(ibl_path, skybox_path=None)` | Return an `Environment` from `cmgen` KTX cubemaps. |
@@ -84,7 +85,7 @@ Assets with roughly 18,000 or more meshes can still exceed the ring and abort th
 
 The names tell what filly does with an object and who owns its storage. `render()` writes into a
 target; materials sample a texture. `create_*` methods return objects whose storage filly owns:
-`RenderTarget`, `Texture`, and `Environment`. `load_*` methods read a file or bytes into objects
+`RenderTarget`, `Texture`, `Environment`, and the `Asset` of `create_mesh_asset()`. `load_*` methods read a file or bytes into objects
 that filly owns. `import_gl_*` methods wrap an OpenGL texture that the host owns:
 `ImportedTarget` and `ImportedTexture`.
 
@@ -93,7 +94,7 @@ integral value, such as `1024.0` or `win.size[0] / 2` for an even width. A fract
 non-finite float raises `ValueError`. Other types, including `bool`, raise `TypeError`.
 
 Every object that has `close()` supports `with`: `Renderer`, `Scene`, `Model`, `Camera`,
-`Light`, `Asset`, `Environment`, `RenderTarget`, `ImportedTarget`, `Texture`, `ImportedTexture`, and the host targets in
+`Light`, `Asset`, `Environment`, `RenderTarget`, `Readback`, `ImportedTarget`, `Texture`, `ImportedTexture`, and the host targets in
 `filly.integrations`. Entering returns the object and raises `FillyError` if it is closed; leaving
 calls `close()`, also when the block raises. An imported camera raises `FillyError` on entering,
 because it closes with its model.
@@ -111,8 +112,11 @@ Values start at zero and change only when that operation completes. Submission i
 incoming host-fence dependencies of the target and of imported textures, bone updates, native
 rendering, and command flush. It can include
 backpressure. Host wait measures fence publication and queuing the GPU dependency in
-`ImportedTarget.acquire()`. It is not GPU completion time. Readback includes native allocation
-and transfer, but excludes conversion to a NumPy array.
+`ImportedTarget.acquire()`. It is not GPU completion time. `readback_ms` is the duration of the
+last `RenderTarget.read()` or `Readback.read()` call from the queued copy to the pixels in the
+array: the wait for the GPU and the copy into the array. For a `Readback`, the time between
+`begin_read()` and `read()` is not included. The allocation of a new array is not included, but
+the copy into a new array includes its first-write page faults (see [readback](#readback)).
 `live_models`, `live_lights`, and `material_copies` count live native resources, including imported
 lights and every model of an asset. Closed Python handles do not contribute. `material_copies` counts node-local
 materials. These counts do not measure GPU memory or shader caches.
@@ -329,7 +333,7 @@ scene option is `scene.pickBlended`. See [web](../how-to/web.md#pick-objects).
 | `camera` | Get or set the active camera. It must belong to the same renderer. A new scene has no camera; getting it then raises `FillyError`. |
 | `load(source, *, strict=False)` | Load glTF or GLB from a path, `Path`, or `bytes`, and return a `Model`. GLB is detected by its `glTF` magic, not by the file name. To show a file more than once, use an [`Asset`](#assets). |
 | `add(asset)` | Return a new `Model` of an [`Asset`](#assets) of the same renderer. |
-| `create_mesh(positions, indices, *, normals=None, uvs=None, colors=None, base_color=(1, 1, 1, 1), metallic=0, roughness=1, emissive=(0, 0, 0), unlit=False, double_sided=False, alpha_mode="opaque")` | Return a `Model` made from arrays. See [generated meshes](#generated-meshes). |
+| `create_mesh(positions, indices, *, normals=None, uvs=None, colors=None, base_color=(1, 1, 1, 1), metallic=0, roughness=1, emissive=(0, 0, 0), unlit=False, double_sided=False, alpha_mode="opaque")` | Return a `Model` made from arrays. See [generated meshes](#generated-meshes). To show the same arrays more than once, use [`renderer.create_mesh_asset()`](#shared-meshes). |
 | `add_directional_light(*, direction, intensity=50000, color=(1, 1, 1))` | Return a `Light`. Intensity is in lux. |
 | `add_sun_light(*, direction, intensity=100000, color=(1, 1, 1), angular_radius_deg=0.545, halo_size=10.0, halo_falloff=80.0)` | Return a sun `Light`: a directional light with a disc. Intensity is in lux. |
 | `add_point_light(*, position, intensity=50000, color=(1, 1, 1), range=10)` | Return a point `Light`. Intensity is in candela; range is in scene units. See [default intensities](#default-intensities). |
@@ -927,7 +931,8 @@ Imported perspective cameras support an omitted far plane. Imported orthographic
 - `memory`: an `AssetMemory` estimate of the memory that the model's asset holds. See
   [Memory](#memory).
 - `update_mesh(*, positions=None, normals=None, uvs=None, colors=None)`: replace vertex data of a
-  [generated mesh](#generated-meshes).
+  [generated mesh](#generated-meshes). For a [shared mesh](#shared-meshes), every model of the
+  asset changes.
 - `close()`: remove the model from its scene and release its material copies. Repeated calls are valid.
 - `closed`: report whether the model, its scene, or its renderer is closed.
 
@@ -973,7 +978,8 @@ models, also models of one asset, have separate material instances. To change on
 ### Assets
 
 `renderer.load_asset(source, *, strict=False)` loads a glTF or GLB file, or `bytes`, and returns
-an `Asset`. It takes the same sources and gives the same warnings as `scene.load()`. The asset
+an `Asset`. `renderer.create_mesh_asset()` returns an `Asset` made from arrays; see
+[shared meshes](#shared-meshes). It takes the same sources and gives the same warnings as `scene.load()`. The asset
 belongs to the renderer, so any of its scenes can show it: `scene.add(asset)` returns a new
 `Model` of it in that scene. `scene.load(source)` is the same as loading an asset, adding it
 once, and closing the asset.
@@ -1023,7 +1029,7 @@ a model cache within a memory budget.
 | `gpu_texture_bytes` | Every mip level of every texture of the asset, in the internal format that the texture has (for example, `SRGB8_A8` for a PNG, a compressed format for a KTX2 texture). |
 | `gpu_geometry_bytes` | Vertex, index, morph target, and bone buffers, as gltfio lays them out. |
 | `gpu_bytes` | The sum of the two. |
-| `cpu_bytes` | The source data that `scene.add()` needs, while the `Asset` is open: the document, its buffers, and filly's tables for custom materials and property animation. Also the clip data that each instance's animator copies. A generated mesh adds its vertex arrays and staging buffers. |
+| `cpu_bytes` | The source data that `scene.add()` needs, while the `Asset` is open: the document, its buffers, and filly's tables for custom materials and property animation. Also the clip data that each instance's animator copies. A generated mesh adds its vertex arrays, and the staging buffers and scratch arrays that its updates allocate. |
 | `instance_gpu_bytes`, `instance_cpu_bytes` | What each model adds: its bone and morph target buffers, and its animator's copy of the clips. These stay until the asset is freed (its `Asset` handle closed and its last model closed), also after the model closes. `asset.close()` releases only the source data. A loaded asset holds one instance before its first model, which that model uses. |
 | `models` | The live models that share the asset. |
 
@@ -1080,8 +1086,8 @@ the pixels, from the different tangent code. `base_color`, `metallic`, and `roug
 `[0, 1]`; `emissive` is nonnegative linear RGB. The `metallic` default is 0, not the glTF
 default 1. `unlit`, `double_sided`, and `alpha_mode` (`"opaque"`, `"mask"`, or `"blend"`) are
 fixed at creation and cannot change later. The other factors are
-`model.material("mesh")` properties. A `"mask"` material cannot be created while
-`output_path` is `"direct"`; see [output path](#output-path).
+`model.material("mesh")` properties. A model with a `"mask"` material cannot be added to a
+scene whose `output_path` is `"direct"`; see [output path](#output-path).
 
 `model.update_mesh(*, positions=None, normals=None, uvs=None, colors=None)` replaces vertex data
 in place. Each array must have N rows. Give at least one. The update:
@@ -1094,15 +1100,21 @@ in place. Each array must have N rows. Give at least one. The update:
 - raises `ValueError` for `colors` on a mesh created without colors.
 
 The update copies the arrays into a ring of three staging buffers per attribute, so the
-caller's arrays are free again when it returns. It allocates nothing after the first three
-updates of an attribute. The new vertices appear at the next `render()`. `update_mesh()` blocks
-only if the driver thread has not yet read the buffer from three updates earlier. Measured CPU
-time per position update on the tested machine: 0.15 ms for 1,089 vertices and 6.9 ms for
-66,049 vertices, most of it the tangent frames.
+caller's arrays are free again when it returns. The first update of an attribute allocates its
+ring, and nothing is allocated after the first three updates. A mesh that you do not update has
+no staging buffers. The new vertices appear at the next `render()`. `update_mesh()` blocks only
+if the driver thread has not yet read the buffer from three updates earlier. Measured CPU time
+per position update on the tested machine: 0.07 ms for 1,089 vertices and 7 to 13 ms for 66,049
+vertices, most of it the tangent frames.
 
-A generated mesh is one model in one scene; it has no `Asset`. For more copies, call
-`create_mesh()` again: each copy has its own vertex buffers, which `update_mesh()` changes
-independently.
+`scene.create_mesh()` is `renderer.create_mesh_asset()`, one `scene.add()`, and `asset.close()`,
+as `scene.load()` is for a file. Each call makes new vertex and index buffers, which
+`update_mesh()` changes for that model only. Each also loads a one-triangle glTF that gives the
+model its node and material (see [design](../explanation/design.md#runtime-textures-and-generated-meshes)).
+On the test laptop (Intel Iris Xe), a box from `create_mesh()` added 0.3 MiB to the process
+private bytes and took 0.13 to 0.4 ms; see
+[performance](performance.md#generated-meshes). To show the same arrays many times, use a
+shared mesh.
 
 `filly.shapes` returns arrays for `create_mesh(**shape)`:
 
@@ -1116,6 +1128,33 @@ independently.
 Each returns a dict with `positions`, `normals`, `uvs` (`float32`), and `indices` (`uint32`),
 centered on the origin. The functions are native (`filly._native.shapes`); `segments` and `rings`
 must be integers.
+
+### Shared meshes
+
+`renderer.create_mesh_asset(positions, indices, *, ...)` takes the arguments of
+`scene.create_mesh()` and returns an [`Asset`](#assets). Each `scene.add(asset)` returns a new
+`Model` that shows the asset's vertex and index buffers. Any scene of the renderer can add it.
+
+```python
+asset = renderer.create_mesh_asset(**filly.shapes.box(0.2, 0.2, 0.2), base_color=(0.8, 0.4, 0.2, 1))
+boxes = [scene.add(asset) for _ in range(1000)]
+filly.set_transforms([box.node("mesh") for box in boxes], transforms)  # transforms: (1000, 4, 4)
+```
+
+| Behavior | Shared mesh |
+| --- | --- |
+| Geometry | One vertex buffer and one index buffer for all models. `asset.memory.gpu_geometry_bytes` does not change when you add models. |
+| Material | Each model has its own material, as models of a glTF asset do: an edit to one model does not change the others. Until a model's material handle is requested (`model.material()` or `node.material()`), the model shows one material instance that all such models of the asset share. Filament's [automatic instancing](performance.md#automatic-instancing) merges the draws of models that show the same material instance and buffers. A model that has a material handle draws separately. Set the factors in `create_mesh_asset()` when all copies have the same material. |
+| `update_mesh()` | Changes the asset's buffers. Every model of the asset, in every scene, shows the new vertices at its next render. |
+| `bounds` | The creation-time bounds of the arrays, for every model. |
+| `close()` | `asset.close()` releases only the placeholder document. Models that exist keep the mesh and can call `update_mesh()`. The buffers stay until the asset and its last model close. |
+
+As for glTF assets, a closed model keeps its Filament entities and its material instance until
+the asset and its last model close. Add the models before the frame loop. On the test laptop,
+1,000 models of a box asset took 42 to 46 ms to add and 3 MiB of private bytes, where 1,000
+`create_mesh()` boxes took 126 to 391 ms and 296 MiB. With 1,000 boxes, a frame of render and
+`finish()` took 2.2 ms for the shared mesh and 4.9 ms for separate meshes. See
+[performance](performance.md#generated-meshes).
 
 ### Animation
 
@@ -1430,11 +1469,65 @@ does.
 | Member | Behavior |
 | --- | --- |
 | `width`, `height` | Size in pixels. Read-only. |
-| `read()` | Return a contiguous `(height, width, 4)` `uint8` RGBA array. The first row is the top of the image. Call `render()` at least once first. |
-| `close()` | Release the target. Repeated calls are valid. |
+| `read(*, out=None)` | Return a contiguous `(height, width, 4)` `uint8` RGBA array. The first row is the top of the image. Call `render()` at least once first. With `out`, write into that array and return it. See [readback](#readback). |
+| `begin_read()` | Queue a copy of the pixels and return a [`Readback`](#readback) at once. |
+| `close()` | Release the target and its readbacks. Repeated calls are valid. |
 | `closed` | Report whether the target or its renderer is closed. |
 
-Readback waits for the GPU. It releases the GIL while it waits.
+### Readback
+
+`read()` waits for the GPU: for the renders before it, then for the copy of the pixels to CPU
+memory. It releases the GIL while it waits and copies.
+
+New storage costs page faults on its first write: 3.4 ms at 1920 x 1080 on the test machine,
+more than the copy itself (0.8 ms). Without `out`, `read()` therefore reuses the storage of the
+last array from `read()` that Python freed, if it has the same size. A loop that replaces its
+array (`image = target.read()`) frees each array after the next read, so two buffers alternate.
+A loop that keeps every array gets new storage for each one. `Renderer.close()` frees the spare
+storage. See [Performance](performance.md#readback-october-29-2026).
+
+With `out`, the pixels go into that array. It must be a writable, C-contiguous `uint8` array of
+shape `(height, width, 4)`, for example from `numpy.empty()`. Another dtype or a read-only array
+raises `TypeError`; another shape or a strided view raises `ValueError`. filly does not convert
+`out`, because the pixels would go into a hidden copy.
+
+`begin_read()` returns a `Readback` at once. The copy follows the renders before the call, and
+later renders into the target do not change it. A loop can therefore render frame N + 1 while the
+GPU copies frame N, and read frame N afterwards:
+
+```python
+pending = None
+for frame in range(frames):
+    update(scene, frame)
+    renderer.render(scene, target)
+    readback = target.begin_read()
+    if pending is not None:
+        save(frame - 1, pending.read())
+    pending = readback
+save(frames - 1, pending.read())
+```
+
+| `Readback` member | Behavior |
+| --- | --- |
+| `ready()` | Return `True` when the GPU has finished the copy. Does not wait for the GPU or for Filament's driver thread: each call queues a check on the driver thread, and a later call sees its answer. `read()` does not need `ready()` first. |
+| `read(*, out=None)` | Wait for the copy and return the pixels as `RenderTarget.read()` does, then close the readback. Valid once. Releases the GIL while it waits and copies. Raises `FillyError` if the GPU does not finish the copy within 10 s, or if Filament's driver thread does not start the read within 10 s. |
+| `frame_number` | `stats.frames_rendered` when `begin_read()` queued the copy. Read-only. |
+| `close()` | Release the copy without reading it. Repeated calls are valid. |
+| `closed` | `True` after `read()` or `close()`, and when the target or the renderer is closed. Calls other than `close()`, `closed`, and `frame_number` then raise `FillyError`. |
+
+- **Memory.** Each readback in flight holds a pixel buffer of the target's size in the driver's
+  memory: 8 MiB at 1920 x 1080. The target keeps a released buffer for its next readback, and
+  frees all of them when it closes.
+- **Order.** Readbacks of one target can be read in any order, and any number can be in flight.
+  In the measurements, two in flight were not faster than one.
+- **Lifetime.** A readback keeps its target's storage while it is open, also when no other
+  reference to the target remains. `close()` of the target or of the renderer closes its
+  readbacks.
+- **Throughput.** For DamagedHelmet at 1920 x 1080 on the test machine, a frame of `render()`
+  and `read()` took 3.0 ms on NVIDIA RTX A500 and 3.4 ms on Intel Iris Xe, against 6.0 and 8.5 ms
+  before the October 29, 2026 change. With one readback in flight, a frame took 1.7 ms on both.
+  `render()` and `finish()` alone took 0.55 and 0.95 ms. See
+  [Performance](performance.md#readback-october-29-2026).
 
 ## ImportedTarget
 
@@ -1503,8 +1596,8 @@ connection while the renderer is open, the renderer closes itself first, and lat
 
 `render()`, the outermost `acquire()` enter and exit, native asset loading, environment
 filtering, `finish()`, `close()` of `Renderer`, `Scene`, `RenderTarget`, `ImportedTarget`, and
-`ImportedTexture`, `Texture.update()`, texture assignment, mesh creation and updates, and entering
-`ImportedTexture.write()` release the GIL. Other Python threads can run during these
+`ImportedTexture`, `Texture.update()`, texture assignment, mesh creation and updates, entering
+`ImportedTexture.write()`, and `read()` of `RenderTarget` and `Readback` release the GIL. Other Python threads can run during these
 calls. Native asset loading includes the glTF checks and preparation. Normal rendering does not
 perform a full GPU completion wait.
 

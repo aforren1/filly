@@ -214,6 +214,7 @@ Keyword arguments become name-value pairs in UpperCamelCase, for example
 | --- | --- |
 | Matrices | 4 x 4 `double` with column vectors, as `makehgtform` makes them. The mathematics is the same as the Python row-major arrays. |
 | Images | H x W x C `uint8` or `single`, first row at the top. `read()` returns H x W x 4 `uint8`. |
+| Readback | `target.beginRead()` returns a `filly.Readback`, as in Python. `read()` of a target or a readback has no `out` argument: MATLAB arrays are values, so each read returns a new array. |
 | Vectors | Row vectors, for example `[0 1 0]`. `double` and `single` are accepted. |
 | Positions in a list | 1-based: mesh triangle indices, animation and variant indices, material slots. |
 | glTF node indices | 0-based, as in the file: `model.node(0)`, `node.index`. |

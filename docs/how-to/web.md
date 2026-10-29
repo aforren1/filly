@@ -197,6 +197,14 @@ quad.updateMesh({ positions: newPositions });  // the same vertex count
 Arrays are flat: 3 numbers per position and normal, 2 per UV, 4 per color, and 3 indices per
 triangle. The `shapes` functions need the loaded module, so call them after `createRenderer()`.
 
+To show the same arrays many times, make an asset once. Its models share one vertex and index
+buffer; see [shared meshes](../reference/api.md#shared-meshes):
+
+```javascript
+const box = renderer.createMeshAsset({ ...shapes.box({ width: 0.2, height: 0.2, depth: 0.2 }) });
+const boxes = Array.from({ length: 100 }, () => scene.add(box));
+```
+
 ## Use textures
 
 ```javascript
@@ -269,6 +277,30 @@ const rgba = await target.read();  // Uint8Array, rows from the top
 ```
 
 A readback waits for the GPU. Do not read in a timing-critical frame.
+
+To read every frame without a wait in the frame, queue the copy with `beginRead()` and read it
+on a later frame. Later renders into the target do not change the copy:
+
+```javascript
+const pending = [];
+function frame()
+{
+  renderer.render(scene, target);
+  pending.push(target.beginRead());
+  while (pending.length > 0 && pending[0].ready())
+  {
+    pending.shift().read().then((rgba) => store(rgba));
+  }
+  renderer.handBack();
+  requestAnimationFrame(frame);
+}
+```
+
+`Readback` has `ready()`, `await read()` (the `Uint8Array`, then the readback closes),
+`frameNumber` (`framesRendered` when `beginRead()` queued the copy), `close()`, and `closed`, as
+in Python (see [readback](../reference/api.md#readback)). WebGL signals the copy only after the
+page returns to the event loop, so `ready()` becomes `true` one or more frames after
+`beginRead()`. The web build keeps Filament's own readback, and `read()` has no `out` argument.
 
 ## Pick objects
 

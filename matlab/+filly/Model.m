@@ -73,7 +73,8 @@ classdef Model < filly.Object
 
         function updateMesh(obj, varargin)
             % Replace vertex arrays of a generated mesh. Options: 'Positions', 'Normals', 'Uvs',
-            % 'Colors', each with one row per vertex.
+            % 'Colors', each with one row per vertex. Every model of the same asset from
+            % renderer.createMeshAsset() shows the change.
             o = filly.internal.options(struct('Positions', [], 'Normals', [], 'Uvs', [], 'Colors', []), varargin);
             filly_mex('Model.updateMesh', obj.Id, o.Positions, o.Normals, o.Uvs, o.Colors);
         end

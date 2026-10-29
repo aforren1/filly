@@ -1,5 +1,6 @@
 classdef Asset < filly.Object
-    % ASSET  A loaded glTF asset that scene.add() instantiates, from renderer.loadAsset().
+    % ASSET  An asset that scene.add() instantiates, from renderer.loadAsset() or
+    %   renderer.createMeshAsset().
     %   close() releases the source data; models already made from it stay.
 
     properties (Dependent, SetAccess = private)

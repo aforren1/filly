@@ -170,18 +170,53 @@ glTF instance again, because it still has the glTF texture of the slot, and copi
 and render state from the old handle. The texture indices are not copied, because they select
 the UV sets of the glTF textures. Nothing is compiled.
 
-A generated mesh is loaded as a one-triangle glTF with the requested material and attributes,
-then its renderable gets the mesh's own vertex and index buffers (`setGeometryAt()`). The loader
-therefore gives it the same material as a glTF file with those factors, and the model gets
-nodes, material handles, and closing without a second code path. The placeholder's
-accessor bounds are the mesh bounds. Positions, tangent frames, UVs, and colors are separate
-vertex buffers, so an update uploads only what changed. A mesh without colors gets a white
-`UBYTE4` color buffer, and `UV1` reads the `UV0` buffer: archive entries serve every material,
-so they always read both attributes and multiply by the vertex color. Creation uses Filament's
-`SurfaceOrientation` for tangent frames. It allocates on every build, so updates use a copy of
-its method that writes into the staging buffer; a test checks that both give the same image.
-Missing normals are area-weighted vertex normals, because shared vertices of an indexed mesh
-should be smooth; flat faces need their own vertices.
+A generated mesh is an asset: a one-triangle glTF with the requested material is loaded, and
+each model's renderable gets the mesh's own vertex and index buffers (`setGeometryAt()`). The
+loader therefore gives it the same material as a glTF file with those factors, and the model
+gets nodes, material handles, and closing without a second code path. The placeholder's
+accessor bounds are the mesh bounds. `scene.create_mesh()` adds the asset once and releases its
+source data, as `scene.load()` does; `renderer.create_mesh_asset()` keeps it, so that every
+`scene.add()` makes one more gltfio instance whose renderable shows the same buffers.
+
+The cost of a generated mesh is mostly buffer objects, not bytes. On the tested Intel driver,
+each OpenGL buffer object added about 40 KiB to the process private bytes, also for a 24-vertex
+box. Before October 29, 2026, a box had about ten: four vertex buffers and an index buffer of
+its own, and gltfio's buffers for the placeholder triangle (positions, tangent frames, UVs, the
+dummy attributes, and the generated indices). It took 0.47 MiB and 0.43 to 0.61 ms in a scene
+of 1,000 boxes (see [performance](../reference/performance.md#generated-meshes)). Now:
+
+- The mesh keeps its attributes as blocks of one vertex buffer object: positions, tangent
+  frames, UVs, then colors. An update sends only the blocks that changed
+  (`VertexBuffer::setBufferAt()` with a byte offset), as the separate buffers did before. A mesh
+  without colors gets a white `UBYTE4` color block, and `UV1` reads the `UV0` block: archive
+  entries serve every material, so they always read both attributes and multiply by the vertex
+  color.
+- The placeholder has no UV attribute: without textures the material key does not use it, and
+  gltfio gives each attribute its own buffer object.
+- Loading constructs the stb, KTX2, and WebP texture providers only for documents with images
+  (0.05 ms and 21 KiB per load), and the placeholder load does not wait for the driver thread
+  (0.13 ms), as the mesh upload never did.
+
+gltfio's placeholder buffers remain, about 0.2 MiB per asset. Taking them over would need
+gltfio's vertex buffer, which `FilamentAsset` does not expose, and a placeholder asset shared by
+several meshes would keep the instances of closed meshes, because gltfio cannot destroy one
+instance. A shared mesh pays this once.
+
+Filament's automatic instancing merges draws only if they have the same material instance, and
+each gltfio instance creates its own. Models of a shared mesh asset therefore show one material
+instance of the asset, copied from the first model's instance before any edit. A material handle
+(`model.material()` or `node.material()`) first puts the model's own instance back, which still
+has the asset's values because only handles write to it. So each model has its own material, as
+the models of a glTF asset do, and models that nobody edits draw together. The alternative, an
+asset-level material that every model shares, would make `model.material()` mean something
+different for mesh assets than for glTF assets.
+
+Creation uses Filament's `SurfaceOrientation` for tangent frames. It allocates on every build, so
+updates use a copy of its method that writes into the staging buffer; a test checks that both
+give the same image. The staging buffers and the scratch arrays of the copy are allocated by the
+first update, so meshes that never change do not have them. Missing normals are area-weighted
+vertex normals, because shared vertices of an indexed mesh should be smooth; flat faces need
+their own vertices.
 
 An imported texture (`ImportedTexture`) uses the same fences as a shared render target, in the
 other direction.
@@ -496,6 +531,31 @@ own test. It does not use texture providers (an `image` with `colorTexture`), wh
 image and then replaces the texture name. The legacy GL path records the program and the
 texture in a display list, so the adapter rebuilds the list in its first draw, with the
 premultiplied program in place. Other backends need separate tests.
+
+## Readback
+
+`RenderTarget.read()` and `begin_read()` do not use Filament's `Renderer::readPixels()`. For each
+read, that call makes a new pixel buffer object with `GL_STATIC_DRAW`, and its result arrives
+only when the driver thread checks the fence: at a later frame, or in `Engine::flushAndWait()`.
+`flushAndWait()` also waits for every frame after the read, so a caller cannot wait for one
+readback while the GPU renders the next frame. At 1920 x 1080 on NVIDIA, the new buffer also
+moved the 1.3 ms transfer into the map call, after the fence. The earlier `read()` also copied
+into a new allocation for each frame, whose page faults cost more than the copy.
+
+filly creates the color texture of a Filament-owned target itself, in Filament's context, and
+gives it to Filament with `Texture::Builder::import()`. A readback is a task on Filament's driver
+thread, in command-stream order: it attaches the texture to a framebuffer of its own, reads it
+with `glReadPixels()` into a kept `GL_STREAM_READ` pixel buffer, and inserts a fence. `read()`
+queues a second task that waits for that fence only, maps the buffer, and copies the rows into
+the destination with the vertical flip, while the calling thread waits. Filament caches GL
+bindings, so each task restores the read framebuffer, the pixel-pack buffer, and the pack
+alignment that it changes. The tasks use the same `Platform::createSync()` hook as the host
+fences (see [shared OpenGL textures](#shared-opengl-textures)). Filament does not delete
+imported textures, and a shared context keeps buffers and textures after Filament's context is
+gone, so a target deletes its texture and its pixel buffers when it closes.
+
+The web build keeps Filament's `readPixels()`: WebGL has no blocking wait, and WebGL2 copies the
+buffer with `getBufferSubData()`.
 
 ## Dependencies
 

@@ -198,7 +198,9 @@ void mesh_input(const val& source, size_t vertices, MeshInput& input) {
     attribute(source, "colors", 4, vertices, input.colors, input.arrays.colors);
 }
 
-Model create_mesh(Scene& scene, const val& options) {
+// The options of Scene.createMesh() and Renderer.createMeshAsset().
+template <class Owner, class Result, Result (Owner::*create)(const MeshArrays&, const MeshMaterial&)>
+Result from_arrays(Owner& owner, const val& options) {
     MeshInput input;
     const val positions = options["positions"];
     if (positions.isUndefined() || positions.isNull()) throw std::invalid_argument("positions is required");
@@ -217,7 +219,7 @@ Model create_mesh(Scene& scene, const val& options) {
     if (!options["unlit"].isUndefined()) material.unlit = options["unlit"].as<bool>();
     if (!options["doubleSided"].isUndefined()) material.double_sided = options["doubleSided"].as<bool>();
     if (!options["alphaMode"].isUndefined()) material.alpha_mode = options["alphaMode"].as<std::string>();
-    return scene.create_mesh(input.arrays, material);
+    return (owner.*create)(input.arrays, material);
 }
 
 void update_mesh(Model& model, const val& options) {
@@ -590,7 +592,7 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("loadBytes", &load_bytes)
         .function("loadPath", &load_path)
         .function("add", &Scene::add)
-        .function("createMesh", &create_mesh)
+        .function("createMesh", &from_arrays<Scene, Model, &Scene::create_mesh>)
         .function("addDirectionalLight", &Scene::add_directional_light)
         .function("addSunLight", &Scene::add_sun_light)
         .function("addPointLight", &Scene::add_point_light)
@@ -673,9 +675,18 @@ EMSCRIPTEN_BINDINGS(filly) {
 
     class_<Readback>("Readback")
         .function("ready", &Readback::ready)
-        .function("take", optional_override([](Readback& readback) {
-            return typed_copy("Uint8Array", readback.take());
-        }));
+        .function("read", optional_override([](Readback& readback) {
+            // The rows are contiguous from the top here, so one copy fills the JavaScript array.
+            val pixels = val::null();
+            const size_t size = size_t(readback.width()) * readback.height() * 4;
+            readback.read([&](const uint8_t* top, ptrdiff_t) {
+                pixels = val::global("Uint8Array").new_(typed_memory_view(size, top));
+            });
+            return pixels;
+        }))
+        .function("frameNumber", optional_override([](const Readback& readback) { return double(readback.frame_number()); }))
+        .function("close", &Readback::close)
+        .function("closed", &Readback::closed);
 
     class_<RenderTarget>("RenderTarget")
         .function("width", &RenderTarget::width)
@@ -700,6 +711,7 @@ EMSCRIPTEN_BINDINGS(filly) {
         .function("createCamera", &Renderer::create_camera)
         .function("loadAssetBytes", &load_asset_bytes)
         .function("loadAssetPath", &load_asset_path)
+        .function("createMeshAsset", &from_arrays<Renderer, Asset, &Renderer::create_mesh_asset>)
         .function("loadEnvironmentPath", &Renderer::load_environment)
         .function("loadEnvironmentKtxPath", &Renderer::load_environment_ktx)
         .function("createEnvironment", optional_override([](Renderer& renderer, const val& pixels, uint32_t width,

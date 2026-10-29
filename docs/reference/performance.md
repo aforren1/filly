@@ -522,6 +522,108 @@ NVIDIA RTX A500:
   instances on Intel the GPU frame went from 6.1 to 4.3 ms; for 20,000, `cpu_submit_ms` went
   from 28 to 14 ms, because frames without instancing filled Filament's command queue.
 
+## Generated meshes
+
+Measured on October 29, 2026. Scene: N boxes (`filly.shapes.box(0.6, 0.6, 0.6)`, 24 vertices)
+on a grid, one directional light, 512 x 512 offscreen target, `msaa = 4`. Modes:
+
+- **Separate:** N `scene.create_mesh(**box)` calls.
+- **Shared:** one `renderer.create_mesh_asset(**box)` and N `scene.add(asset)` calls. No model
+  has a material handle, so all show one material instance.
+- **glTF asset:** one `renderer.load_asset()` of the same box as a GLB and N `scene.add()`
+  calls. Before this change, this was the only way to share the buffers; each model has its own
+  material instance.
+
+"Before" is the tree of October 27, 2026; "after" is this change. Each configuration ran in a
+fresh process: creation, then 30 warmup frames, 120 frames of `render()` and `target.read()`,
+and 120 frames of `render()` and `finish()`. 3 rounds; each round ran every configuration once,
+in an order rotated by one per round, and the two builds were interleaved. Cells: median of the
+per-round values, range in brackets. "Create" is the wall time of the N calls and of setting
+each model's position. "Private" is the process private bytes that creation added, after a
+`finish()`; the empty renderer had 750 MiB (Intel) or 670 MiB (NVIDIA). "Peak WS" is the peak
+working set of the process, with the frames; it was 282 MiB (Intel) or 142 MiB (NVIDIA) before
+creation. Frame times are medians of one process, in ms. AC power.
+
+Intel Iris Xe:
+
+| Mode | Build | N | Create (ms) | Private (MiB) | Peak WS (MiB) | Render + read | Render + finish |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Separate | before | 100 | 108 [97-152] | 64 [64-65] | 336 [336-336] | 3.4 [3.2-3.5] | 1.8 [1.7-2.1] |
+| Separate | after | 100 | 15 [15-16] | 29 [29-29] | 308 [308-308] | 3.6 [3.2-4.0] | 2.1 [2.0-2.1] |
+| Shared | after | 100 | 6 [4-6] | 0 [0-0] | 293 [293-293] | 3.0 [2.9-3.1] | 1.7 [1.5-1.8] |
+| Separate | before | 1,000 | 551 [429-609] | 480 [478-481] | 553 [552-553] | 6.9 [6.7-7.9] | 9.4 [9.3-10.4] |
+| Separate | after | 1,000 | 159 [126-391] | 296 [296-297] | 436 [436-436] | 6.6 [6.2-10.3] | 4.9 [4.9-9.2] |
+| glTF asset | before | 1,000 | 105 [97-135] | 23 [23-23] | 326 [326-326] | 5.6 [5.0-5.8] | 4.0 [3.6-4.3] |
+| Shared | after | 1,000 | 45 [42-46] | 3 [3-3] | 298 [297-298] | 3.7 [3.1-3.8] | 2.2 [2.0-2.3] |
+| Separate | before | 3,000 | 2,899 [2,402-2,964] | 1,402 [1,401-1,403] | 1,022 [1,021-1,022] | 26.3 [26.3-26.6] | 24.1 [23.6-25.0] |
+| Separate | after | 3,000 | 533 [424-692] | 895 [894-895] | 715 [714-715] | 21.2 [11.8-21.9] | 20.2 [20.2-20.2] |
+| Shared | after | 3,000 | 162 [104-175] | 11 [11-11] | 315 [314-315] | 4.7 [3.9-5.0] | 3.3 [2.6-3.6] |
+
+NVIDIA RTX A500, N = 1,000:
+
+| Mode | Build | Create (ms) | Private (MiB) | Peak WS (MiB) | Render + read | Render + finish |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Separate | before | 618 [353-788] | 59 [59-59] | 219 [219-219] | 2.7 [2.6-4.5] | 1.3 [1.1-3.8] |
+| Separate | after | 151 [134-174] | 28 [28-28] | 193 [193-193] | 2.6 [2.4-2.7] | 1.2 [1.1-1.2] |
+| glTF asset | before | 138 [112-138] | 27 [27-27] | 191 [191-192] | 2.6 [2.3-3.2] | 1.2 [0.9-1.4] |
+| Shared | after | 40 [38-42] | 3 [3-3] | 170 [170-170] | 2.0 [2.0-2.3] | 0.8 [0.8-0.8] |
+
+- **Memory of a separate mesh.** On Intel, a box went from 0.47 to 0.30 MiB of private bytes.
+  The integrated GPU allocates buffer objects in system memory, so these bytes are mostly
+  driver allocations. On NVIDIA the buffers are in GPU memory, and a box added 0.06 MiB of
+  private bytes before and 0.03 MiB after.
+- **Creation.** Creation of 1,000 separate boxes fell from 0.43-0.61 s to 0.13-0.39 s on Intel.
+  Before, the time per box grew with the number of models in the scene; see the next section.
+- **Shared meshes.** 3,000 shared boxes used 11 MiB of private bytes where 3,000 separate boxes
+  used 895 MiB, and they rendered in 4.7 ms instead of 21 ms with readback. Models that show one
+  material instance draw together: at 1,000 boxes, render plus finish took 2.2 ms against
+  4.0 ms for the glTF asset, whose models have their own material instances, on Intel, and
+  0.8 against 1.2 ms on NVIDIA.
+- **Frames of separate meshes.** Render plus finish of 1,000 separate boxes fell from 9.4 to
+  4.9 ms on Intel, and an earlier run on the same day gave 9.4 and 4.5 ms.
+  Render plus read did not change beyond the spread. Each mesh now binds one vertex buffer
+  instead of four; this run does not show which part of the frame changed. Intel frame times
+  vary between rounds (for example 6.2 to 10.3 ms); compare the ranges, not only the medians.
+- **Updates.** `update_mesh(positions=...)` of a 1,089-vertex plane took 0.07 to 0.08 ms before
+  and after the change, and 7.6 to 13.1 ms (before) against 7.4 to 8.7 ms (after) for 66,049
+  vertices: no difference beyond the spread (3 interleaved processes each, 250 updates, each
+  followed by a render).
+
+### Where the cost of a generated mesh went
+
+Measured with a scratch build of the October 27 tree that recorded the time and the change of
+the process private bytes around each step of `create_mesh()`, for 1,000 boxes on Intel. The
+memory column comes from a second run that called `Engine::flushAndWait()` before and after each
+step, so that the allocations of Filament's driver thread count in the step that queued them.
+
+| Step | ms per box | KiB per box |
+| --- | ---: | ---: |
+| Build the placeholder glTF document | 0.022 | 3 |
+| Parse and prepare it | 0.018 | 5 |
+| `createInstancedAsset()`: gltfio builds the placeholder's buffers | 0.054 | 78 |
+| `createInstance()`: entities and material instance | 0.043 | 8 |
+| Construct the stb, KTX2, and WebP texture providers | 0.043 | 21 |
+| `ResourceLoader::loadResources()`: placeholder upload and tangents | 0.011 | 167 |
+| `flushAndWait()` after the load | 0.135 | 0 |
+| Add the instance to the scene | 0.033 | 0 |
+| Build the mesh's own 4 vertex buffers and index buffer | 0.002 | 209 |
+| `SurfaceOrientation`, CPU copies, upload, `setGeometryAt()` | 0.010 | 1 |
+| Total | 0.37 | 492 |
+
+The memory is in buffer objects: on this driver each one added about 40 KiB, also for 24
+vertices. A UV attribute on the placeholder added 41 KiB (a one-triangle GLB loaded with and
+without it: 261 and 220 KiB). The staging buffers of `update_mesh()` were already allocated at
+the first update, and `SurfaceOrientation` cost 0.002 ms. The change keeps the mesh in one
+vertex buffer object, drops the placeholder's UVs, constructs texture providers only for
+documents with images, and does not wait after the placeholder load. gltfio's other placeholder
+buffers remain, about 0.2 MiB per separate mesh; see
+[design](../explanation/design.md#runtime-textures-and-generated-meshes).
+
+`scene.add()` also updated the diffuse-transmission settings of every model in the scene, so
+the time of an add grew with the number of models: 0.044 ms for the first 500 models of a shared
+box and 0.20 ms for models 3,501 to 4,000 (2 processes). It now updates only the new model:
+0.035 to 0.043 ms for every batch of 500, up to 4,000 models.
+
 ## Picking
 
 Measured on October 12, 2026 with the build that added `Renderer.pick()`. 1920 x 1080 offscreen,
@@ -642,6 +744,108 @@ job ran on the machine for part of an earlier round; these rounds ran without it
   test build) did not change these numbers, so the web build does not render it. A pick after
   12 frames without picks answered after 13 to 20 ms.
 
+## Readback (October 29, 2026)
+
+Measured on October 29, 2026, before and after the change that replaced Filament's
+`readPixels()` with filly's own pixel buffers and added `RenderTarget.begin_read()` and
+`read(out=...)`. Both builds: Python 3.11, built from the same tree except for that change. AC,
+Balanced. Scene: DamagedHelmet filling the view, one directional light, the small studio
+environment, `output_path = "exact"`. Each frame is `render()` followed by the operation in the
+column, without pacing. 60 warmup frames, 300 measured frames. 3 rounds; each round ran every
+configuration once in a fresh process, in an order rotated by one per round. Cells: median of
+the per-round medians of the frame time, range in brackets, ms. CPU load before each run: 12 to
+44%, median 30% (a video call was open); runs waited while it was above 45%. Ranges that overlap
+mean no measured difference; this is frequent on Intel, whose clocks change with load.
+
+### Cost of the earlier read()
+
+One process per GPU, 1920 x 1080, after a render and `finish()`. The native phases of `read()`
+were timed with `std::chrono::steady_clock` in a probe build. Filament's readback path on its
+driver thread was then repeated by a probe task on the same thread, with a timer around each
+step (median of 28 reads). The NVIDIA numbers agree with an `nsys` trace of the unchanged build:
+`glMapBufferRange` took 1.34 ms, followed by 3.7 ms without GL calls.
+
+| Step | NVIDIA RTX A500 | Intel Iris Xe |
+| --- | ---: | ---: |
+| `read()` call, wall time | 7.88 | 7.66 |
+| Native `read()` | 6.94 | 6.82 |
+| of which: `Engine::flushAndWait()`, which runs the steps below on the driver thread | 6.92 | 6.80 |
+| of which: allocation, `readPixels()` call, message pump, NumPy array | 0.05 | 0.06 |
+| Probe: new `GL_STATIC_DRAW` buffer, `glReadPixels()`, fence | 0.28 | 0.25 |
+| Probe: `glFinish()` | 0.11 | 2.65 |
+| Probe: `glMapBufferRange()` | 1.30 | 0.00 |
+| Probe: flip copy into a new allocation | 4.34 | 4.11 |
+| Probe: the same copy into reused memory | 0.93 | 0.82 |
+| Probe: unmap and delete the buffer | 0.05 | 0.03 |
+
+- **Page faults were the largest part.** Each `read()` allocated a new 8 MiB array, and the copy
+  into it made Windows map and zero each page on first write: 3.4 ms of the 4.3 ms copy, on both
+  GPUs. A CPU-only copy between two heap buffers showed the same difference.
+- **The GPU transfer.** On NVIDIA, the new `GL_STATIC_DRAW` buffer made `glMapBufferRange()` do
+  the 1.3 ms transfer over PCIe. With a kept buffer, the transfer ran before the fence and the
+  map took 0.01 ms. On Intel, `glFinish()` waited 1.6 to 2.6 ms for the GPU's copy into the
+  buffer.
+- **The wait.** `flushAndWait()` waits for all queued GPU work and then for the driver thread.
+  It cannot wait for one readback while a later frame renders.
+- At 512 x 512, the native `read()` took 1.26 ms on NVIDIA (map 0.38, copy into new memory 0.41)
+  and 1.41 ms on Intel (`glFinish()` 0.41, copy 0.59).
+- 0.9 ms of the wall time at 1920 x 1080 was outside the native call. Most of it is the release
+  of the previous frame's array, which the loop drops after each read: releasing an 8 MiB array
+  from the earlier `read()` took 0.7 to 1.1 ms in a separate measurement.
+
+### After the change
+
+`read()` now waits only for its own fence and copies once, from a kept `GL_STREAM_READ` pixel
+buffer into the array. In an `nsys` trace on NVIDIA at 1920 x 1080, MSAA 1 (120 frames), render
+plus `read(out=...)` took 2.95 ms per frame, of which the driver thread waited 1.46 ms in
+`glClientWaitSync()` for the transfer. With one readback in flight, a frame took 1.69 ms, and
+the wait 0.12 ms.
+
+Frame time, ms. "Before" is `read()` in the build without the change. "Pipelined" renders frame
+N, calls `begin_read()`, then reads the readback of frame N - 1 (1 in flight) or N - 2 (2 in
+flight); `read(out=...)` cycles through 2 or 3 arrays. `render()` and `finish()` took the same
+time in both builds.
+
+| GPU | Size | MSAA | render + `finish()` | render + `read()`, before | render + `read()` | render + `read(out=...)` | pipelined `read()`, 1 in flight | pipelined `read(out=...)`, 1 in flight | pipelined `read(out=...)`, 2 in flight |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| NVIDIA | 512 x 512 | 1 | 0.33 [0.32-0.39] | 1.53 [1.35-1.65] | 0.70 [0.70-0.78] | 0.73 [0.67-0.74] | 0.57 [0.52-0.60] | 0.53 [0.48-0.56] | 0.55 [0.53-0.60] |
+| NVIDIA | 512 x 512 | 4 | 0.42 [0.40-0.44] | 1.57 [1.52-2.05] | 0.78 [0.76-0.86] | 0.83 [0.80-0.86] | 0.61 [0.60-0.67] | 0.63 [0.61-0.63] | 0.60 [0.60-0.64] |
+| NVIDIA | 1920 x 1080 | 1 | 0.55 [0.54-0.64] | 6.01 [5.69-6.46] | 2.98 [2.65-4.73] | 3.27 [2.72-5.18] | 1.70 [1.68-3.16] | 2.14 [1.96-2.84] | 2.60 [2.05-2.60] |
+| NVIDIA | 1920 x 1080 | 4 | 1.25 [1.06-1.28] | 13.49 [10.45-13.79] | 4.32 [3.55-6.16] | 3.89 [3.56-5.70] | 2.33 [1.99-2.35] | 2.55 [2.02-3.36] | 2.61 [1.95-3.11] |
+| Intel | 512 x 512 | 1 | 0.68 [0.61-0.84] | 1.94 [1.47-2.11] | 1.20 [0.91-1.97] | 1.36 [1.15-2.93] | 0.50 [0.44-0.59] | 0.50 [0.37-0.54] | 0.54 [0.47-0.61] |
+| Intel | 512 x 512 | 4 | 0.70 [0.64-0.70] | 1.45 [1.25-1.82] | 0.95 [0.85-0.98] | 0.88 [0.82-1.15] | 0.44 [0.43-0.57] | 0.43 [0.43-1.06] | 0.48 [0.44-0.51] |
+| Intel | 1920 x 1080 | 1 | 0.95 [0.93-0.99] | 8.48 [6.42-10.77] | 3.37 [2.70-5.89] | 3.00 [2.95-3.82] | 1.72 [1.66-2.34] | 1.78 [1.66-2.16] | 1.86 [1.79-2.06] |
+| Intel | 1920 x 1080 | 4 | 2.20 [2.07-2.82] | 14.24 [6.91-16.10] | 4.29 [4.02-6.34] | 4.65 [3.83-5.13] | 2.40 [2.31-3.21] | 2.55 [2.50-2.97] | 2.71 [2.63-3.45] |
+
+Frames per second over the measured loop, including the reads after the last frame:
+
+| GPU | Size | MSAA | `read()`, before | `read()` | `read(out=...)` | pipelined `read()`, 1 in flight | pipelined `read(out=...)`, 1 in flight | pipelined `read(out=...)`, 2 in flight |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| NVIDIA | 512 x 512 | 1 | 630 [586-716] | 1370 [1227-1391] | 1312 [1272-1454] | 1634 [1508-1823] | 1795 [1629-1988] | 1685 [1529-1797] |
+| NVIDIA | 512 x 512 | 4 | 605 [472-647] | 1241 [1119-1274] | 1147 [1097-1200] | 1568 [1431-1598] | 1538 [1478-1588] | 1548 [1488-1579] |
+| NVIDIA | 1920 x 1080 | 1 | 150 [148-154] | 311 [201-370] | 278 [191-350] | 501 [304-503] | 413 [311-446] | 334 [329-457] |
+| NVIDIA | 1920 x 1080 | 4 | 75 [73-96] | 214 [156-274] | 242 [171-276] | 397 [375-484] | 362 [271-461] | 345 [294-489] |
+| Intel | 512 x 512 | 1 | 501 [462-672] | 812 [551-1076] | 722 [334-867] | 1947 [1502-2093] | 1953 [1806-2506] | 1634 [1522-2089] |
+| Intel | 512 x 512 | 4 | 664 [527-790] | 1018 [1005-1142] | 1122 [804-1183] | 1979 [1675-2084] | 2147 [894-2167] | 1941 [1827-2042] |
+| Intel | 1920 x 1080 | 1 | 94 [94-125] | 290 [163-358] | 313 [251-327] | 567 [394-589] | 550 [444-578] | 523 [470-525] |
+| Intel | 1920 x 1080 | 4 | 76 [66-113] | 211 [149-239] | 212 [174-258] | 395 [302-414] | 361 [325-381] | 356 [279-362] |
+
+- **Synchronous read.** A frame with `read()` took 1.5 to 3.3 times less time than before. What
+  remains at 1920 x 1080 is the render, the GPU's transfer (1.4 ms on NVIDIA in the probe, with a
+  kept buffer), and the copy into the array (0.8 ms).
+- **New arrays.** `read()` without `out` was as fast as `read(out=...)`, because the loop drops
+  each array and `read()` reuses its storage. A loop that keeps every array pays the page faults
+  of new storage, 3.4 ms per 1920 x 1080 frame, on each read.
+- **Pipelined read.** One readback in flight saved a further 1.3 to 2 ms per 1920 x 1080 frame,
+  because the GPU's transfer overlaps the next frame. Two in flight were not faster.
+- **Intel ranges.** Several Intel rows have wide ranges, for example "before" at 1920 x 1080. At
+  512 x 512 with MSAA 1, the ranges of `read()` before and after the change overlap; the
+  pipelined rows do not overlap with either.
+- **MATLAB.** On NVIDIA at 1920 x 1080 (2 runs, 200 frames), `render()` plus `read()` in MATLAB
+  R2023a took 25 ms before and 16.5 ms after the change, and 12 ms with one readback in flight.
+  The conversion to MATLAB's column-major layout and MATLAB's allocation remain; they were not
+  split.
+
 ## GPU frame time validation
 
 `Stats.gpu_frame_ms` exposes Filament's frame timer. On October 12, 2026 it was compared with
@@ -692,7 +896,7 @@ exact path is not remeasured.
 | 3 | 0.94 ms GPU (1.0 ms before the change) | Do not use FXAA. | Aliased edges. | No |
 | 4 | 0.4 to 1.2 ms GPU (0.17 to 0.48 ms at 512) for plain to anisotropic materials | Split the archive's extended entries into specialized entries. | More archive entries increase its size. | Yes (material build) |
 | 5 | 0.68 ms GPU (0.36 ms at 512) | Turn shadows off where a stimulus does not need them. | Visual. | No |
-| 6 | about 0.1 ms CPU per frame | Run the encode pass without a second Filament view: raw GL on Filament's driver thread through the platform hook. | filly would have to restore every GL state that Filament caches, and create the textures itself to know their names. Not tried. | Yes |
+| 6 | about 0.1 ms CPU per frame | Run the encode pass without a second Filament view: raw GL on Filament's driver thread through the platform hook. | filly would have to restore every GL state that Filament caches, and create the textures itself to know their names. Not tried for the encode pass; the readback does both since October 29, 2026 (see [readback](#readback-october-29-2026)). | Yes |
 | 7 | about 0.39 ms GPU at 1080p (0.06 ms at 512) | Draw the shared texture in PsychoPy with a blit, as the pyglet adapter did when this was measured, when no transform, mask, or blending is needed. | Loses `ImageStim` placement, opacity, and masking for that path. Estimated from the pyglet blit (0.384 ms) against `ImageStim` (0.776 ms); not measured in PsychoPy. | No (adapter) |
 | 8 | about 2 ms GPU for DamagedHelmet at 1080p (2.32 ms Intel, 0.28 ms NVIDIA) | Render on the NVIDIA GPU (`SHIM_MCCOMPAT=0x800000001`, a driver profile, or a per-executable GPU preference). | On this Optimus laptop the panel is driven by the Intel GPU, so the host window's frames are copied between adapters. The latency of that copy is not measured. | No |
 | - | not measured | Render and acquire later in the frame so that `acquire()` finds the frame already published. | Changes the experiment loop. | No |

@@ -29,6 +29,7 @@ filly is a thin layer over Filament for most tasks. It exists for these reasons:
 | `Camera` | `Camera` component | The same object. The renderer owns cameras, as the engine does in Filament |
 | `Camera.frame()` | No equivalent | filly's own; see [what filly adds](#what-filly-adds) |
 | `Asset` | gltfio `FilamentAsset` | Renamed. Closing it calls `releaseSourceData()` |
+| `renderer.create_mesh_asset()` | A one-triangle gltfio asset whose renderables get filly's `VertexBuffer` and `IndexBuffer` (`setGeometryAt()`) | See [runtime textures and generated meshes](design.md#runtime-textures-and-generated-meshes) |
 | `Model` | gltfio `FilamentInstance` in one scene | Renamed. `scene.add(asset)` calls `AssetLoader::createInstance()` |
 | `scene.load()` | `createAsset()`, `ResourceLoader::loadResources()`, `Scene::addEntities()` | Load, one instance, and source release in one call |
 | `Node` | An entity of the instance, with its `TransformManager` component | Addressed by glTF name or glTF index |
@@ -141,7 +142,8 @@ needs. The linked sections give the measurements.
   primitive with 1,000,000 vertices. See
   [runtime textures and generated meshes](design.md#runtime-textures-and-generated-meshes).
 - **Generated meshes and shapes.** Meshes from arrays get a glTF material from the archive and
-  the same model API as loaded assets.
+  the same model API as loaded assets. The models of a mesh asset share its buffers and, until
+  a model's material is edited, one material instance, so automatic instancing merges them.
 - **Memory estimates.** Filament and gltfio report no memory per asset.
 - **Host integrations.** Adapters for PsychoPy, pyglet, moderngl, and zengl.
 - **Web build.** `filament.js` creates its engine from a canvas and binds neither

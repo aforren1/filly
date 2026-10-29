@@ -1858,9 +1858,12 @@ std::vector<uint8_t> mesh_placeholder(const std::array<float, 3>& low, const std
     unit("roughness", material.roughness);
     for (float value : material.emissive)
         if (!(std::isfinite(value) && value >= 0)) throw std::invalid_argument("emissive values must be finite and nonnegative");
-    // Accessor bounds become the model's load-time bounds, so the triangle spans the mesh.
+    // Accessor bounds become the model's load-time bounds, so the triangle spans the mesh. The
+    // renderable never draws the triangle. gltfio gives each attribute its own buffer object, and
+    // a UV attribute would add one: about 40 KiB on the Intel driver. Without textures, the
+    // material key does not depend on UVs.
     std::vector<float> floats = {low[0], low[1], low[2], high[0], high[1], high[2], low[0], low[1], low[2],
-                                 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0};
+                                 0, 0, 1, 0, 0, 1, 0, 0, 1};
     if (colors) floats.insert(floats.end(), 12, 1.0f);
     using json::number;
     auto list = [](std::initializer_list<double> values) {
@@ -1883,9 +1886,8 @@ std::vector<uint8_t> mesh_placeholder(const std::array<float, 3>& low, const std
     json::Value attributes = json::object();
     attributes.at("POSITION") = number(0.0);
     attributes.at("NORMAL") = number(1.0);
-    attributes.at("TEXCOORD_0") = number(2.0);
     json::Value accessors = json::array();
-    accessors.items = {accessor(0, "VEC3", true), accessor(1, "VEC3", false), accessor(2, "VEC2", false)};
+    accessors.items = {accessor(0, "VEC3", true), accessor(1, "VEC3", false)};
     json::Value views = json::array();
     auto view = [&](double offset, double size) {
         json::Value result = json::object();
@@ -1894,11 +1896,11 @@ std::vector<uint8_t> mesh_placeholder(const std::array<float, 3>& low, const std
         result.at("byteLength") = number(size);
         views.items.push_back(std::move(result));
     };
-    view(0, 36); view(36, 36); view(72, 24);
+    view(0, 36); view(36, 36);
     if (colors) {
-        attributes.at("COLOR_0") = number(3.0);
-        view(96, 48);
-        accessors.items.push_back(accessor(3, "VEC4", false));
+        attributes.at("COLOR_0") = number(2.0);
+        view(72, 48);
+        accessors.items.push_back(accessor(2, "VEC4", false));
     }
     json::Value pbr = json::object();
     pbr.at("baseColorFactor") = list({material.base_color[0], material.base_color[1], material.base_color[2], material.base_color[3]});

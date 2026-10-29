@@ -1,0 +1,9 @@
+function args = meshArguments(positions, indices, options)
+% MESHARGUMENTS  The filly_mex arguments after the owner for Scene.createMesh and
+%   Renderer.createMeshAsset, from their name-value options.
+o = filly.internal.options(struct('Normals', [], 'Uvs', [], 'Colors', [], 'BaseColor', [1 1 1 1], ...
+    'Metallic', 0, 'Roughness', 1, 'Emissive', [0 0 0], 'Unlit', false, 'DoubleSided', false, ...
+    'AlphaMode', 'opaque'), options);
+args = {positions, indices, o.Normals, o.Uvs, o.Colors, o.BaseColor, o.Metallic, o.Roughness, ...
+    o.Emissive, o.Unlit, o.DoubleSided, filly.internal.text(o.AlphaMode)};
+end

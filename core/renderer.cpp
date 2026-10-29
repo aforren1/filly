@@ -546,27 +546,39 @@ struct Staging {
     }
 };
 
-// Geometry of a generated mesh, which its one model shows.
+// Geometry of a generated mesh, which every model of its asset shows.
 struct MeshGeometry {
     f::VertexBuffer* vertices = nullptr;
     f::IndexBuffer* indices = nullptr;
     size_t vertex_count = 0, triangle_count = 0;
     bool computed_normals = false, has_uvs = false, has_colors = false;
-    // CPU copies that tangent frames depend on, and scratch space for recomputing them.
+    // All attributes share one buffer object, at these byte offsets; positions are at 0. The
+    // Intel driver commits about 40 KiB for each buffer object, however small.
+    uint32_t tangent_offset = 0, uv_offset = 0, color_offset = 0;
+    // CPU copies that tangent frames depend on, and scratch space for recomputing them, which
+    // the first update allocates.
     std::vector<m::float3> positions, normals, tan1, tan2;
     std::vector<m::float2> uvs;
     std::vector<m::uint3> triangles;
     Staging position_upload, tangent_upload, uv_upload, color_upload;
     m::float3 low, high;
-    // The renderables that show it, for bounds updates. Empty once the model closes.
+    // Set for Renderer::create_mesh_asset(): models show `material`, one instance for all of
+    // them, so that Filament's automatic instancing can merge their draws. The first add()
+    // copies it from its model's own instance, before any edit.
+    bool share_material = false;
+    f::MaterialInstance* material = nullptr;
+    // The renderables that show it, for bounds updates. A closing model removes its own.
     std::vector<utils::Entity> renderables;
+    // After the asset's renderables are destroyed, because `material` may be bound to them.
     void release(f::Engine& engine) noexcept {
         for (const auto* ring : {&position_upload, &tangent_upload, &uv_upload, &color_upload})
             if (ring->busy()) { flush_and_wait(engine); break; }
         if (vertices) engine.destroy(vertices);
         if (indices) engine.destroy(indices);
+        if (material) engine.destroy(material);
         vertices = nullptr;
         indices = nullptr;
+        material = nullptr;
     }
 };
 
@@ -696,6 +708,9 @@ struct ModelData : Resource, std::enable_shared_from_this<ModelData> {
     g::FilamentAsset* asset = nullptr;
     g::FilamentInstance* instance = nullptr;
     bool visible = true, skinned = false, bones_dirty = false;
+    // Whether the renderable shows the shared material of its mesh asset (MeshGeometry::material)
+    // instead of the instance's own.
+    bool shares_material = false;
     g::Animator* animator = nullptr;
     // The animator's rest animation (PreparedAsset::rest_animation), or -1.
     int rest_animation = -1;
@@ -910,6 +925,13 @@ struct TargetData : Resource {
     f::RenderTarget* output = nullptr;
     f::Texture* ldr = nullptr;
     f::RenderTarget* ldr_target = nullptr;
+#if !defined(__EMSCRIPTEN__)
+    // The GL name of `color` for a Filament-owned target: filly creates it, so that readbacks can
+    // copy it into their own buffers (see RenderTarget::begin_read()).
+    uint32_t color_name = 0;
+    // Every pixel buffer of the target's readbacks, and those that no readback holds.
+    std::vector<std::shared_ptr<PackBuffer>> buffers, free_buffers;
+#endif
     void check() const {
         state->check();
         if (!target) throw FillyError("Render target is closed");
@@ -923,7 +945,17 @@ struct TargetData : Resource {
             }
             for (auto* rt : {target, linear_target, graded_target, output, ldr_target}) if (rt) state->engine->destroy(rt);
             for (auto* texture : {linear, graded, linear_depth, ldr, depth, color}) if (texture) state->engine->destroy(texture);
+#if !defined(__EMSCRIPTEN__)
+            // Filament does not delete imported textures. A shared context keeps both kinds of
+            // object after the renderer closes, so they are deleted here.
+            if (color_name || !buffers.empty()) state->interop->delete_objects(*state->engine, color_name, std::move(buffers));
+#endif
         }
+#if !defined(__EMSCRIPTEN__)
+        color_name = 0;
+        buffers.clear();
+        free_buffers.clear();
+#endif
         if (state->encode.input && state->encode.input == linear) state->encode.input = nullptr;
         if (state->encode_graded.input && state->encode_graded.input == graded) state->encode_graded.input = nullptr;
         if (state->fxaa.input && state->fxaa.input == ldr) state->fxaa.input = nullptr;
@@ -1132,33 +1164,39 @@ void build_pending_irradiance(EnvironmentData& environment) {
     flush_and_wait(engine);
 }
 
-void update_diffuse_environment(SceneData& scene) {
+// `only` limits the update to one new model of the scene. The others already have the scene's
+// settings, and none of them needed a pending irradiance map, so adding N models does not cost
+// N^2 material checks.
+void update_diffuse_environment(SceneData& scene, ModelData* only = nullptr) {
+    auto each_model = [&](auto&& fn) {
+        if (only) { fn(*only); return; }
+        for (const auto& child : scene.children) {
+            auto model = resource_cast<ModelData>(child);
+            if (model && model->asset) fn(*model);
+        }
+    };
     auto* environment = scene.environment.get();
     if (environment && environment->pending_irradiance) {
         bool needed = false;
         auto needs = [](const f::MaterialInstance* instance) { return instance->getMaterial()->hasParameter("backlightIntensity"); };
-        for (const auto& child : scene.children) {
-            auto model = resource_cast<ModelData>(child);
-            if (!model || !model->asset) continue;
-            for (size_t i = 0; i < model->instance->getMaterialInstanceCount(); ++i)
-                needed = needed || needs(model->instance->getMaterialInstances()[i]);
-            for (const auto& local : model->locals) needed = needed || needs(local.copy);
-        }
+        each_model([&](ModelData& model) {
+            for (size_t i = 0; i < model.instance->getMaterialInstanceCount(); ++i)
+                needed = needed || needs(model.instance->getMaterialInstances()[i]);
+            for (const auto& local : model.locals) needed = needed || needs(local.copy);
+        });
         if (needed) build_pending_irradiance(*environment);
     }
     auto* irradiance = environment ? environment->irradiance : nullptr;
     const float intensity = environment ? scene.environment_intensity : 0;
-    for (const auto& child : scene.children) {
-        auto model = resource_cast<ModelData>(child);
-        if (!model || !model->asset) continue;
-        auto* instance = model->instance;
+    each_model([&](ModelData& model) {
+        auto* instance = model.instance;
         for (size_t i=0; i<instance->getMaterialInstanceCount(); ++i)
             configure_diffuse_environment(scene.state->materials, instance->getMaterialInstances()[i],
                 irradiance, intensity, scene.environment_rotation_deg);
-        for (const auto& local : model->locals)
+        for (const auto& local : model.locals)
             configure_diffuse_environment(scene.state->materials, local.copy, irradiance,
                 intensity, scene.environment_rotation_deg);
-    }
+    });
 }
 
 // Removes the scene's light and skybox. The caller updates the diffuse environment.
@@ -1773,15 +1811,17 @@ RenderTarget Renderer::create_render_target(int64_t width, int64_t height,
     // sRGB storage lets the GPU encode on write for the direct path; read() returns the stored
     // bytes unchanged. WebGL2 always encodes writes to sRGB storage, which would encode the
     // exact path's output twice, so the web build stores RGBA8 and has no direct sRGB path.
+    auto builder = T::Builder().width(data->width).height(data->height).levels(1)
+        .sampler(T::Sampler::SAMPLER_2D)
+        .usage(T::Usage::COLOR_ATTACHMENT | T::Usage::SAMPLEABLE | T::Usage::BLIT_SRC);
 #if defined(__EMSCRIPTEN__)
-    constexpr auto color_format = T::InternalFormat::RGBA8;
+    builder.format(T::InternalFormat::RGBA8);
 #else
-    constexpr auto color_format = T::InternalFormat::SRGB8_A8;
+    data->color_name = state_->interop->create_texture(*state_->engine, data->width, data->height);
+    if (!data->color_name) throw BackendError("Could not create the color texture of the render target");
+    builder.format(T::InternalFormat::SRGB8_A8).import(data->color_name);
 #endif
-    data->color = T::Builder().width(data->width).height(data->height).levels(1)
-        .sampler(T::Sampler::SAMPLER_2D).format(color_format)
-        .usage(T::Usage::COLOR_ATTACHMENT | T::Usage::SAMPLEABLE | T::Usage::BLIT_SRC)
-        .build(*state_->engine);
+    data->color = builder.build(*state_->engine);
     attach(*data, *state_->engine, depth);
     return RenderTarget(data);
 }
@@ -2487,9 +2527,11 @@ std::vector<uint8_t> read_document(const std::string& path, std::string& absolut
     }
 }
 
-// An asset with its resources loaded, its source data kept, and its spare instance.
+// An asset with its resources loaded, its source data kept, and its spare instance. `wait`
+// waits for the uploads, so that they do not land in the first trial frame.
 std::shared_ptr<detail::AssetData> load_asset_data(const std::shared_ptr<detail::State>& state,
-        std::vector<uint8_t> bytes, const std::string& path, bool strict, std::vector<std::string>& warnings) {
+        std::vector<uint8_t> bytes, const std::string& path, bool strict, std::vector<std::string>& warnings,
+        bool wait = true) {
     auto prepared = detail::prepare_asset(std::move(bytes), path, {strict}, warnings);
     const auto& tables = *prepared.tables;
     auto shared = state->track(std::make_shared<detail::AssetData>(state));
@@ -2540,9 +2582,14 @@ std::shared_ptr<detail::AssetData> load_asset_data(const std::shared_ptr<detail:
         if (!std::filesystem::is_regular_file(resource, error)) throw AssetError("Missing glTF resource: " + std::string(uri));
         image_files.emplace_back(uri, resource);
     }
-    std::unique_ptr<g::TextureProvider> stb(g::createStbProvider(state->engine));
-    std::unique_ptr<g::TextureProvider> ktx2(g::createKtx2Provider(state->engine));
-    std::unique_ptr<g::TextureProvider> webp_decoder(detail::create_webp_provider(state->engine));
+    // Constructing the providers costs about 0.05 ms and 21 KiB, so documents without images,
+    // such as generated meshes, skip them.
+    std::unique_ptr<g::TextureProvider> stb, ktx2, webp_decoder;
+    if (source->images_count) {
+        stb.reset(g::createStbProvider(state->engine));
+        ktx2.reset(g::createKtx2Provider(state->engine));
+        webp_decoder.reset(detail::create_webp_provider(state->engine));
+    }
     RecordingProvider decoder(stb.get(), shared->loaded_textures), ktx(ktx2.get(), shared->loaded_textures),
         webp(webp_decoder.get(), shared->loaded_textures);
     {
@@ -2561,13 +2608,15 @@ std::shared_ptr<detail::AssetData> load_asset_data(const std::shared_ptr<detail:
                     delete static_cast<std::vector<uint8_t>*>(user);
                 }, payload));
         }
-        resources.addTextureProvider("image/png", &decoder);
-        resources.addTextureProvider("image/jpeg", &decoder);
-        resources.addTextureProvider("image/ktx2", &ktx);
-        resources.addTextureProvider("image/webp", &webp);
+        if (source->images_count) {
+            resources.addTextureProvider("image/png", &decoder);
+            resources.addTextureProvider("image/jpeg", &decoder);
+            resources.addTextureProvider("image/ktx2", &ktx);
+            resources.addTextureProvider("image/webp", &webp);
+        }
         if (!resources.loadResources(asset)) throw AssetError("Could not load glTF resources");
-        // Upload lifetimes do not need this wait. It keeps the upload out of the first trial frame.
-        detail::flush_and_wait(*state->engine);
+        // Upload lifetimes do not need this wait.
+        if (wait) detail::flush_and_wait(*state->engine);
     }
     // gltfio keeps its own copy of the document, and the parse points into it and into the
     // buffers that preparation loaded.
@@ -2621,7 +2670,7 @@ std::shared_ptr<detail::ModelData> add_instance(const std::shared_ptr<detail::Sc
     if (shared->refractive) ++scene->refractive;
     scene->children.push_back(model);
     detail::update_visibility(*model);
-    detail::update_diffuse_environment(*scene);
+    detail::update_diffuse_environment(*scene, model.get());
     state->engine->flush();
     return model;
 }
@@ -2673,14 +2722,13 @@ Model Scene::add(const Asset& asset) {
     return Model(add_instance(data_, ref.asset));
 }
 
-Model Scene::create_mesh(const MeshArrays& arrays, const MeshMaterial& material) {
-    data_->check();
-    if (!arrays.positions || !arrays.indices || arrays.vertices < 3 || arrays.triangles < 1)
-        throw std::invalid_argument("A mesh needs at least 3 positions and 1 triangle");
-    for (size_t i = 0; i < arrays.vertices * 3; ++i)
-        if (!std::isfinite(arrays.positions[i])) throw std::invalid_argument("Positions must be finite");
-    // A one-primitive glTF gives the mesh a node and the loader's own material; its geometry is
-    // then replaced, so the model behaves like any loaded asset.
+namespace {
+// A generated mesh as an asset. A one-triangle glTF gives it a node and the loader's own
+// material, so its models behave like those of any loaded asset; add_instance() then gives each
+// renderable the mesh buffers.
+std::shared_ptr<detail::AssetData> mesh_asset_data(const std::shared_ptr<detail::State>& state, const MeshArrays& arrays,
+                                                   const MeshMaterial& material, bool share_material) {
+    detail::check_new_mesh(arrays);
     std::array<float, 3> low, high;
     for (int axis = 0; axis < 3; ++axis) {
         low[axis] = high[axis] = arrays.positions[axis];
@@ -2691,14 +2739,26 @@ Model Scene::create_mesh(const MeshArrays& arrays, const MeshMaterial& material)
     }
     auto document = detail::mesh_placeholder(low, high, arrays.colors != nullptr, material);
     std::vector<std::string> warnings;
-    Model model = add_once(data_, load_asset_data(data_->state, std::move(document), std::string(), true, warnings));
-    try {
-        model.attach_mesh(arrays);
-    } catch (...) {
-        model.close();
-        throw;
-    }
-    return model;
+    // The placeholder upload is a few bytes, and the mesh upload is not waited for either.
+    auto shared = load_asset_data(state, std::move(document), std::string(), true, warnings, false);
+    shared->mesh = detail::build_mesh(*state->engine, arrays);
+    shared->mesh->share_material = share_material;
+    state->engine->flush();
+    return shared;
+}
+}
+
+Model Scene::create_mesh(const MeshArrays& arrays, const MeshMaterial& material) {
+    data_->check();
+    return add_once(data_, mesh_asset_data(data_->state, arrays, material, false));
+}
+
+Asset Renderer::create_mesh_asset(const MeshArrays& arrays, const MeshMaterial& material) {
+    state_->check();
+    auto ref = state_->track(std::make_shared<detail::AssetRef>(state_));
+    ref->asset = mesh_asset_data(state_, arrays, material, true);
+    ref->asset->open = true;
+    return Asset(ref);
 }
 
 Asset::Asset(std::shared_ptr<detail::AssetRef> data) : data_(std::move(data)) {}
@@ -3015,6 +3075,7 @@ Material Model::material(const std::string& name) const {
     }
     if (!count) throw unknown_name("material", name, material_names());
     if (count != 1) throw AssetError("Ambiguous material name: " + name);
+    detail::own_material(*data_);
     return Material(data_, index);
 }
 Matrix Model::transform() const {
@@ -3212,6 +3273,7 @@ Material Node::material(size_t slot) const {
     const auto entity = utils::Entity::import(entity_);
     auto renderable = rm.getInstance(entity);
     if (!renderable || slot >= rm.getPrimitiveCount(renderable)) throw AssetError("Invalid material slot on node");
+    detail::own_material(*data_);
     const size_t count = data_->instance->getMaterialInstanceCount();
     for (size_t i = 0; i < data_->locals.size(); ++i)
         if (data_->locals[i].entity == entity && data_->locals[i].slot == slot) return Material(data_, count + i);
@@ -3384,70 +3446,160 @@ void RenderTarget::close() {
 }
 namespace detail {
 struct ReadbackData {
-    std::shared_ptr<State> state;
-    PixelBuffer pixels;
-    bool complete = false, taken = false;
+    // Keeps the target's storage while the readback is open, also after the caller drops the
+    // target without closing it.
+    std::shared_ptr<TargetData> target;
+    uint32_t width = 0, height = 0;
+    uint64_t frame = 0;
+    bool closed = false;
+#if defined(__EMSCRIPTEN__)
+    // Filament's readPixels() writes here, rows from the top, when the GPU has finished.
+    std::unique_ptr<uint8_t[]> pixels;
+    bool complete = false;
     std::chrono::steady_clock::time_point start;
+#else
+    std::shared_ptr<PackBuffer> buffer;
+    // This readback's copy number in the buffer (PackBuffer::copies).
+    uint64_t copy = 0;
+#endif
+    void check() const {
+        target->state->check();
+        if (closed) throw FillyError("Readback is closed");
+        if (!target->target) throw FillyError("Render target is closed");
+    }
+    // Hands the buffer back to the target for its next readback.
+    void close() noexcept {
+        if (closed) return;
+        closed = true;
+#if defined(__EMSCRIPTEN__)
+        // Filament's callback may still write the pixels, so they stay until the readback goes.
+#else
+        if (target->target && buffer) target->free_buffers.push_back(std::move(buffer));
+        buffer.reset();
+#endif
+    }
+    ~ReadbackData() { close(); }
 };
 }
 Readback RenderTarget::begin_read() const {
-    auto state = data_->state;
+    auto& state = *data_->state;
     data_->check();
     if (!data_->rendered) throw FillyError("Render to the target before reading it");
     auto result = std::make_shared<detail::ReadbackData>();
-    result->state = state;
+    result->target = data_;
+    result->width = data_->width;
+    result->height = data_->height;
+    result->frame = state.stats.frames_rendered;
+#if defined(__EMSCRIPTEN__)
     result->start = std::chrono::steady_clock::now();
-    result->pixels.size = size_t(data_->width) * data_->height * 4;
-    result->pixels.data.reset(new uint8_t[result->pixels.size]);
+    const size_t size = size_t(data_->width) * data_->height * 4;
+    // Not zero-filled before the GPU writes it: at 1920 x 1080 the fill cost about 2 ms per read.
+    result->pixels.reset(new uint8_t[size]);
     // The callback retains storage even if the driver cannot complete the read.
     auto* owner = new std::shared_ptr<detail::ReadbackData>(result);
-    f::backend::PixelBufferDescriptor buffer(result->pixels.data.get(), result->pixels.size,
+    f::backend::PixelBufferDescriptor buffer(result->pixels.get(), size,
         f::backend::PixelDataFormat::RGBA, f::backend::PixelDataType::UBYTE,
         [](void*, size_t, void* user) {
             std::unique_ptr<std::shared_ptr<detail::ReadbackData>> hold(static_cast<std::shared_ptr<detail::ReadbackData>*>(user));
             (*hold)->complete = true;
         }, owner);
-    state->renderer->readPixels(data_->target, 0, 0, data_->width, data_->height, std::move(buffer));
-    state->engine->flush();
+    state.renderer->readPixels(data_->target, 0, 0, data_->width, data_->height, std::move(buffer));
+#else
+    // Filament's readPixels() makes a new pixel buffer for each read, and its result arrives when
+    // the driver thread checks the fence: at a later frame, or in Engine::flushAndWait(), which
+    // also waits for every later frame. filly copies the target's texture into a kept buffer
+    // instead, with a fence that read() can wait for alone (see docs/explanation/design.md).
+    auto& buffers = data_->free_buffers;
+    if (buffers.empty()) {
+        result->buffer = std::make_shared<detail::PackBuffer>();
+        data_->buffers.push_back(result->buffer);
+    } else {
+        result->buffer = std::move(buffers.back());
+        buffers.pop_back();
+    }
+    result->copy = ++result->buffer->copies;
+    state.interop->pack(*state.engine, data_->color_name, data_->width, data_->height, result->buffer, result->copy);
+#endif
+    // The GPU starts the copy now, not with the next render.
+    state.engine->flush();
     return Readback(result);
 }
 Readback::Readback(std::shared_ptr<detail::ReadbackData> data) : data_(std::move(data)) {}
+uint32_t Readback::width() const { return data_->width; }
+uint32_t Readback::height() const { return data_->height; }
+uint64_t Readback::frame_number() const { data_->target->state->check_thread(); return data_->frame; }
+bool Readback::closed() const {
+    data_->target->state->check_thread();
+    return data_->closed || !data_->target->target || !data_->target->state->engine;
+}
+void Readback::close() {
+    data_->target->state->check_thread();
+    data_->close();
+}
 bool Readback::ready() {
-    if (!data_->complete) {
-        data_->state->check();
-        // The driver's finish() checks the readback's fence; the user callback then arrives
-        // through the message queue.
-        detail::flush_and_wait(*data_->state->engine);
-        data_->state->engine->pumpMessageQueues();
-        if (data_->complete)
-            data_->state->stats.readback_ms = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - data_->start).count();
-    }
-    return data_->complete;
-}
-namespace {
-PixelBuffer take_pixels(detail::ReadbackData& data) {
-    if (!data.complete) throw FillyError("The readback has not completed");
-    if (data.taken) throw FillyError("The readback's pixels were already taken");
-    data.taken = true;
-    // Filament already normalizes readPixels output to an upper-left origin.
-    return std::move(data.pixels);
-}
-}
-std::vector<uint8_t> Readback::take() {
-    auto pixels = take_pixels(*data_);
-    return std::vector<uint8_t>(pixels.data.get(), pixels.data.get() + pixels.size);
-}
-PixelBuffer RenderTarget::read() const {
-    auto readback = begin_read();
+    auto& data = *data_;
+    data.check();
+    auto& state = *data.target->state;
 #if defined(__EMSCRIPTEN__)
-    if (!readback.ready())
-        throw FillyError("WebGL completes readbacks only after control returns to the browser; "
-                         "use begin_read() and poll ready()");
+    if (!data.complete) {
+        // The single-threaded driver checks the readback's fence when it runs; the callback then
+        // arrives through the message queue.
+        detail::flush_and_wait(*state.engine);
+        state.engine->pumpMessageQueues();
+        if (data.complete)
+            state.stats.readback_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - data.start).count();
+    }
+    return data.complete;
 #else
-    if (!readback.ready()) throw FillyError("GPU readback did not complete");
+    if (data.buffer->finished == data.copy) return true;
+    state.interop->poll(*state.engine, data.buffer, data.copy);
+    state.engine->flush();
+    return data.buffer->finished == data.copy;
 #endif
-    return take_pixels(*readback.data_);
+}
+void Readback::read(const RowSink& sink) {
+    auto& data = *data_;
+    data.check();
+    auto& state = *data.target->state;
+#if defined(__EMSCRIPTEN__)
+    if (!ready())
+        throw FillyError("WebGL completes readbacks only after control returns to the browser; poll ready() first");
+    // Filament already normalizes readPixels() output to an upper-left origin.
+    sink(data.pixels.get(), ptrdiff_t(data.width) * 4);
+    data.pixels.reset();
+    data.close();
+#else
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = state.interop->unpack(*state.engine, data.buffer, data.width, data.height, sink);
+    state.stats.readback_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    data.close();
+    if (!ok) throw FillyError("GPU readback did not complete");
+#endif
+}
+void Readback::read(uint8_t* pixels) {
+    const size_t row = size_t(data_->width) * 4;
+    const size_t height = data_->height;
+    read([pixels, row, height](const uint8_t* top, ptrdiff_t stride) {
+        for (size_t y = 0; y < height; ++y) std::memcpy(pixels + y * row, top + ptrdiff_t(y) * stride, row);
+    });
+}
+void RenderTarget::read(const RowSink& sink) const {
+#if defined(__EMSCRIPTEN__)
+    (void)sink;
+    throw FillyError("WebGL completes readbacks only after control returns to the browser; "
+                     "use begin_read() and poll ready()");
+#else
+    begin_read().read(sink);
+#endif
+}
+void RenderTarget::read(uint8_t* pixels) const {
+#if defined(__EMSCRIPTEN__)
+    (void)pixels;
+    read(RowSink());
+#else
+    begin_read().read(pixels);
+#endif
 }
 
 ImportedTarget::ImportedTarget(std::shared_ptr<detail::TargetData> data) : data_(std::move(data)) {}

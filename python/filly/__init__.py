@@ -23,6 +23,7 @@ from ._native import (
     PickQuery,
     PickResult,
     Preparation,
+    Readback,
     Renderer,
     RenderTarget,
     Scene,
@@ -45,7 +46,7 @@ __version__ = _metadata.version("filly")  # one source: pyproject.toml
 __all__ = [
     "AnimationInfo", "Asset", "AssetCompatibilityWarning", "AssetError", "AssetMemory", "BackendError",
     "Camera", "Environment", "FillyError", "ImportedTarget", "ImportedTexture", "InteropError", "Light",
-    "Material", "Model", "Node", "PickQuery", "PickResult", "Preparation", "Renderer", "RenderTarget", "Scene", "Stats", "Texture",
+    "Material", "Model", "Node", "PickQuery", "PickResult", "Preparation", "Readback", "Renderer", "RenderTarget", "Scene", "Stats", "Texture",
     "current_gl_context", "samples", "set_log_level", "set_material_parameters", "set_morph_weights",
     "set_transforms", "shapes",
 ]

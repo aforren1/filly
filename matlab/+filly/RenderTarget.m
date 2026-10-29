@@ -17,6 +17,12 @@ classdef RenderTarget < filly.Object
             pixels = filly_mex('RenderTarget.read', obj.Id);
         end
 
+        function readback = beginRead(obj)
+            % Queue a copy of the pixels and return a filly.Readback at once. Later renders
+            % into the target do not change it; read() it after the next render.
+            readback = filly.Readback(obj.Owner, filly_mex('RenderTarget.beginRead', obj.Id));
+        end
+
         function close(obj)
             filly_mex('RenderTarget.close', obj.Id);
         end

@@ -41,10 +41,10 @@ using namespace filly;
 namespace {
 
 using Object = std::variant<Renderer, Scene, Camera, Model, Node, Light, Material, Asset, Environment, Texture,
-                            ImportedTexture, RenderTarget, ImportedTarget, PickQuery, Preparation>;
+                            ImportedTexture, RenderTarget, ImportedTarget, PickQuery, Preparation, Readback>;
 constexpr const char* kind_names[] = {"Renderer", "Scene", "Camera", "Model", "Node", "Light", "Material", "Asset",
                                       "Environment", "Texture", "ImportedTexture", "RenderTarget", "ImportedTarget",
-                                      "PickQuery", "Preparation"};
+                                      "PickQuery", "Preparation", "Readback"};
 template <class T, class... Ts> constexpr size_t index_in(std::variant<Ts...>*) {
     constexpr bool matches[] = {std::is_same_v<T, Ts>...};
     for (size_t i = 0; i < sizeof...(Ts); ++i) if (matches[i]) return i;
@@ -320,17 +320,33 @@ template <class E> void planar_to_rows(const E* in, E* out, size_t h, size_t w, 
             }
     }
 }
-template <class E> void rows_to_planar(const E* in, E* out, size_t h, size_t w, size_t c) {
+// `stride` is the distance from one row to the next, in elements; a readback's rows can run
+// bottom-up, with a negative stride.
+template <class E> void rows_to_planar(const E* in, ptrdiff_t stride, E* out, size_t h, size_t w, size_t c) {
     const size_t plane = h * w;
     for (size_t y0 = 0; y0 < h; y0 += copy_block) {
         const size_t y1 = std::min(h, y0 + copy_block);
         for (size_t x = 0; x < w; ++x)
             for (size_t y = y0; y < y1; ++y) {
-                const E* src = in + (y * w + x) * c;
+                const E* src = in + ptrdiff_t(y) * stride + ptrdiff_t(x * c);
                 E* dst = out + x * h + y;
                 for (size_t k = 0; k < c; ++k) dst[k * plane] = src[k];
             }
     }
+}
+// An H x W x 4 uint8 image from a readback. The core passes the rows straight from its pixel
+// buffer, so the planar conversion is the only copy.
+template <class Read> mxArray* read_planar(size_t w, size_t h, Read&& read) {
+    const mwSize dims[3] = {mwSize(h), mwSize(w), 4};
+    auto* result = mxCreateUninitNumericArray(3, const_cast<mwSize*>(dims), mxUINT8_CLASS, mxREAL);
+    auto* out = static_cast<uint8_t*>(mxGetData(result));
+    try {
+        read([&](const uint8_t* top, ptrdiff_t stride) { rows_to_planar(top, stride, out, h, w, 4); });
+    } catch (...) {
+        mxDestroyArray(result);
+        throw;
+    }
+    return result;
 }
 struct ImageShape {
     size_t height, width, channels;
@@ -441,6 +457,42 @@ MeshArrays mesh_arrays(Call& c, int first, size_t vertices) {
     if (c.given(first + 2)) arrays.uvs = rows_in(c[first + 2], 2, vertices, "uvs", s.uvs);
     if (c.given(first + 3)) arrays.colors = rows_in(c[first + 3], 4, vertices, "colors", s.colors);
     return arrays;
+}
+
+// The arguments of Scene.createMesh and Renderer.createMeshAsset after the owner: positions,
+// indices, normals, uvs, colors, baseColor, metallic, roughness, emissive, unlit, doubleSided,
+// alphaMode.
+void mesh_request(Call& c, MeshArrays& arrays, MeshMaterial& material) {
+    const auto* positions = c[1];
+    if (mxGetNumberOfDimensions(positions) != 2 || mxGetN(positions) != 3) invalid("positions must be N x 3");
+    const size_t vertices = mxGetM(positions);
+    arrays.vertices = vertices;
+    arrays.positions = rows_in(positions, 3, vertices, "positions", scratch().positions);
+    arrays.normals = c.given(3) ? rows_in(c[3], 3, vertices, "normals", scratch().normals) : nullptr;
+    arrays.uvs = c.given(4) ? rows_in(c[4], 2, vertices, "uvs", scratch().uvs) : nullptr;
+    arrays.colors = c.given(5) ? rows_in(c[5], 4, vertices, "colors", scratch().colors) : nullptr;
+    const auto* indices = c[2];
+    require_numeric(indices, "indices");
+    if (mxGetNumberOfDimensions(indices) != 2 || mxGetN(indices) != 3) invalid("indices must be M x 3");
+    const size_t triangles = mxGetM(indices);
+    auto& converted = scratch().indices;
+    converted.resize(triangles * 3);
+    for (size_t col = 0; col < 3; ++col)
+        for (size_t row = 0; row < triangles; ++row) {
+            const double value = element(indices, col * triangles + row);
+            if (!(value >= 1) || value != std::floor(value) || value > double(vertices))
+                invalid("indices must be whole numbers from 1 through the vertex count");
+            converted[row * 3 + col] = uint32_t(value - 1);
+        }
+    arrays.indices = converted.data();
+    arrays.triangles = triangles;
+    if (c.given(6)) material.base_color = vec<4>(c[6], "baseColor");
+    if (c.given(7)) material.metallic = single(c[7], "metallic");
+    if (c.given(8)) material.roughness = single(c[8], "roughness");
+    if (c.given(9)) material.emissive = vec<3>(c[9], "emissive");
+    if (c.given(10)) material.unlit = flag(c[10], "unlit");
+    if (c.given(11)) material.double_sided = flag(c[11], "doubleSided");
+    if (c.given(12)) material.alpha_mode = text(c[12], "alphaMode");
 }
 
 RenderOptions render_options(Call& c, int first, std::optional<Camera>& camera) {
@@ -819,6 +871,13 @@ template <> const Properties<PickQuery>& properties() {
     };
     return value;
 }
+template <> const Properties<Readback>& properties() {
+    static const Properties<Readback> value = {
+        {"closed", {[](Readback& r) { return bool_out(r.closed()); }, nullptr}},
+        {"frameNumber", {[](Readback& r) { return number_out(double(r.frame_number())); }, nullptr}},
+    };
+    return value;
+}
 template <> const Properties<Preparation>& properties() {
     static const Properties<Preparation> value = {
         {"pending", {[](Preparation& p) { return number_out(double(p.pending())); }, nullptr}},
@@ -956,6 +1015,12 @@ const std::unordered_map<std::string_view, Handler>& commands() {
             auto& r = get<Renderer>(c[0]);
             load_source<Asset>(c, 1, c.nrhs > 2 && flag(c[2], "strict"), [&](auto&&... args) { return r.load_asset(args...); });
         }},
+        {"Renderer.createMeshAsset", [](Call& c) {
+            MeshArrays arrays;
+            MeshMaterial material;
+            mesh_request(c, arrays, material);
+            c.out(0, put(get<Renderer>(c[0]).create_mesh_asset(arrays, material)));
+        }},
         {"Renderer.loadEnvironment", [](Call& c) { c.out(0, put(get<Renderer>(c[0]).load_environment(text(c[1], "path")))); }},
         {"Renderer.loadEnvironmentKtx", [](Call& c) {
             const auto skybox = c.given(2) ? text(c[2], "skyboxPath") : std::string();
@@ -1042,42 +1107,10 @@ const std::unordered_map<std::string_view, Handler>& commands() {
         }},
         {"Scene.add", [](Call& c) { c.out(0, put(get<Scene>(c[0]).add(get<Asset>(c[1])))); }},
         {"Scene.createMesh", [](Call& c) {
-            // (scene, positions, indices, normals, uvs, colors, baseColor, metallic, roughness,
-            //  emissive, unlit, doubleSided, alphaMode)
-            auto& s = get<Scene>(c[0]);
-            const auto* positions = c[1];
-            if (mxGetNumberOfDimensions(positions) != 2 || mxGetN(positions) != 3) invalid("positions must be N x 3");
-            const size_t vertices = mxGetM(positions);
             MeshArrays arrays;
-            arrays.vertices = vertices;
-            arrays.positions = rows_in(positions, 3, vertices, "positions", scratch().positions);
-            arrays.normals = c.given(3) ? rows_in(c[3], 3, vertices, "normals", scratch().normals) : nullptr;
-            arrays.uvs = c.given(4) ? rows_in(c[4], 2, vertices, "uvs", scratch().uvs) : nullptr;
-            arrays.colors = c.given(5) ? rows_in(c[5], 4, vertices, "colors", scratch().colors) : nullptr;
-            const auto* indices = c[2];
-            require_numeric(indices, "indices");
-            if (mxGetNumberOfDimensions(indices) != 2 || mxGetN(indices) != 3) invalid("indices must be M x 3");
-            const size_t triangles = mxGetM(indices);
-            auto& converted = scratch().indices;
-            converted.resize(triangles * 3);
-            for (size_t col = 0; col < 3; ++col)
-                for (size_t row = 0; row < triangles; ++row) {
-                    const double value = element(indices, col * triangles + row);
-                    if (!(value >= 1) || value != std::floor(value) || value > double(vertices))
-                        invalid("indices must be whole numbers from 1 through the vertex count");
-                    converted[row * 3 + col] = uint32_t(value - 1);
-                }
-            arrays.indices = converted.data();
-            arrays.triangles = triangles;
             MeshMaterial material;
-            if (c.given(6)) material.base_color = vec<4>(c[6], "baseColor");
-            if (c.given(7)) material.metallic = single(c[7], "metallic");
-            if (c.given(8)) material.roughness = single(c[8], "roughness");
-            if (c.given(9)) material.emissive = vec<3>(c[9], "emissive");
-            if (c.given(10)) material.unlit = flag(c[10], "unlit");
-            if (c.given(11)) material.double_sided = flag(c[11], "doubleSided");
-            if (c.given(12)) material.alpha_mode = text(c[12], "alphaMode");
-            c.out(0, put(s.create_mesh(arrays, material)));
+            mesh_request(c, arrays, material);
+            c.out(0, put(get<Scene>(c[0]).create_mesh(arrays, material)));
         }},
         {"Scene.addDirectionalLight", [](Call& c) {
             c.out(0, put(get<Scene>(c[0]).add_directional_light(vec<3>(c[1], "direction"), single(c[2], "intensity"), vec<3>(c[3], "color"))));
@@ -1288,13 +1321,15 @@ const std::unordered_map<std::string_view, Handler>& commands() {
         {"RenderTarget.close", [](Call& c) { get<RenderTarget>(c[0]).close(); }},
         {"RenderTarget.read", [](Call& c) {
             auto& target = get<RenderTarget>(c[0]);
-            const size_t h = target.height(), w = target.width();
-            const auto pixels = target.read();
-            const mwSize dims[3] = {mwSize(h), mwSize(w), 4};
-            auto* result = mxCreateUninitNumericArray(3, const_cast<mwSize*>(dims), mxUINT8_CLASS, mxREAL);
-            rows_to_planar(pixels.data.get(), static_cast<uint8_t*>(mxGetData(result)), h, w, 4);
-            c.out(0, result);
+            c.out(0, read_planar(target.width(), target.height(), [&](const RowSink& sink) { target.read(sink); }));
         }},
+        {"RenderTarget.beginRead", [](Call& c) { c.out(0, put(get<RenderTarget>(c[0]).begin_read())); }},
+        {"Readback.ready", [](Call& c) { c.out(0, bool_out(get<Readback>(c[0]).ready())); }},
+        {"Readback.read", [](Call& c) {
+            auto& readback = get<Readback>(c[0]);
+            c.out(0, read_planar(readback.width(), readback.height(), [&](const RowSink& sink) { readback.read(sink); }));
+        }},
+        {"Readback.close", [](Call& c) { get<Readback>(c[0]).close(); }},
         {"ImportedTarget.close", [](Call& c) { get<ImportedTarget>(c[0]).close(); }},
         {"ImportedTarget.acquire", [](Call& c) { get<ImportedTarget>(c[0]).acquire(); }},
         {"ImportedTarget.release", [](Call& c) { get<ImportedTarget>(c[0]).release(); }},

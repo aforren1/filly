@@ -517,6 +517,16 @@ export class Renderer extends Handle
 		return loaded(Asset, this._context, result.asset, result.warnings);
 	}
 
+	/**
+	 * An Asset whose models share one vertex and index buffer, from the options of
+	 * scene.createMesh(). Its models share one material instance, so that Filament can merge
+	 * their draws, until a model's material handle is requested.
+	 */
+	createMeshAsset(options)
+	{
+		return new Asset(this._context, this._call("createMeshAsset", options));
+	}
+
 	/** loadAsset() for a glTF document and its external files: files maps relative URIs to bytes. */
 	loadAssetFiles(main, files, { strict = false } = {})
 	{
@@ -830,7 +840,7 @@ export class Scene extends Handle
 		return model;
 	}
 
-	/** A new Model of an Asset from renderer.loadAsset(). */
+	/** A new Model of an Asset from renderer.loadAsset() or renderer.createMeshAsset(). */
 	add(asset)
 	{
 		return new Model(this._context, this._call("add", asset._native));
@@ -840,7 +850,8 @@ export class Scene extends Handle
 	 * A model from vertex arrays (see shapes): positions and indices are required; normals,
 	 * uvs, and colors (4 per vertex, linear) are optional. Material options: baseColor,
 	 * metallic (default 0), roughness (default 1), emissive, unlit, doubleSided, and alphaMode
-	 * ("opaque", "mask", or "blend").
+	 * ("opaque", "mask", or "blend"). It is renderer.createMeshAsset() and add() in one step,
+	 * without keeping the asset.
 	 */
 	createMesh(options)
 	{
@@ -916,7 +927,8 @@ function defineProperty(cls, name)
 }
 
 /**
- * A glTF asset that the renderer keeps, so that any of its scenes can add() new models of it.
+ * A glTF asset, or a mesh from renderer.createMeshAsset(), that the renderer keeps, so that any
+ * of its scenes can add() new models of it.
  * close() releases the source data that add() reads; models that exist keep the GPU data.
  */
 export class Asset extends Handle
@@ -1089,7 +1101,10 @@ export class Model extends Handle
 		return this._get("vertexCount");
 	}
 
-	/** Replace vertex data of a generated mesh: positions, normals, uvs, or colors, as in createMesh. */
+	/**
+	 * Replace vertex data of a generated mesh: positions, normals, uvs, or colors, as in
+	 * createMesh. Every model of the same asset from renderer.createMeshAsset() shows the change.
+	 */
 	updateMesh(arrays)
 	{
 		this._call("updateMesh", arrays);
@@ -1458,6 +1473,52 @@ export class PickQuery extends Handle
 	}
 }
 
+/**
+ * A copy of a RenderTarget's pixels that RenderTarget.beginRead() queued. WebGL completes the
+ * copy only after control returns to the browser: poll ready() once per frame, or await read().
+ */
+export class Readback extends Handle
+{
+	/** Whether the copy finished. Does not wait for the GPU. */
+	ready()
+	{
+		return this._call("ready");
+	}
+
+	/** framesRendered when beginRead() queued the copy. */
+	get frameNumber()
+	{
+		return this._get("frameNumber");
+	}
+
+	/** Resolves to the RGBA bytes, rows from the top, when the copy finishes; then closes. */
+	async read({ timeoutMs = 10000 } = {})
+	{
+		const start = performance.now();
+		while (!this.ready())
+		{
+			if (performance.now() - start > timeoutMs)
+			{
+				throw new FillyError("The GPU readback did not complete");
+			}
+			this._context.handBack();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		}
+		return this._call("read");
+	}
+
+	/** Release the copy without reading it. Repeated calls are valid. */
+	close()
+	{
+		this._call("close");
+	}
+
+	get closed()
+	{
+		return this._get("closed");
+	}
+}
+
 /** A Filament-owned color target. */
 export class RenderTarget extends Handle
 {
@@ -1472,28 +1533,29 @@ export class RenderTarget extends Handle
 	}
 
 	/**
+	 * Queue a copy of the pixels and return a Readback at once. Later renders into the target do
+	 * not change the copy, so a loop can render the next frame before it reads this one.
+	 */
+	beginRead()
+	{
+		return new Readback(this._context, this._call("beginRead"));
+	}
+
+	/**
 	 * RGBA bytes, rows from the top. WebGL completes a readback only after control returns to
 	 * the browser, so this resolves on a later turn of the event loop.
 	 */
 	async read({ timeoutMs = 10000 } = {})
 	{
-		const readback = this._call("beginRead");
+		const readback = this.beginRead();
 		try
 		{
-			const start = performance.now();
-			while (!this._context.call(() => readback.ready()))
-			{
-				if (performance.now() - start > timeoutMs)
-				{
-					throw new FillyError("The GPU readback did not complete");
-				}
-				await new Promise((resolve) => setTimeout(resolve, 0));
-			}
-			return this._context.call(() => readback.take());
+			return await readback.read({ timeoutMs });
 		}
 		finally
 		{
-			readback.delete();
+			readback.close();
+			readback.dispose();
 		}
 	}
 

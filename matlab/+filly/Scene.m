@@ -56,7 +56,7 @@ classdef Scene < filly.Object
         end
 
         function model = add(obj, asset)
-            % A new instance of an asset from renderer.loadAsset().
+            % A new instance of an asset from renderer.loadAsset() or renderer.createMeshAsset().
             model = filly.Model(obj.Owner, filly_mex('Scene.add', obj.Id, asset.Id));
         end
 
@@ -65,12 +65,9 @@ classdef Scene < filly.Object
             % front faces). Options: 'Normals' (N x 3), 'Uvs' (N x 2), 'Colors' (N x 4),
             % 'BaseColor' ([1 1 1 1]), 'Metallic' (0), 'Roughness' (1), 'Emissive' ([0 0 0]),
             % 'Unlit' (false), 'DoubleSided' (false), 'AlphaMode' ('opaque', 'mask', 'blend').
-            o = filly.internal.options(struct('Normals', [], 'Uvs', [], 'Colors', [], 'BaseColor', [1 1 1 1], ...
-                'Metallic', 0, 'Roughness', 1, 'Emissive', [0 0 0], 'Unlit', false, 'DoubleSided', false, ...
-                'AlphaMode', 'opaque'), varargin);
-            model = filly.Model(obj.Owner, filly_mex('Scene.createMesh', obj.Id, positions, indices, o.Normals, ...
-                o.Uvs, o.Colors, o.BaseColor, o.Metallic, o.Roughness, o.Emissive, o.Unlit, o.DoubleSided, ...
-                filly.internal.text(o.AlphaMode)));
+            % It is renderer.createMeshAsset() and add() in one step, without keeping the asset.
+            args = filly.internal.meshArguments(positions, indices, varargin);
+            model = filly.Model(obj.Owner, filly_mex('Scene.createMesh', obj.Id, args{:}));
         end
 
         function light = addDirectionalLight(obj, direction, varargin)

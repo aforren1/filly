@@ -126,7 +126,8 @@ PIXI in PsychoJS. See [use filly in a web page](docs/how-to/web.md).
 - **Stimuli from arrays:** textures and meshes from arrays, updated in place each frame, for
   gratings, noise, or deforming shapes.
 - **Many objects per frame:** one call sets the transforms, material parameters, or morph
-  weights of many nodes or materials.
+  weights of many nodes or materials. Copies of one generated mesh share its buffers, and
+  Filament can draw up to 64 of them in one call.
 - **Predictable output:** sRGB (default) or linear. Effects such as antialiasing, fog, and bloom
   are off until you enable them. With default settings, the same scene gives the same pixels on
   every frame.

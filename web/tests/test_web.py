@@ -291,6 +291,34 @@ def test_lit_box_matches_desktop(page_results):
     _assert_matches_desktop(web, desktop)
 
 
+def test_mesh_asset_matches_desktop(page_results):
+    value = _value(page_results, "mesh_asset")
+    assert value["models"] == 12
+    separate = np.array(value["separate"]).reshape(120, 160, 4)
+    shared = np.array(value["shared"]).reshape(120, 160, 4)
+    # The web build batches at most 8 instances per draw; the pixels do not depend on it.
+    np.testing.assert_array_equal(separate, shared)
+    box = filly.shapes.box(0.5, 0.5, 0.5)
+    with filly.Renderer() as renderer:
+        scene = renderer.create_scene()
+        scene.background = (0.1, 0.2, 0.3, 1)
+        asset = renderer.create_mesh_asset(**box, base_color=(0.8, 0.5, 0.2, 1))
+        for i in range(12):
+            model = scene.add(asset)
+            model.position = (i % 4 - 1.5, i // 4 - 1, 0)
+            model.rotation_euler_deg = (20, 35, 0)
+            if i == 5:
+                model.material("mesh").base_color = (1, 0, 0, 1)
+        camera = renderer.create_camera()
+        camera.set_perspective(fov_y_deg=35, near=0.5, far=20)
+        camera.position = (0, 0, 6)
+        camera.look_at((0, 0, 0))
+        scene.camera = camera
+        scene.add_directional_light(direction=(-1, -2, -1), intensity=80000)
+        desktop = _render(renderer, scene, 160, 120)
+    _assert_matches_desktop(shared, desktop, flat_share=0.75)
+
+
 def test_instances_match_desktop(page_results):
     # The web build batches at most 8 instances per draw, desktop 64.
     web = np.array(_value(page_results, "instances")).reshape(120, 160, 4)
@@ -484,6 +512,15 @@ def _assert_picks_match(web, desktop, models):
         # The same float depth from the same projection; WebGL may round differently.
         np.testing.assert_allclose(hit["position"], expected.position, atol=1e-4)
         assert hit["depth"] == pytest.approx(expected.depth, abs=1e-4)
+
+
+def test_readback_pipelines(page_results):
+    value = _value(page_results, "readback")
+    assert value["distinct"] == 6
+    assert value["matches"] == [True] * 6
+    assert value["frameNumbers"] == [0] * 6
+    assert value["closed"] and value["closedByTarget"]
+    assert "Readback is closed" in value["closedRead"]
 
 
 def test_pick_matches_desktop(page_results):

@@ -452,6 +452,23 @@ def test_diffuse_transmission_environment(renderer, scene, triangle_glb):
     assert target.read()[16,16,:3].max() == 0
 
 
+def test_diffuse_transmission_added_after_environment(renderer, scene, triangle_glb):
+    """An add configures only the new model; it still gets the environment of the scene."""
+    doc,binary = unpack(triangle_glb); lit(doc)
+    scene.environment = renderer.create_environment(np.ones((8,16,3),dtype="f"))
+    scene.environment_intensity = 50000
+    # A model without diffuse transmission does not need the irradiance map.
+    scene.create_mesh(**filly.shapes.plane(0.1, 0.1)).position = (5, 0, 0)
+    doc["extensionsUsed"] = ["KHR_materials_diffuse_transmission"]
+    doc["materials"][0]["extensions"] = {"KHR_materials_diffuse_transmission":{
+        "diffuseTransmissionFactor":1,"diffuseTransmissionColorFactor":[1,0,0]}}
+    model = scene.load(pack(doc,binary))
+    model.node("triangle").material()
+    target = renderer.create_render_target(width=32,height=32)
+    renderer.render(scene,target); pixel = target.read()[16,16]
+    assert pixel[0] > pixel[1]+20 and pixel[1] == pixel[2], pixel
+
+
 def test_hdr_environment_file(renderer, scene, triangle_glb, tmp_path):
     doc,binary = unpack(triangle_glb); lit(doc)
     scene.load(pack(doc,binary))

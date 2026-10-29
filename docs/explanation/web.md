@@ -148,8 +148,10 @@ Firefox has no `KHR_parallel_shader_compile`. Filament then compiles at the firs
 - WebGL2 has no texture swizzle, so single-channel runtime textures raise `RangeError`. Use 3 or
   4 channels.
 - WebGL signals GPU fences only after control returns to the browser, so `RenderTarget.read()`
-  is asynchronous: it starts the readback (`RenderTarget::begin_read()` in the core) and polls
-  it on later turns of the event loop. `ImportedTarget.read()` of a page-owned texture reads with
+  is asynchronous: it starts a `Readback` (`beginRead()`) and polls it on later turns of the
+  event loop. The web build reads with Filament's `readPixels()`; the desktop build reads with
+  its own pixel buffers and fences, which need a blocking wait that WebGL does not have (see
+  [readback](design.md#readback)). `ImportedTarget.read()` of a page-owned texture reads with
   `readPixels` in JavaScript and waits for the GPU; it is for tests.
 - Imported textures (`ImportedTexture`) need no fences: `beginWrite()` and `endWrite()` (or
   `write(fn)`) keep only the bookkeeping.

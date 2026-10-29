@@ -350,21 +350,20 @@ public:
     Camera camera(const std::string& node) const;
     Camera camera(int64_t node) const;
     std::vector<Camera> cameras() const;
-    // Generated meshes only.
+    // Generated meshes only. An update changes the mesh of the model's asset, so every model of
+    // an asset from Renderer::create_mesh_asset() shows it.
     bool is_mesh() const;
     size_t vertex_count() const;
     void update_mesh(const MeshArrays& arrays);
 private:
     Camera camera_at(size_t position) const;
-    // Replaces the geometry of the placeholder asset that Scene::create_mesh loads.
-    void attach_mesh(const MeshArrays& arrays);
     std::shared_ptr<detail::ModelData> data_;
     friend class Scene;
     friend class Camera;
 };
 
-// A glTF asset that the renderer keeps for Scene::add(): its GPU textures and geometry and the
-// source data that each new instance reads. Any scene of the renderer can add it. close()
+// A glTF asset, or a mesh from Renderer::create_mesh_asset(), that the renderer keeps for
+// Scene::add(): its GPU textures and geometry and the source data that each new instance reads. Any scene of the renderer can add it. close()
 // releases the source data; models already made from it keep the GPU data until the last of
 // them closes.
 class Asset {
@@ -406,8 +405,8 @@ public:
     Model load(const uint8_t* bytes, size_t size, bool strict, std::vector<std::string>& warnings);
     // A new instance of the asset, which must belong to the same renderer and be open.
     Model add(const Asset& asset);
-    // A model with one node and one glTF material whose geometry is the caller's arrays.
-    // arrays.indices and arrays.triangles are required.
+    // Renderer::create_mesh_asset() and add() in one step, without a shared material: a model
+    // with one node and one glTF material whose geometry is the caller's arrays.
     Model create_mesh(const MeshArrays& arrays, const MeshMaterial& material);
     Light add_directional_light(Vec3 direction, float intensity, Vec3 color);
     Light add_sun_light(Vec3 direction, float intensity, Vec3 color, float angular_radius_deg,
@@ -544,26 +543,36 @@ private:
     std::shared_ptr<detail::TextureData> data_;
 };
 
-// RGBA bytes, rows from the top. The storage is not zero-filled before the GPU writes it: at
-// 1920 x 1080 the fill cost about 2 ms per read.
-struct PixelBuffer {
-    std::unique_ptr<uint8_t[]> data;
-    size_t size = 0;
-};
+// Receives the pixels of a readback: `top` is the top row of RGBA bytes, and each next row starts
+// `stride` bytes after the previous one. The stride is negative when the rows are stored
+// bottom-up. On the desktop the sink runs on Filament's driver thread while the caller waits, so
+// it must not call filly.
+using RowSink = std::function<void(const uint8_t* top, ptrdiff_t stride)>;
 
-// A readback that RenderTarget::begin_read() started. WebGL completes GPU readbacks only
-// after control returns to the browser, so the web build polls ready() on later turns of its
-// event loop; on the desktop the first ready() completes it.
+// A copy of a RenderTarget's pixels that RenderTarget::begin_read() queued after the renders
+// before it. Later renders into the target do not change it, so a loop can render the next
+// frame before it reads this one (see docs/reference/api.md#readback).
 class Readback {
 public:
     explicit Readback(std::shared_ptr<detail::ReadbackData> data);
-    // Runs pending GPU work, then reports whether the pixels arrived.
+    // Reports whether the GPU has finished the copy, without waiting for it. On the desktop each
+    // call queues a check on Filament's driver thread, whose answer a later call sees. WebGL
+    // signals the copy only after control returns to the browser.
     bool ready();
-    // RGBA rows from the top. Valid once, after ready() returned true.
-    std::vector<uint8_t> take();
+    // Waits for the copy and passes the rows to the sink, then closes the readback. The web
+    // build cannot wait, so there read() needs ready() to have returned true.
+    void read(const RowSink& sink);
+    // As read(sink), into width * height * 4 bytes, top row first.
+    void read(uint8_t* pixels);
+    uint32_t width() const;
+    uint32_t height() const;
+    // Stats::frames_rendered when begin_read() queued the copy.
+    uint64_t frame_number() const;
+    // Releases the copy without reading it. Repeated calls are valid.
+    void close();
+    bool closed() const;
 private:
     std::shared_ptr<detail::ReadbackData> data_;
-    friend class RenderTarget;
 };
 
 // Shader compilation that Renderer::prepare() started. Compilation runs in the background:
@@ -611,8 +620,13 @@ public:
     explicit RenderTarget(std::shared_ptr<detail::TargetData> data);
     uint32_t width() const;
     uint32_t height() const;
-    PixelBuffer read() const;
+    // Queues a copy of the pixels and returns at once. On the desktop each readback in flight
+    // holds a pixel buffer object of the target's size, which the target keeps for later
+    // readbacks until it closes.
     Readback begin_read() const;
+    // begin_read() followed by Readback::read(). Not available in the web build.
+    void read(const RowSink& sink) const;
+    void read(uint8_t* pixels) const;
     void close();
     bool closed() const;
 private:
@@ -650,6 +664,10 @@ public:
     // required extensions. The bytes are copied.
     Asset load_asset(const std::string& path, bool strict, std::vector<std::string>& warnings);
     Asset load_asset(const uint8_t* bytes, size_t size, bool strict, std::vector<std::string>& warnings);
+    // An asset whose models share the vertex and index buffers of the caller's arrays, and one
+    // material instance until a model's material handle is requested. arrays.indices and
+    // arrays.triangles are required.
+    Asset create_mesh_asset(const MeshArrays& arrays, const MeshMaterial& material);
     // Environments, which any scene of the renderer can use. A 2:1 panorama: a Radiance HDR, PNG,
     // or JPEG file, or width * height * 3 linear RGB values (count), rows from the top, which are
     // copied. Loading filters it for reflections and diffuse lighting and waits for the GPU.

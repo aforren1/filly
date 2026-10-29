@@ -283,6 +283,47 @@ await check("lit_box", async () =>
 	return Array.from(pixels);
 });
 
+// Twelve models of one mesh asset, one of them with its own color, and the same boxes as
+// separate meshes.
+await check("mesh_asset", async () =>
+{
+	const box = shapes.box({ width: 0.5, height: 0.5, depth: 0.5 });
+	const images = [];
+	let memory = null;
+	for (const shared of [false, true])
+	{
+		const scene = renderer.createScene();
+		scene.background = [0.1, 0.2, 0.3, 1];
+		const asset = shared ? renderer.createMeshAsset({ ...box, baseColor: [0.8, 0.5, 0.2, 1] }) : null;
+		const models = [];
+		for (let i = 0; i < 12; ++i)
+		{
+			const model = shared ? scene.add(asset) : scene.createMesh({ ...box, baseColor: [0.8, 0.5, 0.2, 1] });
+			model.position = [(i % 4) - 1.5, Math.floor(i / 4) - 1, 0];
+			model.rotationEulerDeg = [20, 35, 0];
+			models.push(model);
+		}
+		models[5].material("mesh").baseColor = [1, 0, 0, 1];
+		if (shared)
+		{
+			memory = asset.memory;
+			asset.close();
+		}
+		const camera = renderer.createCamera();
+		camera.setPerspective({ fovYDeg: 35, near: 0.5, far: 20 });
+		camera.position = [0, 0, 6];
+		camera.lookAt([0, 0, 0]);
+		scene.camera = camera;
+		scene.addDirectionalLight({ direction: [-1, -2, -1], intensity: 80000 });
+		const target = renderer.createRenderTarget(160, 120);
+		renderer.render(scene, target);
+		images.push(Array.from(await target.read()));
+		target.close();
+		scene.close();
+	}
+	return { separate: images[0], shared: images[1], models: memory.models };
+});
+
 await check("instances", async () =>
 {
 	const scene = renderer.createScene();
@@ -619,6 +660,72 @@ await check("pick", async () =>
 	scene.close();
 	instanced.close();
 	return { layers, blended, instances, latency };
+});
+
+// Pipelined readbacks: frames that differ, each read after the next render, as in
+// python/tests/test_readback.py.
+await check("readback", async () =>
+{
+	const scene = renderer.createScene();
+	const square = scene.createMesh({ ...shapes.plane({ width: 0.5, height: 0.5 }), unlit: true });
+	const material = square.material("mesh");
+	const camera = renderer.createCamera();
+	camera.setOrthographic({ height: 2, near: 0.1, far: 10 });
+	camera.position = [0, 0, 3];
+	camera.lookAt([0, 0, 0]);
+	scene.camera = camera;
+	const target = renderer.createRenderTarget(48, 32);
+	const show = (frame) =>
+	{
+		square.position = [-0.6 + 0.1 * frame, 0.2, 0];
+		material.baseColor = [(frame * 37 % 256) / 255, (frame * 91 % 256) / 255, 0.5, 1];
+	};
+	const expected = [];
+	for (let frame = 0; frame < 6; frame++)
+	{
+		show(frame);
+		renderer.render(scene, target);
+		expected.push(Array.from(await target.read()));
+	}
+	const pending = [];
+	const got = [];
+	const frameNumbers = [];
+	for (let frame = 0; frame < 6; frame++)
+	{
+		show(frame);
+		renderer.render(scene, target);
+		const readback = target.beginRead();
+		frameNumbers.push(readback.frameNumber - renderer.stats.framesRendered);
+		pending.push(readback);
+		if (pending.length > 2)
+		{
+			got.push(Array.from(await pending.shift().read()));
+		}
+		renderer.handBack();
+		await new Promise((resolve) => requestAnimationFrame(resolve));
+	}
+	for (const readback of pending)
+	{
+		got.push(Array.from(await readback.read()));
+	}
+	const last = pending[pending.length - 1];
+	let closedRead = "";
+	try
+	{
+		await last.read();
+	}
+	catch (error)
+	{
+		closedRead = `${error.name}: ${error.message}`;
+	}
+	const inFlight = target.beginRead();
+	target.close();
+	const closedByTarget = inFlight.closed;
+	inFlight.close();
+	scene.close();
+	return { matches: got.map((pixels, i) => pixels.every((value, k) => value === expected[i][k])),
+		distinct: new Set(expected.map((pixels) => pixels.join())).size, frameNumbers,
+		closed: last.closed, closedRead, closedByTarget };
 });
 
 results.platform = renderer.glPlatform;

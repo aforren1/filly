@@ -30,7 +30,9 @@ The values are sRGB-encoded: a linear material value of 0.5 becomes 188.
 Set `scene.encoding = "linear"` to store linear values (0.5 becomes 128) instead.
 
 Readback waits for the GPU and copies image data to CPU memory.
-Use it for images and diagnostics. For display without CPU readback, use the
+Use it for images and diagnostics. To read many frames, reuse one array with
+`target.read(out=image)`, or read each frame while the next one renders with
+`target.begin_read()`. See [readback](../reference/api.md#readback). For display without CPU readback, use the
 [PsychoPy shared-texture adapter](../how-to/psychopy.md).
 
 For reflective metals, add environment lighting before rendering:

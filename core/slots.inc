@@ -233,8 +233,9 @@ void tangent_frames(MeshGeometry& mesh, m::short4* out) {
         }
         return;
     }
-    std::fill(mesh.tan1.begin(), mesh.tan1.end(), m::float3{0, 0, 0});
-    std::fill(mesh.tan2.begin(), mesh.tan2.end(), m::float3{0, 0, 0});
+    // Creation uses SurfaceOrientation, so only meshes that are updated allocate the scratch.
+    mesh.tan1.assign(count, m::float3{0, 0, 0});
+    mesh.tan2.assign(count, m::float3{0, 0, 0});
     for (const auto& tri : mesh.triangles) {
         const auto& v1 = mesh.positions[tri.x];
         const auto& v2 = mesh.positions[tri.y];
@@ -277,7 +278,8 @@ void update_bounds(MeshGeometry& mesh) {
     mesh.low = mesh.high = mesh.positions.empty() ? m::float3{0, 0, 0} : mesh.positions[0];
     for (const auto& p : mesh.positions) { mesh.low = min(mesh.low, p); mesh.high = max(mesh.high, p); }
 }
-// Replaces a placeholder renderable's geometry with the mesh buffers.
+// Replaces a placeholder renderable's geometry with the mesh buffers, and its material with the
+// asset's shared one if the asset has one.
 void attach_geometry(ModelData& model) {
     auto& mesh = *model.shared->mesh;
     auto& rm = model.state->engine->getRenderableManager();
@@ -289,7 +291,123 @@ void attach_geometry(ModelData& model) {
                          mesh.vertices, mesh.indices, 0, mesh.triangle_count * 3);
         rm.setAxisAlignedBoundingBox(renderable, f::Box().set(mesh.low, mesh.high));
         mesh.renderables.push_back(entities[i]);
+        if (mesh.share_material) {
+            if (!mesh.material) mesh.material = f::MaterialInstance::duplicate(rm.getMaterialInstanceAt(renderable, 0));
+            rm.setMaterialInstanceAt(renderable, 0, mesh.material);
+            model.shares_material = true;
+        }
         return;
     }
     throw AssetError("Mesh placeholder has no renderable");
+}
+// Gives a model of a shared mesh asset its own material instance back, before a material handle
+// can change it. That instance still has the shared values, because only handles write to it.
+void own_material(ModelData& model) {
+    if (!model.shares_material) return;
+    model.shares_material = false;
+    auto& rm = model.state->engine->getRenderableManager();
+    const auto* entities = model.instance->getEntities();
+    for (size_t i = 0; i < model.instance->getEntityCount(); ++i)
+        if (auto renderable = rm.getInstance(entities[i]))
+            rm.setMaterialInstanceAt(renderable, 0, model.instance->getMaterialInstances()[0]);
+}
+
+// Checks the arrays of a new mesh before anything is created for it.
+void check_new_mesh(const MeshArrays& a) {
+    if (!a.positions || !a.indices || a.vertices < 3 || a.triangles < 1)
+        throw std::invalid_argument("A mesh needs at least 3 positions and 1 triangle");
+    for (size_t i = 0; i < a.vertices * 3; ++i)
+        if (!std::isfinite(a.positions[i])) throw std::invalid_argument("Positions must be finite");
+    for (const float* values : {a.normals, a.uvs, a.colors}) {
+        if (!values) continue;
+        const size_t width = values == a.normals ? 3 : values == a.uvs ? 2 : 4;
+        for (size_t i = 0; i < a.vertices * width; ++i)
+            if (!std::isfinite(values[i])) throw std::invalid_argument("Values must be finite");
+    }
+    for (size_t i = 0; i < a.triangles * 3; ++i)
+        if (a.indices[i] >= a.vertices)
+            throw std::invalid_argument("Triangle index " + std::to_string(a.indices[i]) + " is out of range");
+}
+
+// The vertex and index buffers of a new mesh, with its data queued for upload. The arrays must
+// have passed check_new_mesh().
+std::unique_ptr<MeshGeometry> build_mesh(f::Engine& engine, const MeshArrays& a) {
+    auto mesh = std::make_unique<MeshGeometry>();
+    const size_t n = a.vertices;
+    mesh->vertex_count = n;
+    mesh->triangle_count = a.triangles;
+    mesh->has_uvs = a.uvs != nullptr;
+    mesh->has_colors = a.colors != nullptr;
+    mesh->computed_normals = a.normals == nullptr;
+    auto* p = reinterpret_cast<const m::float3*>(a.positions);
+    mesh->positions.assign(p, p + n);
+    mesh->triangles.assign(reinterpret_cast<const m::uint3*>(a.indices), reinterpret_cast<const m::uint3*>(a.indices) + a.triangles);
+    mesh->normals.resize(n);
+    if (a.normals) {
+        auto* normal = reinterpret_cast<const m::float3*>(a.normals);
+        for (size_t i = 0; i < n; ++i) {
+            const float length = std::sqrt(dot(normal[i], normal[i]));
+            if (!(length > 0)) throw std::invalid_argument("Normals must be nonzero");
+            mesh->normals[i] = normal[i] / length;
+        }
+    } else {
+        smooth_normals(*mesh);
+    }
+    if (a.uvs) {
+        auto* uv = reinterpret_cast<const m::float2*>(a.uvs);
+        mesh->uvs.assign(uv, uv + n);
+    }
+    update_bounds(*mesh);
+    mesh->position_upload.size = n * sizeof(m::float3);
+    mesh->tangent_upload.size = n * sizeof(m::short4);
+    mesh->uv_upload.size = n * sizeof(m::float2);
+    mesh->color_upload.size = n * sizeof(m::float4);
+    const size_t color_size = a.colors ? mesh->color_upload.size : n * 4;
+    const size_t total = mesh->position_upload.size + mesh->tangent_upload.size + mesh->uv_upload.size + color_size;
+    if (total > UINT32_MAX) throw std::invalid_argument("Mesh has too many vertices");
+    mesh->tangent_offset = uint32_t(mesh->position_upload.size);
+    mesh->uv_offset = uint32_t(mesh->tangent_offset + mesh->tangent_upload.size);
+    mesh->color_offset = uint32_t(mesh->uv_offset + mesh->uv_upload.size);
+    using V = f::VertexBuffer;
+    using A = f::VertexAttribute;
+    // One buffer object with a block per attribute, so that an update sends only the blocks that
+    // changed. Material packages that serve every key (Filament's archive, filly's) require
+    // COLOR and UV1 and multiply by the vertex color, so a mesh without colors supplies white;
+    // UV1 reads the UV0 block.
+    auto vertices = V::Builder().vertexCount(uint32_t(n)).bufferCount(1)
+        .attribute(A::POSITION, 0, V::AttributeType::FLOAT3, 0, 12)
+        .attribute(A::TANGENTS, 0, V::AttributeType::SHORT4, mesh->tangent_offset, 8).normalized(A::TANGENTS)
+        .attribute(A::UV0, 0, V::AttributeType::FLOAT2, mesh->uv_offset, 8)
+        .attribute(A::UV1, 0, V::AttributeType::FLOAT2, mesh->uv_offset, 8);
+    if (mesh->has_colors) vertices.attribute(A::COLOR, 0, V::AttributeType::FLOAT4, mesh->color_offset, 16);
+    else vertices.attribute(A::COLOR, 0, V::AttributeType::UBYTE4, mesh->color_offset, 4).normalized(A::COLOR);
+    mesh->vertices = vertices.build(engine);
+    mesh->indices = f::IndexBuffer::Builder().indexCount(uint32_t(a.triangles * 3))
+        .bufferType(f::IndexBuffer::IndexType::UINT).build(engine);
+    if (!mesh->vertices || !mesh->indices) {
+        mesh->release(engine);
+        throw FillyError("Could not create mesh buffers");
+    }
+    // Creation uses Filament's SurfaceOrientation; updates use its allocation-free copy.
+    f::geometry::SurfaceOrientation::Builder orientation;
+    orientation.vertexCount(n).normals(mesh->normals.data()).positions(mesh->positions.data())
+        .triangleCount(a.triangles).triangles(mesh->triangles.data());
+    if (a.uvs) orientation.uvs(mesh->uvs.data());
+    std::unique_ptr<f::geometry::SurfaceOrientation> frames(orientation.build());
+    if (!frames) { mesh->release(engine); throw FillyError("Could not compute tangent frames"); }
+    // Creation uploads one-off buffers, so meshes that never change keep no staging storage.
+    auto free_bytes = [](void* buffer, size_t, void*) { delete[] static_cast<uint8_t*>(buffer); };
+    auto* bytes = new uint8_t[total];
+    std::memcpy(bytes, mesh->positions.data(), mesh->position_upload.size);
+    frames->getQuats(reinterpret_cast<m::short4*>(bytes + mesh->tangent_offset), n);
+    if (a.uvs) std::memcpy(bytes + mesh->uv_offset, a.uvs, mesh->uv_upload.size);
+    else std::memset(bytes + mesh->uv_offset, 0, mesh->uv_upload.size);
+    if (a.colors) std::memcpy(bytes + mesh->color_offset, a.colors, color_size);
+    else std::memset(bytes + mesh->color_offset, 0xFF, color_size);
+    mesh->vertices->setBufferAt(engine, 0, V::BufferDescriptor(bytes, total, free_bytes));
+    const size_t index_size = a.triangles * 3 * sizeof(uint32_t);
+    auto* index_bytes = new uint8_t[index_size];
+    std::memcpy(index_bytes, a.indices, index_size);
+    mesh->indices->setBuffer(engine, f::IndexBuffer::BufferDescriptor(index_bytes, index_size, free_bytes));
+    return mesh;
 }

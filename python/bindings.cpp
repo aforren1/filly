@@ -14,6 +14,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <type_traits>
 
@@ -154,6 +155,80 @@ std::pair<int, bool> pixel_layout(const Pixels& pixels) {
 }
 size_t pixel_bytes(const Pixels& pixels) { return pixels.size() * pixels.itemsize(); }
 
+// The storage of the last read() array that Python freed, for the next read() of the same size.
+// The first write to new storage costs page faults: 3.4 ms at 1920 x 1080 on both test GPUs,
+// against 0.8 ms for the copy. A loop that replaces its array (image = target.read()) frees the
+// previous one just after each read, so two buffers alternate without faults. Renderer.close()
+// frees it.
+struct ArrayStorage {
+    std::unique_ptr<uint8_t[]> data;
+    size_t size = 0;
+};
+struct SpareStorage {
+    std::mutex mutex;
+    std::unique_ptr<ArrayStorage> storage;
+};
+// Never destroyed: a capsule can outlive the module's static destructors.
+SpareStorage& spare_storage() {
+    static auto* value = new SpareStorage();
+    return *value;
+}
+std::unique_ptr<ArrayStorage> new_storage(size_t size) {
+    auto& spare = spare_storage();
+    {
+        std::lock_guard lock(spare.mutex);
+        if (spare.storage && spare.storage->size == size) return std::move(spare.storage);
+    }
+    auto result = std::make_unique<ArrayStorage>();
+    // Not zero-filled before the copy: at 1920 x 1080 the fill cost about 2 ms per read.
+    result->data.reset(new uint8_t[size]);
+    result->size = size;
+    return result;
+}
+void keep_storage(void* storage) noexcept {
+    std::unique_ptr<ArrayStorage> previous(static_cast<ArrayStorage*>(storage));
+    auto& spare = spare_storage();
+    std::lock_guard lock(spare.mutex);
+    spare.storage.swap(previous);
+}
+void free_spare_storage() noexcept {
+    std::unique_ptr<ArrayStorage> previous;
+    auto& spare = spare_storage();
+    std::lock_guard lock(spare.mutex);
+    spare.storage.swap(previous);
+}
+
+// Reads RGBA rows into `out`, or into a new array if it is None, without the GIL. A converted
+// copy of `out` would silently receive the pixels, so only an exact match is accepted.
+template <class Read> nb::object read_pixels(size_t width, size_t height, nb::handle out, Read&& read) {
+    if (out.is_none()) {
+        auto storage = new_storage(width * height * 4);
+        {
+            nb::gil_scoped_release release;
+            read(storage->data.get());
+        }
+        auto* pixels = storage->data.get();
+        nb::capsule owner(storage.get(), keep_storage);
+        storage.release();
+        return nb::cast(nb::ndarray<nb::numpy, uint8_t>(pixels, {height, width, 4}, owner));
+    }
+    nb::ndarray<nb::device::cpu> array;
+    if (!nb::try_cast(out, array, false) || array.dtype() != nb::dtype<uint8_t>())
+        throw nb::type_error("out must be a writable uint8 array");
+    const auto shape = "(" + std::to_string(height) + ", " + std::to_string(width) + ", 4)";
+    if (array.ndim() != 3 || array.shape(0) != height || array.shape(1) != width || array.shape(2) != 4)
+        throw std::invalid_argument("out must have shape " + shape);
+    // NumPy may give a dimension of length 1 any stride.
+    if ((height > 1 && array.stride(0) != int64_t(width * 4)) || (width > 1 && array.stride(1) != 4)
+            || array.stride(2) != 1)
+        throw std::invalid_argument("out must be C-contiguous");
+    {
+        nb::gil_scoped_release release;
+        read(static_cast<uint8_t*>(array.data()));
+    }
+    return nb::borrow(out);
+}
+
 using Vertices3 = nb::ndarray<nb::numpy, const float, nb::shape<-1, 3>, nb::c_contig, nb::device::cpu>;
 using Vertices2 = nb::ndarray<nb::numpy, const float, nb::shape<-1, 2>, nb::c_contig, nb::device::cpu>;
 using Vertices4 = nb::ndarray<nb::numpy, const float, nb::shape<-1, 4>, nb::c_contig, nb::device::cpu>;
@@ -171,6 +246,19 @@ MeshArrays mesh_arrays(size_t vertices, const std::optional<Vertices3>& position
     if (uvs) { rows(uvs->shape(0), "uvs"); result.uvs = uvs->data(); }
     if (colors) { rows(colors->shape(0), "colors"); result.colors = colors->data(); }
     return result;
+}
+
+// Scene.create_mesh() and Renderer.create_mesh_asset() take the same arguments.
+template <class Owner, class Result, Result (Owner::*create)(const MeshArrays&, const MeshMaterial&)>
+Result from_arrays(Owner& self, Vertices3 positions, Triangles indices, std::optional<Vertices3> normals,
+                   std::optional<Vertices2> uvs, std::optional<Vertices4> colors, Vec4 base_color, float metallic,
+                   float roughness, Vec3 emissive, bool unlit, bool double_sided, const std::string& alpha_mode) {
+    auto arrays = mesh_arrays(positions.shape(0), positions, normals, uvs, colors);
+    arrays.indices = indices.data();
+    arrays.triangles = indices.shape(0);
+    const MeshMaterial material{base_color, metallic, roughness, emissive, unlit, double_sided, alpha_mode};
+    nb::gil_scoped_release release;
+    return (self.*create)(arrays, material);
 }
 
 nb::object wrap_texture(std::shared_ptr<detail::TextureData> data) {
@@ -355,6 +443,18 @@ NB_MODULE(_native, module) {
         .def_ro("gpu_frame_ms", &Stats::gpu_frame_ms)
         .def_ro("gpu_frame_number", &Stats::gpu_frame_number);
 
+    nb::class_<Readback> readback(module, "Readback");
+    closable(readback, "Readback is closed");
+    readback
+        .def("ready", &Readback::ready,
+             "Report whether the GPU has finished the copy, without waiting for it.")
+        .def("read", [](Readback& self, nb::handle out) {
+            return read_pixels(self.width(), self.height(), out, [&](uint8_t* pixels) { self.read(pixels); });
+        }, nb::kw_only(), "out"_a = nb::none())
+        .def_prop_ro("frame_number", &Readback::frame_number)
+        .def("close", &Readback::close)
+        .def_prop_ro("closed", &Readback::closed);
+
     nb::class_<RenderTarget> render_target(module, "RenderTarget");
     closable(render_target, "Render target is closed");
     render_target
@@ -362,18 +462,10 @@ NB_MODULE(_native, module) {
         .def_prop_ro("closed", &RenderTarget::closed)
         .def_prop_ro("width", &RenderTarget::width)
         .def_prop_ro("height", &RenderTarget::height)
-        .def("read", [](const RenderTarget& self) {
-            const size_t width = self.width(), height = self.height();
-            PixelBuffer pixels;
-            {
-                nb::gil_scoped_release release;
-                pixels = self.read();
-            }
-            auto* ptr = pixels.data.get();
-            nb::capsule owner(ptr, [](void* p) noexcept { delete[] static_cast<uint8_t*>(p); });
-            pixels.data.release();
-            return nb::ndarray<nb::numpy, uint8_t>(ptr, {height, width, 4}, owner);
-        });
+        .def("begin_read", &RenderTarget::begin_read)
+        .def("read", [](const RenderTarget& self, nb::handle out) {
+            return read_pixels(self.width(), self.height(), out, [&](uint8_t* pixels) { self.read(pixels); });
+        }, nb::kw_only(), "out"_a = nb::none());
 
     nb::class_<Acquisition>(module, "_Acquisition")
         .def("__enter__", [](Acquisition& self) {
@@ -499,6 +591,11 @@ NB_MODULE(_native, module) {
         .def("load_asset", [](Renderer& self, nb::handle source, bool strict) {
             return load_source<Asset>(source, strict, [&](auto&&... args) { return self.load_asset(args...); });
         }, "source"_a, nb::kw_only(), "strict"_a = false)
+        .def("create_mesh_asset", &from_arrays<Renderer, Asset, &Renderer::create_mesh_asset>, "positions"_a,
+           "indices"_a, nb::kw_only(), "normals"_a.none() = nb::none(), "uvs"_a.none() = nb::none(),
+           "colors"_a.none() = nb::none(), "base_color"_a = Vec4{1, 1, 1, 1}, "metallic"_a = 0.0f,
+           "roughness"_a = 1.0f, "emissive"_a = Vec3{0, 0, 0}, "unlit"_a = false, "double_sided"_a = false,
+           "alpha_mode"_a = "opaque")
         .def("load_environment", [](Renderer& self, nb::object path) {
             const auto filename = fs_path(path);
             nb::gil_scoped_release release;
@@ -555,7 +652,13 @@ NB_MODULE(_native, module) {
         .def("prepare", &Renderer::prepare, "scene"_a)
         .def("pick", &Renderer::pick, "scene"_a, "x"_a, "y"_a)
         .def("finish", &Renderer::finish, nb::call_guard<nb::gil_scoped_release>())
-        .def("close", &Renderer::close, nb::call_guard<nb::gil_scoped_release>())
+        .def("close", [](Renderer& self) {
+            {
+                nb::gil_scoped_release release;
+                self.close();
+            }
+            free_spare_storage();
+        })
         .def_prop_ro("closed", &Renderer::closed)
         .def_prop_ro("shared_context", &Renderer::shared_context)
         .def_prop_ro("gl_platform", &Renderer::gl_platform)
@@ -605,17 +708,7 @@ NB_MODULE(_native, module) {
         .def_prop_rw("vignette_roundness", &Scene::vignette_roundness, &Scene::set_vignette_roundness)
         .def_prop_rw("vignette_feather", &Scene::vignette_feather, &Scene::set_vignette_feather)
         .def_prop_rw("vignette_color", &Scene::vignette_color, &Scene::set_vignette_color)
-        .def("create_mesh", [](Scene& self, Vertices3 positions, Triangles indices, std::optional<Vertices3> normals,
-                               std::optional<Vertices2> uvs, std::optional<Vertices4> colors, Vec4 base_color,
-                               float metallic, float roughness, Vec3 emissive, bool unlit, bool double_sided,
-                               const std::string& alpha_mode) {
-            auto arrays = mesh_arrays(positions.shape(0), positions, normals, uvs, colors);
-            arrays.indices = indices.data();
-            arrays.triangles = indices.shape(0);
-            const MeshMaterial material{base_color, metallic, roughness, emissive, unlit, double_sided, alpha_mode};
-            nb::gil_scoped_release release;
-            return self.create_mesh(arrays, material);
-        }, "positions"_a, "indices"_a, nb::kw_only(), "normals"_a.none() = nb::none(), "uvs"_a.none() = nb::none(),
+        .def("create_mesh", &from_arrays<Scene, Model, &Scene::create_mesh>, "positions"_a, "indices"_a, nb::kw_only(), "normals"_a.none() = nb::none(), "uvs"_a.none() = nb::none(),
            "colors"_a.none() = nb::none(), "base_color"_a = Vec4{1, 1, 1, 1}, "metallic"_a = 0.0f,
            "roughness"_a = 1.0f, "emissive"_a = Vec3{0, 0, 0}, "unlit"_a = false, "double_sided"_a = false,
            "alpha_mode"_a = "opaque")

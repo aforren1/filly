@@ -302,7 +302,7 @@ struct Signal {
 // command-stream order. It outlives the platform that calls into it.
 struct SyncQueue {
     // srgb is -1 to leave GL_FRAMEBUFFER_SRGB unchanged, else its new state.
-    struct Request { void* incoming = nullptr; std::shared_ptr<Signal> outgoing; int srgb = -1; };
+    struct Request { void* incoming = nullptr; std::shared_ptr<Signal> outgoing; int srgb = -1; std::function<void()> task; };
     struct NativeSync : filament::backend::Platform::Sync { void* handle = nullptr; };
     uintptr_t context;
     // Offscreen engines have no host context to resolve these from and never use them.
@@ -340,6 +340,7 @@ struct SyncQueue {
             if (request.srgb) glEnable(FRAMEBUFFER_SRGB);
             else glDisable(FRAMEBUFFER_SRGB);
         }
+        if (request.task) request.task();
         if (request.incoming) {
             wait(request.incoming, 0, UINT64_MAX);
             delete_sync(request.incoming);
@@ -379,8 +380,56 @@ template <class Base> struct SyncPlatform final : Base {
     SyncQueue& queue;
 };
 
+// Readback state on Filament's driver thread: entry points beyond GL 1.1 and one framebuffer
+// that reads any target's color texture. Filament caches the bindings that it sets, so every
+// task restores the ones it changes.
+struct PackGl {
+    using BuffersFn = void (APIENTRY*)(int, unsigned*);
+    using BindFn = void (APIENTRY*)(unsigned, unsigned);
+    BuffersFn gen_buffers = nullptr, delete_buffers = nullptr, gen_framebuffers = nullptr;
+    BindFn bind_buffer = nullptr, bind_framebuffer = nullptr;
+    void (APIENTRY* buffer_data)(unsigned, intptr_t, const void*, unsigned) = nullptr;
+    void* (APIENTRY* map_range)(unsigned, intptr_t, intptr_t, unsigned) = nullptr;
+    unsigned char (APIENTRY* unmap)(unsigned) = nullptr;
+    void (APIENTRY* framebuffer_texture)(unsigned, unsigned, unsigned, unsigned, int) = nullptr;
+    StorageFn texture_storage = nullptr;
+    FenceFn fence = nullptr;
+    ClientWaitFn client_wait = nullptr;
+    DeleteFn delete_sync = nullptr;
+    unsigned framebuffer = 0;
+    // The texture attached to `framebuffer`, so that steady reads skip the attachment.
+    unsigned attached = 0;
+    bool loaded = false;
+    // Loads on first use, with Filament's context current: WGL entry points belong to a context.
+    void load() {
+        if (loaded) return;
+        gen_buffers = procedure<BuffersFn>("glGenBuffers");
+        delete_buffers = procedure<BuffersFn>("glDeleteBuffers");
+        gen_framebuffers = procedure<BuffersFn>("glGenFramebuffers");
+        bind_buffer = procedure<BindFn>("glBindBuffer");
+        bind_framebuffer = procedure<BindFn>("glBindFramebuffer");
+        buffer_data = procedure<decltype(buffer_data)>("glBufferData");
+        map_range = procedure<decltype(map_range)>("glMapBufferRange");
+        unmap = procedure<decltype(unmap)>("glUnmapBuffer");
+        framebuffer_texture = procedure<decltype(framebuffer_texture)>("glFramebufferTexture2D");
+        texture_storage = procedure<StorageFn>("glTexStorage2D");
+        fence = procedure<FenceFn>("glFenceSync");
+        client_wait = procedure<ClientWaitFn>("glClientWaitSync");
+        delete_sync = procedure<DeleteFn>("glDeleteSync");
+        loaded = true;
+    }
+    void delete_fence(PackBuffer& buffer) {
+        if (buffer.fence) delete_sync(buffer.fence);
+        buffer.fence = nullptr;
+    }
+};
+constexpr unsigned PIXEL_PACK_BUFFER = 0x88EB, PIXEL_PACK_BUFFER_BINDING = 0x88ED, STREAM_READ = 0x88E1,
+    READ_FRAMEBUFFER = 0x8CA8, READ_FRAMEBUFFER_BINDING = 0x8CAA, COLOR_ATTACHMENT0 = 0x8CE0, MAP_READ_BIT = 0x0001,
+    SYNC_FLUSH_COMMANDS_BIT = 0x0001;
+
 struct GlInterop::Impl {
     SyncQueue sync;
+    PackGl pack;
     std::unique_ptr<filament::backend::Platform> platform;
     const char* name = nullptr;
 #if defined(__linux__)
@@ -643,6 +692,171 @@ void GlInterop::set_srgb_writes(filament::Engine& engine, bool value) {
     impl_->sync.queue(std::move(request));
     auto* gate = engine.createSync();
     engine.destroy(gate);
+}
+void GlInterop::run(filament::Engine& engine, std::function<void()> task) {
+    SyncQueue::Request request;
+    request.task = std::move(task);
+    impl_->sync.queue(std::move(request));
+    auto* gate = engine.createSync();
+    engine.destroy(gate);
+}
+uint32_t GlInterop::create_texture(filament::Engine& engine, uint32_t width, uint32_t height) {
+    struct Result { std::mutex mutex; std::condition_variable ready; bool done = false; unsigned name = 0; };
+    auto result = std::make_shared<Result>();
+    run(engine, [gl = &impl_->pack, result, width, height] {
+        unsigned name = 0;
+        try {
+            gl->load();
+            discard_errors();
+            GLint previous = 0;
+            glGetIntegerv(TEXTURE_BINDING_2D, &previous);
+            glGenTextures(1, &name);
+            glBindTexture(GL_TEXTURE_2D, name);
+            gl->texture_storage(GL_TEXTURE_2D, 1, SRGB8_ALPHA8, GLint(width), GLint(height));
+            glBindTexture(GL_TEXTURE_2D, previous);
+            if (glGetError() != GL_NO_ERROR) {
+                glDeleteTextures(1, &name);
+                name = 0;
+            }
+        } catch (...) {
+            name = 0;
+        }
+        std::lock_guard lock(result->mutex);
+        result->name = name;
+        result->done = true;
+        result->ready.notify_one();
+    });
+    engine.flush();
+    std::unique_lock lock(result->mutex);
+    if (!result->ready.wait_for(lock, std::chrono::seconds(10), [&] { return result->done; }))
+        throw BackendError("Timed out waiting for Filament's driver thread to create a texture");
+    return result->name;
+}
+void GlInterop::delete_objects(filament::Engine& engine, uint32_t texture, std::vector<std::shared_ptr<PackBuffer>> buffers) {
+    run(engine, [gl = &impl_->pack, texture, buffers = std::move(buffers)] {
+        if (!gl->loaded) return;
+        for (const auto& buffer : buffers) {
+            gl->delete_fence(*buffer);
+            if (buffer->name) gl->delete_buffers(1, &buffer->name);
+            buffer->name = 0;
+        }
+        if (!texture) return;
+        // GL keeps a deleted texture's storage while an unbound framebuffer still has it attached.
+        if (gl->attached == texture) {
+            GLint previous = 0;
+            glGetIntegerv(READ_FRAMEBUFFER_BINDING, &previous);
+            gl->bind_framebuffer(READ_FRAMEBUFFER, gl->framebuffer);
+            gl->framebuffer_texture(READ_FRAMEBUFFER, COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            gl->bind_framebuffer(READ_FRAMEBUFFER, unsigned(previous));
+            gl->attached = 0;
+        }
+        const GLuint name = texture;
+        glDeleteTextures(1, &name);
+    });
+}
+void GlInterop::pack(filament::Engine& engine, uint32_t texture, uint32_t width, uint32_t height,
+                     std::shared_ptr<PackBuffer> buffer, uint64_t copy) {
+    run(engine, [gl = &impl_->pack, texture, width, height, buffer = std::move(buffer), copy] {
+        buffer->fenced = copy;
+        gl->delete_fence(*buffer);
+        try {
+            gl->load();
+            discard_errors();
+            GLint framebuffer = 0, pack_buffer = 0, alignment = 0;
+            glGetIntegerv(READ_FRAMEBUFFER_BINDING, &framebuffer);
+            glGetIntegerv(PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+            glGetIntegerv(GL_PACK_ALIGNMENT, &alignment);
+            if (!gl->framebuffer) gl->gen_framebuffers(1, &gl->framebuffer);
+            gl->bind_framebuffer(READ_FRAMEBUFFER, gl->framebuffer);
+            if (gl->attached != texture) {
+                gl->framebuffer_texture(READ_FRAMEBUFFER, COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+                gl->attached = texture;
+            }
+            // The buffer is kept for later reads. With a new buffer per read, as Filament's
+            // readPixels() makes, NVIDIA did the transfer (1.3 ms at 1920 x 1080) inside the map
+            // call, after the fence; with a kept one, before the fence, where it can overlap
+            // later work.
+            if (!buffer->name) {
+                gl->gen_buffers(1, &buffer->name);
+                gl->bind_buffer(PIXEL_PACK_BUFFER, buffer->name);
+                gl->buffer_data(PIXEL_PACK_BUFFER, intptr_t(width) * height * 4, nullptr, STREAM_READ);
+            } else {
+                gl->bind_buffer(PIXEL_PACK_BUFFER, buffer->name);
+            }
+            // RGBA8 rows are multiples of 4 bytes, so this alignment packs them without gaps.
+            glPixelStorei(GL_PACK_ALIGNMENT, 4);
+            glReadPixels(0, 0, GLsizei(width), GLsizei(height), GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            const bool failed = glGetError() != GL_NO_ERROR;
+            glPixelStorei(GL_PACK_ALIGNMENT, alignment);
+            gl->bind_buffer(PIXEL_PACK_BUFFER, unsigned(pack_buffer));
+            gl->bind_framebuffer(READ_FRAMEBUFFER, unsigned(framebuffer));
+            if (!failed) buffer->fence = gl->fence(SYNC_GPU_COMMANDS_COMPLETE, 0);
+        } catch (...) {
+        }
+    });
+}
+void GlInterop::poll(filament::Engine& engine, std::shared_ptr<PackBuffer> buffer, uint64_t copy) {
+    run(engine, [gl = &impl_->pack, buffer = std::move(buffer), copy] {
+        if (!buffer->fence || buffer->fenced != copy) return;
+        const auto status = gl->client_wait(buffer->fence, SYNC_FLUSH_COMMANDS_BIT, 0);
+        if (status == ALREADY_SIGNALED || status == CONDITION_SATISFIED) buffer->finished = copy;
+    });
+}
+bool GlInterop::unpack(filament::Engine& engine, const std::shared_ptr<PackBuffer>& buffer, uint32_t width, uint32_t height,
+                       const std::function<void(const uint8_t*, ptrdiff_t)>& sink) {
+    // One per call, not per buffer: a task that the caller gave up on must stay abandoned after
+    // the buffer is reused, because `sink` may refer to freed memory by then.
+    struct Request {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool started = false, abandoned = false, done = false, ok = false;
+    };
+    auto request = std::make_shared<Request>();
+    run(engine, [gl = &impl_->pack, buffer, width, height, &sink, request] {
+        {
+            std::lock_guard lock(request->mutex);
+            if (request->abandoned) return;
+            request->started = true;
+        }
+        request->cv.notify_one();
+        bool ok = false;
+        if (buffer->fence) {
+            const auto status = gl->client_wait(buffer->fence, SYNC_FLUSH_COMMANDS_BIT, 10000000000ULL);
+            gl->delete_fence(*buffer);
+            if (status == ALREADY_SIGNALED || status == CONDITION_SATISFIED) {
+                GLint previous = 0;
+                glGetIntegerv(PIXEL_PACK_BUFFER_BINDING, &previous);
+                gl->bind_buffer(PIXEL_PACK_BUFFER, buffer->name);
+                const auto stride = ptrdiff_t(width) * 4;
+                const auto* rows = static_cast<const uint8_t*>(
+                    gl->map_range(PIXEL_PACK_BUFFER, 0, stride * height, MAP_READ_BIT));
+                if (rows) {
+                    // glReadPixels stores the bottom row first.
+                    try {
+                        sink(rows + stride * (height - 1), -stride);
+                        ok = true;
+                    } catch (...) {
+                    }
+                    gl->unmap(PIXEL_PACK_BUFFER);
+                }
+                gl->bind_buffer(PIXEL_PACK_BUFFER, unsigned(previous));
+            }
+        }
+        std::lock_guard lock(request->mutex);
+        request->ok = ok;
+        request->done = true;
+        request->cv.notify_one();
+    });
+    engine.flush();
+    std::unique_lock lock(request->mutex);
+    // A started task is bounded by its own 10 s fence wait, and it may be writing through `sink`,
+    // so only a task that has not started can be abandoned.
+    if (!request->cv.wait_for(lock, std::chrono::seconds(10), [&] { return request->started; })) {
+        request->abandoned = true;
+        return false;
+    }
+    request->cv.wait(lock, [&] { return request->done; });
+    return request->ok;
 }
 void GlInterop::finish_host() {
     auto* fence = host_fence();

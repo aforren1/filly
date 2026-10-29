@@ -204,6 +204,133 @@ def test_invalid_meshes(scene):
         scene.load(glb(shape, {})).update_mesh(positions=shape["positions"])
 
 
+def test_invalid_mesh_assets(renderer):
+    shape = filly.shapes.plane()
+    with pytest.raises(ValueError, match="out of range"):
+        renderer.create_mesh_asset(shape["positions"], shape["indices"] + 10)
+    with pytest.raises(ValueError, match="alpha_mode"):
+        renderer.create_mesh_asset(**shape, alpha_mode="glass")
+    with pytest.raises(ValueError, match="nonzero"):
+        renderer.create_mesh_asset(shape["positions"], shape["indices"], normals=shape["normals"] * 0)
+
+
+def grid(models, columns=4):
+    for i, model in enumerate(models):
+        model.position = (i % columns - 1.5, i // columns - 0.5, 0)
+
+
+def grid_scene(renderer):
+    scene = renderer.create_scene()
+    camera = renderer.create_camera()
+    camera.set_orthographic(height=4, near=0.1, far=20)
+    camera.position = (0, 0, 5)
+    camera.look_at((0, 0, 0))
+    scene.camera = camera
+    scene.add_directional_light(direction=(-1, -1, -2), intensity=80000)
+    return scene
+
+
+def test_mesh_asset_models_share_buffers(renderer):
+    shape = filly.shapes.box(0.6, 0.6, 0.6)
+    asset = renderer.create_mesh_asset(**shape)
+    empty = asset.memory
+    assert empty.models == 0 and empty.gpu_geometry_bytes >= 24 * (12 + 8 + 8 + 4) + 12 * 12
+    scene = grid_scene(renderer)
+    models = [scene.add(asset) for _ in range(8)]
+    shared = asset.memory
+    # Models add no geometry: the asset has one vertex and one index buffer for all of them.
+    assert shared.models == 8 and shared.instance_gpu_bytes == 0
+    assert (shared.gpu_geometry_bytes, shared.gpu_texture_bytes) == (empty.gpu_geometry_bytes, empty.gpu_texture_bytes)
+    assert models[3].memory.gpu_geometry_bytes == empty.gpu_geometry_bytes
+    # A separate mesh has the same buffers, once per model.
+    single = scene.create_mesh(**shape).memory
+    assert single.gpu_geometry_bytes == empty.gpu_geometry_bytes and single.models == 1
+
+
+def test_mesh_asset_copies_render_like_separate_meshes(renderer):
+    shape = filly.shapes.uv_sphere(0.4, segments=16, rings=8)
+    factors = {"base_color": (0.8, 0.4, 0.2, 1), "metallic": 0.3, "roughness": 0.5}
+    images = []
+    for shared in (False, True):
+        scene = grid_scene(renderer)
+        scene.msaa = 4
+        if shared:
+            asset = renderer.create_mesh_asset(**shape, **factors)
+            models = [scene.add(asset) for _ in range(8)]
+            asset.close()
+        else:
+            models = [scene.create_mesh(**shape, **factors) for _ in range(8)]
+        grid(models)
+        models[5].rotation_euler_deg = (0, 0, 40)
+        images.append(render(renderer, scene, 96))
+        scene.close()
+    assert images[0][:, :, :3].max() > 100
+    np.testing.assert_array_equal(images[0], images[1])
+
+
+def test_mesh_asset_materials_belong_to_each_model(renderer):
+    """Models share one material instance until a handle is requested; edits stay per model."""
+    shape = filly.shapes.plane(0.8, 0.8)
+    asset = renderer.create_mesh_asset(**shape, unlit=True, base_color=(0.5, 0.5, 0.5, 1))
+    scene = grid_scene(renderer)
+    models = [scene.add(asset) for _ in range(8)]
+    grid(models)
+    before = render(renderer, scene, 64)
+    models[0].material("mesh").base_color = (1, 0, 0, 1)
+    models[1].node("mesh").material(0).base_color = (0, 1, 0, 1)
+    # Reading a material that no edit changed gives the asset's factors.
+    assert models[2].material("mesh").base_color == pytest.approx((0.5, 0.5, 0.5, 1))
+    after = render(renderer, scene, 64)
+    # The pixel at the center of model i: the target spans 4 x 4 units at 64 x 64 pixels.
+    def pixel(i):
+        x, y = i % 4 - 1.5, i // 4 - 0.5
+        return int(32 - y * 16), int(32 + x * 16)
+    gray = srgb(0.5)
+    np.testing.assert_array_equal(before[pixel(0)][:3], [gray] * 3)
+    np.testing.assert_array_equal(after[pixel(0)][:3], [255, 0, 0])
+    np.testing.assert_array_equal(after[pixel(1)][:3], [0, 255, 0])
+    for i in range(2, 8):
+        np.testing.assert_array_equal(after[pixel(i)], before[pixel(i)])
+    # A later model starts from the asset's factors, not from the edits of others.
+    late = scene.add(asset)
+    assert late.material("mesh").base_color == pytest.approx((0.5, 0.5, 0.5, 1))
+
+
+def test_mesh_asset_update_changes_every_model(renderer):
+    shape = filly.shapes.plane(1, 1)
+    asset = renderer.create_mesh_asset(**shape, unlit=True)
+    scenes = [grid_scene(renderer), grid_scene(renderer)]
+    first, second = scenes[0].add(asset), scenes[1].add(asset)
+    asset.close()
+    # Models keep the mesh after the asset handle closes; the handle can add no more.
+    with pytest.raises(filly.FillyError):
+        scenes[0].add(asset)
+    with pytest.raises(filly.FillyError):
+        asset.memory
+    images = [render(renderer, scene) for scene in scenes]
+    np.testing.assert_array_equal(images[0], images[1])
+    first.update_mesh(positions=shape["positions"] + np.float32([1, 0, 0]))
+    moved = [render(renderer, scene) for scene in scenes]
+    np.testing.assert_array_equal(moved[0], moved[1])
+    assert (moved[0] != images[0]).any()
+    # The culling bounds of both models follow the update.
+    first.update_mesh(positions=shape["positions"] + np.float32([1.4, 0, 0]))
+    assert render(renderer, scenes[1])[16, 30, 0] == 255
+    second.close()
+    first.update_mesh(positions=shape["positions"])
+    np.testing.assert_array_equal(render(renderer, scenes[0]), images[0])
+
+
+def test_mesh_asset_alpha_mask_needs_exact_output(renderer):
+    asset = renderer.create_mesh_asset(**filly.shapes.plane(), alpha_mode="mask")
+    scene = renderer.create_scene()
+    scene.output_path = "direct"
+    with pytest.raises(filly.AssetError, match="MASK"):
+        scene.add(asset)
+    scene.output_path = "exact"
+    scene.add(asset)
+
+
 @pytest.mark.parametrize("name,shape", [
     ("plane", filly.shapes.plane(2, 1, segments=(4, 3))), ("box", filly.shapes.box(1, 2, 3)),
     ("sphere", filly.shapes.uv_sphere(0.5, segments=12, rings=6)), ("cylinder", filly.shapes.cylinder(0.5, 2, segments=12)),

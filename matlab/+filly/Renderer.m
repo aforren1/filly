@@ -81,6 +81,14 @@ classdef Renderer < filly.Object
             filly.Renderer.warn(warnings);
         end
 
+        function asset = createMeshAsset(obj, positions, indices, varargin)
+            % An asset for scene.add() whose models share one vertex and index buffer. It takes
+            % the arguments of scene.createMesh(). Models share one material instance, so that
+            % their draws can merge, until a model's material handle is requested.
+            args = filly.internal.meshArguments(positions, indices, varargin);
+            asset = filly.Asset(obj, filly_mex('Renderer.createMeshAsset', obj.Id, args{:}));
+        end
+
         function environment = loadEnvironment(obj, path)
             % Image-based lighting from a 2:1 panorama: Radiance HDR, PNG, or JPEG.
             environment = filly.Environment(obj, filly_mex('Renderer.loadEnvironment', obj.Id, filly.internal.text(path)));
