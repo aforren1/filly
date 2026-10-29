@@ -38,8 +38,11 @@ for shared = [false true]
     if shared
         % One model's material edit leaves the others as they were.
         before = images{2};
-        models(1).material('mesh').baseColor = [0 0 1 1];
-        assert(max(abs(models(2).material('mesh').baseColor - [0.8 0.4 0.2 1])) < 1e-6);
+        % Octave cannot assign through a method call's result.
+        edited = models(1).material('mesh');
+        edited.baseColor = [0 0 1 1];
+        other = models(2).material('mesh');
+        assert(max(abs(other.baseColor - [0.8 0.4 0.2 1])) < 1e-6);
         r.render(scene, target);
         after = target.read();
         assert(~isequal(after(:, 1:20, :), before(:, 1:20, :)));
