@@ -53,4 +53,4 @@ describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match",
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests", "web/tests"]
-markers = ["gpu: requires a working OpenGL driver", "interop: requires a host WGL or GLX context", "psychopy: requires psychopy and a display", "browser: runs the web build in a browser (see web/tests/test_web.py)"]
+markers = ["gpu: requires a working OpenGL driver", "interop: requires a host WGL, GLX, or CGL context", "psychopy: requires psychopy and a display", "browser: runs the web build in a browser (see web/tests/test_web.py)"]

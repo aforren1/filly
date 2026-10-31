@@ -4,9 +4,24 @@
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#if defined(__APPLE__)
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <xlocale.h>
+#endif
 
 namespace filly::json {
 namespace {
+#if defined(__APPLE__)
+// Apple's libc++ has floating-point from_chars only from macOS 26 and to_chars from 13.3, and
+// the wheels target macOS 11, as the Filament SDK does. The C locale's strtod_l and snprintf_l
+// give the same values; the text of a written number can differ in form only.
+locale_t c_locale() {
+    static const locale_t value = newlocale(LC_ALL_MASK, "C", nullptr);
+    return value;
+}
+#endif
 
 // Deeper documents are not glTF; the limit keeps malformed input from exhausting the stack.
 constexpr int max_depth = 256;
@@ -138,10 +153,21 @@ private:
             value.text = std::string(text_.substr(start, pos_ - start));
             const auto* first = value.text.data();
             const auto* last = first + value.text.size();
+#if defined(__APPLE__)
+            errno = 0;
+            char* end = nullptr;
+            value.number = strtod_l(first, &end, c_locale());
+            // Apple's strtod also sets ERANGE for subnormal and underflowing results, which keep
+            // the value it returns; only an infinite result is an overflow.
+            const bool out_of_range = errno == ERANGE && std::isinf(value.number), parsed = end == last;
+#else
             const auto result = std::from_chars(first, last, value.number);
-            // from_chars reports out-of-range values; JSON parsers give them infinity.
-            if (result.ec == std::errc::result_out_of_range) value.number = value.text[0] == '-' ? -HUGE_VAL : HUGE_VAL;
-            else if (result.ec != std::errc() || result.ptr != last) fail("number");
+            const bool out_of_range = result.ec == std::errc::result_out_of_range;
+            const bool parsed = result.ec == std::errc() && result.ptr == last;
+#endif
+            // Both report out-of-range values; JSON parsers give them infinity.
+            if (out_of_range) value.number = value.text[0] == '-' ? -HUGE_VAL : HUGE_VAL;
+            else if (!parsed) fail("number");
         }
         return value;
     }
@@ -231,8 +257,21 @@ Value number(double value) {
     v.number = value;
     char buffer[32];
     // The shortest text that parses back to the same double.
+#if defined(__APPLE__)
+    // %g writes 10 as 1e+01, which glTF's integer fields reject; to_chars writes it as 10.
+    if (std::fabs(value) <= 9007199254740992.0 && std::floor(value) == value) {
+        snprintf_l(buffer, sizeof(buffer), c_locale(), "%.0f", value);
+    } else {
+        for (int digits = 1; digits <= 17; ++digits) {
+            snprintf_l(buffer, sizeof(buffer), c_locale(), "%.*g", digits, value);
+            if (strtod_l(buffer, nullptr, c_locale()) == value) break;
+        }
+    }
+    v.text = buffer;
+#else
     const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
     v.text.assign(buffer, result.ptr);
+#endif
     return v;
 }
 Value number(float value) { return number(double(value)); }

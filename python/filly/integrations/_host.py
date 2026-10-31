@@ -5,7 +5,10 @@ import operator
 import warnings
 import weakref
 
-from .. import ImportedTarget, InteropError, Renderer, current_gl_context
+from .. import ImportedTarget, InteropError, Renderer, _native, current_gl_context
+
+# macOS builds only: a target for host contexts that cannot share objects with Filament's.
+_CopyTarget = getattr(_native, "_CopyTarget", None)
 
 
 def _pixel_size(name, value):
@@ -67,12 +70,9 @@ def _close_with_renderer(target):
     return close
 
 
-class HostTargetBase(ImportedTarget):
-    """A host-owned RGBA8 texture that Filament renders into.
-
-    Subclasses create and release the host objects and draw the texture. ``renderer.close()``
-    closes the target too, so only the window must close last.
-    """
+class _HostTargetLifecycle:
+    # The methods of every host target. The native base, which the subclasses below add, is the
+    # target type that reaches the host texture.
 
     # __del__ can run on an instance whose __init__ failed before setup.
     _closed = True
@@ -87,8 +87,7 @@ class HostTargetBase(ImportedTarget):
         width, height = pixel_sizes(width, height)
         try:
             texture = self._create_host_texture(width, height)
-            super().__init__(renderer.import_gl_target(texture, width=width, height=height,
-                                                       on_renderer_close=_close_with_renderer(self)))
+            super().__init__(self._create_native(renderer, texture, width, height))
         except BaseException:
             self._release_host_resources(True)
             raise
@@ -184,3 +183,47 @@ class HostTargetBase(ImportedTarget):
         except Exception:
             # The host context or Python modules may already be gone during shutdown.
             pass
+
+
+class HostTargetBase(_HostTargetLifecycle, ImportedTarget):
+    """A host-owned RGBA8 texture that Filament renders into.
+
+    Subclasses create and release the host objects and draw the texture. ``renderer.close()``
+    closes the target too, so only the window must close last.
+    """
+
+    def _create_native(self, renderer, texture, width, height):
+        return renderer.import_gl_target(texture, width=width, height=height,
+                                         on_renderer_close=_close_with_renderer(self))
+
+
+if _CopyTarget is not None:
+    class CopyHostTargetBase(_HostTargetLifecycle, _CopyTarget):
+        """A host-owned RGBA8 texture that receives a copy of each frame Filament renders.
+
+        For a host context that cannot share objects with Filament's: on macOS, objects are
+        shared only between contexts of one profile, and Filament needs the core profile. The
+        renderer is an offscreen one. ``acquire()`` waits for the last frame and copies it into
+        the texture. ``transfer`` is the path that the copy takes: ``"iosurface"`` on the GPU,
+        or ``"readback"`` through CPU memory.
+
+        Subclasses set ``_transfers``, the paths to try in order. ``fallback_reason`` is why the
+        first one was unavailable, or None.
+        """
+
+        _transfers = ("iosurface", "readback")
+        fallback_reason = None
+
+        def _create_native(self, renderer, texture, width, height):
+            for transfer in self._transfers:
+                try:
+                    return renderer._create_copy_target(texture, width=width, height=height, transfer=transfer,
+                                                        on_renderer_close=_close_with_renderer(self))
+                except InteropError as error:
+                    if transfer == self._transfers[-1]:
+                        raise
+                    self.fallback_reason = f"{transfer}: {error}"
+                    self._fallback(transfer, error)
+
+        def _fallback(self, transfer, error):
+            """Report that ``transfer`` was unavailable and the next one is tried."""

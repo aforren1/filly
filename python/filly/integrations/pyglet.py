@@ -1,4 +1,7 @@
-"""Shared-texture integration for a plain pyglet window on Windows/WGL and Linux/GLX."""
+"""Shared-texture integration for a plain pyglet window on Windows/WGL, Linux/GLX, and macOS/CGL.
+
+On macOS, the window needs a core profile context: pyglet 2 makes one by default.
+"""
 
 from pyglet import gl
 

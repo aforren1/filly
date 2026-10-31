@@ -1,5 +1,5 @@
 # filly's renderer: the C++ facade in renderer.h over Filament, as the static library filly_core,
-# which every frontend links. Desktop builds (Windows and Linux) use the GL interop in
+# which every frontend links. Desktop builds (Windows, Linux, and macOS) use the GL interop in
 # gl_interop.cpp; Emscripten builds use WebGL2 through gl_interop_web.cpp.
 #
 # Inputs:
@@ -39,16 +39,40 @@ if(EMSCRIPTEN)
     list(APPEND FILLY_WEB_FLAGS -msimd128)
   endif()
 else()
-  set(FILAMENT_ROOT "${PROJECT_SOURCE_DIR}/.deps" CACHE PATH "Filament 1.77.1 SDK directory")
+  # tools/fetch_filament.py extracts the Windows and macOS release archives to these folders.
+  if(APPLE)
+    set(_sdk "${PROJECT_SOURCE_DIR}/.deps/filament-mac")
+  else()
+    set(_sdk "${PROJECT_SOURCE_DIR}/.deps")
+  endif()
+  set(FILAMENT_ROOT "${_sdk}" CACHE PATH "Filament 1.77.1 SDK directory")
   if(NOT EXISTS "${FILAMENT_ROOT}/include/filament/Engine.h")
     message(FATAL_ERROR "Filament SDK missing. See docs/how-to/build.md for the platform SDK and FILAMENT_ROOT.")
   endif()
-  if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64)$"
-      OR NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
-    message(FATAL_ERROR "Supported targets are Windows and Linux x86_64.")
+  # The macOS release archive has arm64 libraries only. CMAKE_OSX_ARCHITECTURES overrides the
+  # processor name for a cross build, so it is checked too.
+  if(APPLE)
+    set(_supported FALSE)
+    if(CMAKE_OSX_ARCHITECTURES)
+      if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+        set(_supported TRUE)
+      endif()
+    elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+      set(_supported TRUE)
+    endif()
+  elseif(CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64)$"
+      AND (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+    set(_supported TRUE)
+  else()
+    set(_supported FALSE)
+  endif()
+  if(NOT _supported)
+    message(FATAL_ERROR "Supported targets are Windows and Linux x86_64, and macOS arm64.")
   endif()
   if(WIN32)
     set(FILAMENT_LIB_DIR "${FILAMENT_ROOT}/lib/x86_64/mt")
+  elseif(APPLE)
+    set(FILAMENT_LIB_DIR "${FILAMENT_ROOT}/lib/arm64")
   else()
     set(FILAMENT_LIB_DIR "${FILAMENT_ROOT}/lib/x86_64")
     # Keep the system GL dispatch library external to manylinux wheels.
@@ -60,7 +84,7 @@ else()
   set(FILAMENT_LIBRARIES gltfio_core filament-iblprefilter filament backend filabridge filaflat
     geometry ibl utils bluegl smol-v stb dracodec meshoptimizer
     mikktspace uberzlib zstd basis_transcoder ktxreader image abseil)
-  if(WIN32)
+  if(WIN32 OR APPLE)
     list(APPEND FILAMENT_LIBRARIES bluevk)
   endif()
 endif()
@@ -103,6 +127,20 @@ else()
   if(MSVC)
     target_compile_options(filly_core PRIVATE /Zc:__cplusplus /bigobj /EHsc)
     target_link_libraries(filly_core PRIVATE ${FILAMENT_LINK_TARGETS} opengl32 gdi32 user32 shlwapi ws2_32)
+  elseif(APPLE)
+    target_sources(filly_core PRIVATE cgl_platform.cpp)
+    # Apple's linker searches static archives again until no symbol is left undefined, so the
+    # circular references need no group. Filament's backend archive also holds the Metal,
+    # Vulkan, and Cocoa platforms, which its platform factory references.
+    target_link_libraries(filly_core PRIVATE ${FILAMENT_LINK_TARGETS}
+      "-framework OpenGL" "-framework AppKit" "-framework Foundation" "-framework CoreFoundation"
+      "-framework CoreVideo" "-framework Metal" "-framework QuartzCore"
+      # Copy targets (CopyTarget in renderer.h) cross between contexts through an IOSurface.
+      "-framework IOSurface")
+    # The release SDK is built without RTTI, so classes that derive from Filament's polymorphic
+    # types cannot refer to their type information. The core uses no RTTI (see the web build);
+    # the bindings keep it for nanobind.
+    target_compile_options(filly_core PRIVATE -fvisibility=hidden -fno-rtti)
   else()
     # Filament's static archives contain circular references.
     target_link_libraries(filly_core PRIVATE -Wl,--start-group ${FILAMENT_LINK_TARGETS} -Wl,--end-group

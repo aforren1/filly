@@ -1,9 +1,9 @@
 """List the shared libraries that a filly native module imports and reject unexpected ones.
 
 Arguments can be a .pyd, a .so, a wheel that contains one, a MATLAB MEX file (.mexw64,
-.mexa64), or an Octave MEX file (.mex). The exit status is 1 if a module imports a library
-outside the allowed set for its format and frontend, or if an ELF module exports a symbol other
-than its entry points.
+.mexa64, .mexmaca64), or an Octave MEX file (.mex). The exit status is 1 if a module imports a
+library outside the allowed set for its format and frontend, or if an ELF or Mach-O module
+exports a symbol other than its entry points.
 """
 
 import argparse
@@ -44,6 +44,19 @@ ALLOWED_MEX_ELF = SYSTEM_ELF + ["libmx.so", "libmex.so"]
 # Octave runs on the system C++ runtime. Before Octave 10, mkoctfile --mex links no Octave library:
 # the MEX API resolves against the running Octave. From Octave 10, it links liboctmex.
 ALLOWED_OCTAVE_ELF = ALLOWED_ELF + ["liboctmex.so.*"]
+# macOS system libraries and frameworks only. Python extension modules link no libpython: the
+# interpreter's symbols resolve when the module loads. Filament's backend archive holds the
+# Metal and Cocoa platforms too, so their frameworks are imports even though filly uses OpenGL.
+SYSTEM_MACHO = [
+    "/usr/lib/libSystem.B.dylib", "/usr/lib/libc++.1.dylib", "/usr/lib/libobjc.A.dylib",
+    *(f"/System/Library/Frameworks/{name}.framework/Versions/*/{name}"
+      for name in ("OpenGL", "AppKit", "Foundation", "CoreFoundation", "CoreVideo", "IOSurface", "Metal", "QuartzCore")),
+]
+ALLOWED_MACHO = SYSTEM_MACHO
+# MATLAB finds its libraries through the MEX file's run path.
+ALLOWED_MEX_MACHO = SYSTEM_MACHO + ["@rpath/libmx.dylib", "@rpath/libmex.dylib"]
+# The build links the liboctmex of the Octave that it found, by that installation's path.
+ALLOWED_OCTAVE_MACHO = SYSTEM_MACHO + ["/*/liboctmex.*.dylib"]
 # Exported entry points. Anything else exported could bind to another copy of Filament, libwebp,
 # or the C++ runtime in the process. MATLAB's export map adds the API version query.
 EXPORTS = {
@@ -143,18 +156,62 @@ def elf_exports(data):
     return names
 
 
+MACHO_MAGIC = b"\xcf\xfa\xed\xfe"  # MH_MAGIC_64, little-endian
+
+
+def _macho_commands(data):
+    if data[:4] != MACHO_MAGIC:
+        raise ValueError("only little-endian 64-bit Mach-O images are supported, not universal ones")
+    count, = struct.unpack_from("<I", data, 16)
+    cursor = 32
+    for _ in range(count):
+        command, size = struct.unpack_from("<II", data, cursor)
+        yield command, cursor
+        cursor += size
+
+
+def _macho_dylibs(data):
+    # LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_LAZY_LOAD_DYLIB, LC_LOAD_UPWARD_DYLIB
+    kinds = {0xC, 0x80000018, 0x8000001F, 0x20, 0x80000023}
+    names = []
+    for command, cursor in _macho_commands(data):
+        if command in kinds:
+            start = cursor + struct.unpack_from("<I", data, cursor + 8)[0]
+            names.append(data[start:data.index(b"\0", start)].decode())
+    return names
+
+
+def macho_exports(data):
+    """Return the names of the external symbols that a Mach-O image defines, without the C prefix."""
+    names = []
+    for command, cursor in _macho_commands(data):
+        if command != 0x2:  # LC_SYMTAB
+            continue
+        symbols, count, strings, _ = struct.unpack_from("<IIII", data, cursor + 8)
+        for index in range(count):
+            name, kind = struct.unpack_from("<IB", data, symbols + 16 * index)
+            # Not a debugging entry, N_EXT without N_PEXT, and defined in a section (N_SECT).
+            if kind & 0xE0 or kind & 0x11 != 0x01 or kind & 0x0E != 0x0E:
+                continue
+            text = data[strings + name:data.index(b"\0", strings + name)].decode()
+            names.append(text[1:] if text.startswith("_") else text)
+    return names
+
+
 def imports(data):
-    """Return the DLL or DT_NEEDED names of a PE or ELF image."""
+    """Return the DLL, DT_NEEDED, or dylib names of a PE, ELF, or Mach-O image."""
     if data[:2] == b"MZ":
         return _pe_imports(data)
     if data[:4] == b"\x7fELF":
         return _elf_needed(data)
-    raise ValueError("not a PE or ELF image")
+    if data[:4] == MACHO_MAGIC:
+        return _macho_dylibs(data)
+    raise ValueError("not a PE, ELF, or Mach-O image")
 
 
 def frontend(label):
     """The frontend of a module from its file name: "matlab", "octave", or "python"."""
-    if label.endswith((".mexw64", ".mexa64")):
+    if label.endswith((".mexw64", ".mexa64", ".mexmaca64")):
         return "matlab"
     if label.endswith(".mex"):
         return "octave"
@@ -167,6 +224,8 @@ def unexpected(data, kind="python"):
         if kind == "octave":
             raise ValueError("Octave MEX files are built for Linux only")
         allowed = ALLOWED_MEX_PE if kind == "matlab" else ALLOWED_PE
+    elif data[:4] == MACHO_MAGIC:
+        allowed = {"python": ALLOWED_MACHO, "matlab": ALLOWED_MEX_MACHO, "octave": ALLOWED_OCTAVE_MACHO}[kind]
     else:
         allowed = {"python": ALLOWED_ELF, "matlab": ALLOWED_MEX_ELF, "octave": ALLOWED_OCTAVE_ELF}[kind]
     # PE names are case-insensitive; ELF sonames are not.
@@ -175,10 +234,14 @@ def unexpected(data, kind="python"):
 
 
 def unexpected_exports(data, kind="python"):
-    """Return the exported names of an ELF image that are not its frontend's entry points."""
-    if data[:4] != b"\x7fELF":
+    """Return the exported names of an ELF or Mach-O image that are not its frontend's entry points."""
+    if data[:4] == b"\x7fELF":
+        names = elf_exports(data)
+    elif data[:4] == MACHO_MAGIC:
+        names = macho_exports(data)
+    else:
         return []
-    return sorted(name for name in elf_exports(data) if name not in EXPORTS[kind])
+    return sorted(name for name in names if name not in EXPORTS[kind])
 
 
 def _modules(path):

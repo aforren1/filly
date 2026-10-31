@@ -12,7 +12,9 @@ pytest.importorskip("pyglet")
 from filly.integrations.pyglet import create_renderer  # noqa: E402
 
 pytestmark = [pytest.mark.gpu, pytest.mark.interop,
-              pytest.mark.skipif(sys.platform not in ("win32", "linux"), reason="WGL/GLX implementation")]
+              pytest.mark.skipif(sys.platform not in ("win32", "linux", "darwin"), reason="WGL/GLX/CGL implementation")]
+# sRGB views of host textures need glTextureView (OpenGL 4.3); macOS has OpenGL 4.1.
+TEXTURE_VIEWS = sys.platform != "darwin"
 
 SIZE = 16
 
@@ -70,6 +72,8 @@ def textured_scene(renderer, texture):
     return scene, plane
 
 
+@pytest.mark.skipif(not TEXTURE_VIEWS, reason="sRGB sampling of a host texture needs glTextureView; "
+                    "test_linear_host_texture_is_sampled_raw covers the write order")
 @pytest.mark.parametrize("path", ["direct", "grading"])
 def test_host_writes_reach_the_next_frame(window, path):
     renderer = create_renderer(window)
@@ -140,7 +144,7 @@ def test_import_requires_a_shared_renderer_and_storage(window):
         gl.glBindTexture(gl.GL_TEXTURE_2D, mutable)
         gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, 4, 4, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, None)
         # Sampling sRGB data needs an sRGB view, and a view needs immutable storage.
-        with pytest.raises(filly.InteropError, match="immutable"):
+        with pytest.raises(filly.InteropError, match="immutable" if TEXTURE_VIEWS else "glTextureView"):
             renderer.import_gl_texture(mutable.value, width=4, height=4, color_space="srgb")
         with renderer.import_gl_texture(mutable.value, width=4, height=4, color_space="linear") as texture:
             assert not texture.closed

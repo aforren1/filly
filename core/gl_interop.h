@@ -27,6 +27,31 @@ struct PackBuffer {
     std::atomic<uint64_t> finished{0};
 };
 #endif
+#if defined(__APPLE__)
+struct SurfaceLink;
+// A copy target's objects (see CopyTarget in renderer.h). The host context shares no objects
+// with Filament's, so each frame crosses through an IOSurface that both contexts bind as a
+// rectangle texture, or through CPU memory. The caller's thread owns this; `link` and `buffer`
+// hold Filament's side, which its driver thread uses.
+struct HostCopy {
+    enum class Transfer { IOSURFACE, READBACK };
+    Transfer transfer = Transfer::IOSURFACE;
+    uintptr_t context = 0;
+    uint32_t texture = 0, width = 0, height = 0;
+    // IOSURFACE: the surface (IOSurfaceRef), the host's rectangle texture on it, and the read and
+    // draw framebuffers that copy it into `texture`.
+    void* surface = nullptr;
+    uint32_t rectangle = 0, framebuffers[2] = {};
+    std::shared_ptr<SurfaceLink> link;
+    // The fence after the host's last copy out of the surface. The next frame's copy into the
+    // surface must wait for it, and no GL fence crosses between the contexts.
+    void* copied = nullptr;
+    // READBACK: the pixel buffer in Filament's context and the rows, bottom row first, that
+    // reach the host texture through glTexSubImage2D.
+    std::shared_ptr<PackBuffer> buffer;
+    std::unique_ptr<uint8_t[]> rows;
+};
+#endif
 // Copies share one GL fence: one render's frame can be waited on by its target and by every host
 // texture that it sampled. Release each copy with GlInterop::destroy().
 struct SyncPoint {
@@ -42,7 +67,7 @@ public:
     ~GlInterop();
     filament::backend::Platform* platform();
     filament::Engine* create_engine();
-    // "wgl", "glx", or "egl": the window-system binding of Filament's OpenGL context.
+    // "wgl", "glx", "egl", or "cgl": the window-system binding of Filament's OpenGL context.
     const char* platform_name() const;
     bool shared() const;
     void require_host() const;
@@ -52,6 +77,8 @@ public:
     // A GL_SRGB8_ALPHA8 view of a host texture needs immutable storage (glTexStorage2D), which
     // third-party hosts often lack, so a view is made only where one is needed or possible.
     enum class SrgbView { NONE, IF_IMMUTABLE, REQUIRED };
+    // Whether the host context can make sRGB views at all: OpenGL 4.3 or ARB_texture_view.
+    bool texture_views() const;
     // Validates the host texture and returns an sRGB view of it, or the texture itself when no
     // view is made.
     uint32_t import_texture(uint32_t texture, uint32_t width, uint32_t height, SrgbView view) const;
@@ -95,6 +122,21 @@ public:
     // within 10 s. The sink is never called after unpack() returns.
     bool unpack(filament::Engine& engine, const std::shared_ptr<PackBuffer>& buffer, uint32_t width, uint32_t height,
                 const std::function<void(const uint8_t*, ptrdiff_t)>& sink);
+#endif
+#if defined(__APPLE__)
+    // Validates the host texture in the current host context and creates both sides of the
+    // transfer. Throws InteropError with the reason if the transfer is unavailable.
+    std::unique_ptr<HostCopy> create_host_copy(filament::Engine& engine, uint32_t texture, uint32_t width,
+                                               uint32_t height, HostCopy::Transfer transfer);
+    // Before a render: waits until the host's last copy out of the surface is done.
+    void before_copy(HostCopy& copy);
+    // After a render: queues the copy of Filament's color texture toward the host.
+    void publish(filament::Engine& engine, HostCopy& copy, uint32_t texture);
+    // In the host context: waits for the last published frame and copies it into the host texture.
+    void take(filament::Engine& engine, HostCopy& copy);
+    // Deletes Filament's side after the commands queued before it. Host names are deleted only
+    // with host_current; otherwise they go away with the host context.
+    void delete_host_copy(filament::Engine& engine, HostCopy& copy, bool host_current);
 #endif
 #if defined(__EMSCRIPTEN__)
     // Filament's WebGL backend compiles out its GPU timer queries, so the web build brackets

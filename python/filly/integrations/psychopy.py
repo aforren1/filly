@@ -1,17 +1,25 @@
-"""Shared-texture integration for PsychoPy on Windows/WGL and Linux/GLX."""
+"""Texture integration for PsychoPy: shared on Windows/WGL and Linux/GLX, copied on macOS/CGL."""
 
 import ctypes
+import os
 import sys
 import weakref
 
 import numpy
-from psychopy import visual
+from psychopy import logging, visual
 from psychopy.visual import shaders
 from pyglet import gl
 
-from .. import InteropError, current_gl_context
+from .. import InteropError, Renderer, current_gl_context
 from .._native import _create_host_texture, _delete_host_texture
 from ._host import HostTargetBase, shared_renderer
+
+# PsychoPy's windows on macOS have the legacy OpenGL 2.1 profile, because PsychoPy draws with
+# fixed-function OpenGL. macOS shares objects only between contexts of one profile, and Filament
+# needs the core profile, so the renderer is an offscreen one and each frame is copied.
+_COPIED = sys.platform == "darwin"
+if _COPIED:
+    from ._host import CopyHostTargetBase
 
 __all__ = ["HostTarget", "create_renderer"]
 
@@ -40,8 +48,8 @@ def _is_open(win):
 
 
 def _current(win):
-    if sys.platform not in ("win32", "linux") or win.winType != "pyglet":
-        raise InteropError("The adapter requires pyglet with Windows/WGL or Linux/GLX")
+    if sys.platform not in ("win32", "linux", "darwin") or win.winType != "pyglet":
+        raise InteropError("The adapter requires pyglet with Windows/WGL, Linux/GLX, or macOS/CGL")
     if not _is_open(win):
         raise InteropError("The PsychoPy window is closed")
     win._setCurrent()
@@ -52,26 +60,53 @@ def _current(win):
 
 
 def create_renderer(win):
-    """Create a Filament engine sharing the window's native OpenGL context."""
+    """Create a Filament engine for the window.
+
+    On Windows and Linux, the engine shares the window's native OpenGL context. On macOS, it is
+    an offscreen engine, and ``HostTarget`` copies each frame into the window's context.
+    """
     _current(win)
+    if _COPIED:
+        return Renderer()
     return shared_renderer("PsychoPy")
 
 
-class HostTarget(HostTargetBase):
-    """A PsychoPy-window RGBA8 texture that Filament renders into.
+def _transfers():
+    choice = os.environ.get("FILLY_PSYCHOPY_TRANSFER", "")
+    if choice in ("iosurface", "readback"):
+        return (choice,)
+    if choice:
+        raise ValueError(f"FILLY_PSYCHOPY_TRANSFER must be 'iosurface' or 'readback', got {choice!r}")
+    return ("iosurface", "readback")
+
+
+class HostTarget(CopyHostTargetBase if _COPIED else HostTargetBase):
+    """A PsychoPy-window RGBA8 texture that receives Filament's frames.
 
     ``texture`` is the GL texture name (int), 0 after close. The size defaults to the
     window's framebuffer size. ``create_image_stim()`` returns an ImageStim that samples
     the texture. ``draw()`` draws the texture with such a stimulus in pixel units.
+
+    ``transfer`` is how frames reach the texture: ``"shared"`` on Windows and Linux, where
+    Filament renders into it. On macOS, ``"iosurface"`` (a GPU copy) or ``"readback"`` (a copy
+    through CPU memory, if the IOSurface path is unavailable). The ``FILLY_PSYCHOPY_TRANSFER``
+    environment variable selects one of the two.
     """
 
     texture = 0
     _internal = None
+    if not _COPIED:
+        transfer = "shared"
 
     def __init__(self, renderer, win, *, width=None, height=None):
         self._win = win
         self._stimuli = weakref.WeakSet()
+        if _COPIED:
+            self._transfers = _transfers()
         super().__init__(renderer, width, height)
+
+    def _fallback(self, transfer, error):
+        logging.warning(f"filly: the {transfer} transfer is unavailable ({error}); trying the next one")
 
     def _host_open(self):
         return _is_open(self._win)

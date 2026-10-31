@@ -10,6 +10,11 @@ Supported now:
 | --- | --- | --- |
 | Windows x64 | R2021b and later | No (see phase 6 of the plan) |
 | Linux x86_64, glibc 2.28 or later | R2021b and later | 6.4 and later |
+| macOS arm64, built from source | R2026b tested | 10 and later; 11.3 tested |
+
+On macOS, there are no release packages, and Psychtoolbox windows cannot share textures with
+filly: Psychtoolbox makes a legacy OpenGL 2.1 context, and macOS shares objects only between
+contexts of the same profile. Offscreen rendering works.
 
 ## Install a release
 
@@ -101,6 +106,35 @@ statically. Both files can be in the same folder: MATLAB loads `.mexa64` and Oct
 
 To check the libraries that a file imports and the symbols that it exports, run
 `python3 tools/check_native_imports.py matlab/filly_mex.mex` (or `.mexa64`).
+
+## Build the MEX files on macOS
+
+Requirements: the requirements of the [macOS build](build.md#macos-requirements) and the SDK in
+`.deps/filament-mac`, and MATLAB or Octave 10 or later. Homebrew's `octave` package was tested.
+Python and nanobind are not necessary, but the commands below use CMake and Ninja from the
+project's `.venv`.
+
+From the project directory, run:
+
+```bash
+export PATH="$PWD/.venv/bin:/opt/homebrew/bin:$PATH"
+MACOSX_DEPLOYMENT_TARGET=11.0 cmake -S . -B build/mex-mac -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DFILLY_PYTHON=OFF -DFILLY_MATLAB=ON -DFILLY_OCTAVE=ON \
+  -DMatlab_ROOT_DIR=/Applications/MATLAB_R2026b.app
+cmake --build build/mex-mac --target filly_mex filly_octave_mex
+```
+
+To build only one of the files, leave out the other option and target. The build writes
+`matlab/filly_mex.mexmaca64` for MATLAB and `matlab/filly_mex.mex` for Octave. Both use the
+system C++ runtime.
+
+- The MATLAB file is a C API MEX file. It links only `libmx` and `libmex`.
+- The Octave file links the `liboctmex` of the Octave that `mkoctfile` belongs to, by that
+  installation's path, as `mkoctfile --mex` does. Build it again after you move or upgrade
+  Octave.
+
+The tests passed with MATLAB R2026b and Octave 11.3. If `matlab -batch` stops at startup, look
+for a macOS prompt that asks for access to the folder: MATLAB waits until you accept it.
 
 ### MATLAB and Mesa on Linux
 

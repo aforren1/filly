@@ -25,9 +25,15 @@ The frontends have the same objects, names (in each language's style), and behav
 | MATLAB and Octave | A package from the [releases](https://github.com/aforren1/filly/releases); see [install a release](docs/how-to/matlab.md#install-a-release) | MATLAB R2021b or later, or Octave 6.4 or later (Linux) |
 | Web | [Build it](docs/how-to/build.md#build-for-the-web), then serve `filly.js`, `filly-core.js`, and `filly-core.wasm` | A browser with WebGL2 |
 
-The desktop frontends need Windows or Linux on x86_64 and an OpenGL 4.1 driver. On Linux,
-offscreen rendering works without a display. macOS is not supported at this time. To build
-any frontend from source, see [build and test](docs/how-to/build.md).
+The desktop frontends need Windows or Linux on x86_64, or macOS 11 or later on Apple silicon
+(arm64), and an OpenGL 4.1 driver. On Linux, offscreen rendering works without a display. On
+macOS, filly cannot share textures with PsychoPy or Psychtoolbox windows. The PsychoPy adapter
+copies each frame into the window instead, through an IOSurface on the GPU
+([PsychoPy on macOS](docs/how-to/psychopy.md#use-psychopy-on-macos)); Psychtoolbox windows are
+not supported. Imported host textures cannot be sampled as sRGB; see
+[macOS limits](docs/how-to/build.md#run-on-macos). The
+release packages for MATLAB and Octave are for Windows and Linux only. To build any frontend
+from source, see [build and test](docs/how-to/build.md).
 
 ## Render an image
 
@@ -51,7 +57,8 @@ with filly.Renderer() as renderer:
 
 ## Draw in a PsychoPy window
 
-filly renders into a texture that PsychoPy draws directly, with no copy through the CPU.
+filly renders into a texture that PsychoPy draws directly, with no copy through the CPU. On
+macOS, the GPU copies each frame into the window's context first.
 
 ```python
 import filly
@@ -176,7 +183,8 @@ MATLAB and Octave examples are in `examples/matlab/`:
   [filly and Filament](docs/explanation/filament.md),
   [tested assumptions](docs/explanation/assumptions.md),
   [material precompilation](docs/explanation/material-precompilation.md),
-  [the web build](docs/explanation/web.md)
+  [the web build](docs/explanation/web.md),
+  [macOS](docs/explanation/macos.md)
 
 The source has one folder per part: `core/` (the shared renderer), `python/`, `matlab/`, and
 `web/`. See [source layout](docs/how-to/build.md#source-layout).

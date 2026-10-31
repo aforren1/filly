@@ -1,6 +1,8 @@
 # Use PsychoPy with shared textures
 
 The adapter uses OpenGL and PsychoPy's `pyglet` backend, with Windows WGL or Linux GLX contexts.
+On macOS, it copies each frame into the window's context; see
+[Use PsychoPy on macOS](#use-psychopy-on-macos).
 Windows presentation has been tested. Linux shared-texture tests use pyglet directly; a full
 Linux PsychoPy presentation test remains necessary. See [Linux setup](build.md#build-on-linux).
 Raw GLX sharing passed on Mesa software rendering and the WSLg Intel D3D12 driver.
@@ -202,6 +204,72 @@ workaround.
 `filly.set_log_level("warning")` suppresses Filament's startup details and keeps warnings and errors.
 Use `"verbose"` to restore full native logging or `"off"` to silence its log streams. The setting
 applies to all Filament renderers in the process. PsychoPy logging is separate.
+
+## Use PsychoPy on macOS
+
+On macOS, filly cannot share the PsychoPy window's OpenGL context: PsychoPy windows have a
+legacy profile context, and Filament needs a core profile. filly therefore copies each frame
+into the window's context. For the reasons and the measurements, see
+[macOS](../explanation/macos.md#copies-for-legacy-hosts).
+
+The code in [Render and display](#render-and-display) works without changes. The stimuli,
+`draw()`, `acquire()`, compositing, and close order are the same as on Windows and Linux.
+These parts work differently:
+
+- `create_renderer(win)` returns an offscreen renderer. `renderer.shared_context` is 0.
+- `renderer.render(scene, target)` renders into a texture in Filament's own context. The first
+  draw of the frame (`stimulus.draw()`, `target.draw()`, or `target.acquire()`) waits for the
+  frame and copies it into the target's texture in the window's context.
+- `renderer.import_gl_texture()` cannot sample PsychoPy textures. It raises `InteropError`.
+- `output_path="direct"` works with both encodings, because Filament renders into its own
+  texture.
+
+A copy costs about 0.5 ms per frame at 512 x 512 and 1 ms at 1920 x 1080 on an Apple M2. See
+[cost per frame](../explanation/macos.md#cost-per-frame).
+
+### Select the transfer
+
+`target.transfer` tells how frames reach the window's texture:
+
+| `transfer` | Path | When |
+| --- | --- | --- |
+| `"iosurface"` | A GPU copy through an IOSurface that both contexts bind. | The default. |
+| `"readback"` | A copy through CPU memory, then an upload with `glTexSubImage2D`. | If filly cannot create the IOSurface objects. |
+
+If filly cannot create the IOSurface objects, `HostTarget` uses the readback transfer, writes a
+PsychoPy warning, and puts the reason in `target.fallback_reason`.
+
+To select one transfer, set the `FILLY_PSYCHOPY_TRANSFER` environment variable to `iosurface`
+or `readback` before you create the target. A selected transfer does not fall back: if it is
+unavailable, `HostTarget` raises `InteropError`.
+
+### Tested versions
+
+| PsychoPy | pyglet | Python | Result |
+| --- | --- | --- | --- |
+| 2027.1.0 (development branch) | 2.1.19 | 3.12 | The 58 PsychoPy tests pass, for both transfers. |
+| 2026.2.5 | 1.5.27 | 3.12 | 57 tests pass and 1 is skipped, for both transfers. |
+| 2026.1.3 | 1.5.27 | 3.11 | 57 tests pass and 1 is skipped, for both transfers. |
+
+With pyglet 1.5.27, a window often fails to open after another window of the same process has
+closed. With that pyglet on macOS, the tests share one window per configuration, and only one
+test closes a window. An experiment with one window per process is not affected.
+
+Do not hide a PsychoPy window on macOS: its `flip()` then does not return. See
+[third-party issues](../explanation/macos.md#third-party-issues).
+
+### Run the PsychoPy tests on macOS
+
+PsychoPy 2026.2 releases require Python 3.12 or earlier, and 2026.1 releases require Python
+3.11 or earlier. To run the tests with PsychoPy's development branch:
+
+```bash
+uv venv --python 3.12 .deps/psychopy-venv
+uv pip install --python .deps/psychopy-venv/bin/python cmake ninja nanobind scikit-build-core pytest pillow
+uv pip install --python .deps/psychopy-venv/bin/python "psychopy @ git+https://github.com/psychopy/psychopy@dev"
+MACOSX_DEPLOYMENT_TARGET=11.0 uv pip install --python .deps/psychopy-venv/bin/python --no-build-isolation -e .
+cd python/tests && ../../.deps/psychopy-venv/bin/python -m pytest test_psychopy.py -q
+```
 
 ## Composite over PsychoPy stimuli
 

@@ -966,9 +966,11 @@ Backend-native zero-copy interop can be explored later.
 
 This deliberately keeps the first interop implementation focused on the graphics API actually exposed by existing PsychoPy/PTB workflows.
 
-**Decision.** Only OpenGL is built: on Windows (WGL), on Linux (GLX, and headless EGL for offscreen renderers without an X display), and as WebGL2 in the WebAssembly build (`web/`). **Open.** Vulkan, Metal, and macOS.
+**Decision.** Only OpenGL is built: on Windows (WGL), on Linux (GLX, and headless EGL for offscreen renderers without an X display), on macOS arm64 (CGL), and as WebGL2 in the WebAssembly build (`web/`). **Open.** Vulkan, Metal, and macOS x86_64.
 
 **Status (Linux).** The Linux build compiles the pinned Filament from source in manylinux_2_28 with three local patches and passed the tests on Mesa software rendering and WSLg. Offscreen renderers use headless EGL when there is no X display; shared contexts need GLX and an X11 display. Linux was last tested on September 30, 2026, before the October API changes.
+
+**Status (macOS).** The macOS build links the official Filament 1.77.1 release SDK (arm64 only). filly's own CGL platform (`core/cgl_platform.cpp`) replaces Filament's PlatformCocoaGL, whose headless swap chains need the main thread's dispatch queue and a window server. macOS has OpenGL 4.1 only, so Filament runs at feature level 1, as on the other platforms, and there are no sRGB views of host textures (`glTextureView` is OpenGL 4.3). Shared contexts need a core profile host, for example pyglet 2; PsychoPy and Psychtoolbox create legacy contexts and cannot share. The Python and Octave 11.3 tests passed on an Apple M2 with macOS 27 on October 31, 2026. The MATLAB MEX file builds and passes the import check; its tests have not run.
 
 ---
 
@@ -1031,7 +1033,7 @@ Binary size should be measured and documented.
 
 Reducing package footprint is a design objective, not merely an optimization task for later.
 
-**Status.** Windows and manylinux_2_28 x86_64 wheels build and contain Filament; each is about 5.5 to 5.8 MB. **Open.** macOS wheels and publishing to PyPI.
+**Status.** Windows and manylinux_2_28 x86_64 wheels build and contain Filament; each is about 5.5 to 5.8 MB. The macOS arm64 wheel (macOS 11.0 and later) builds locally and is about 3.0 MB; its CI job has not run yet. **Open.** macOS x86_64 wheels and publishing to PyPI.
 
 ---
 

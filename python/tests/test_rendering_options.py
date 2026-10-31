@@ -3,6 +3,7 @@
 import math
 import struct
 from pathlib import Path
+import sys
 
 import numpy as np
 import pytest
@@ -12,7 +13,9 @@ from test_features import lit, pack, unpack
 
 pytestmark = pytest.mark.gpu
 
-LIGHTROOM = Path(__file__).resolve().parents[2] / ".deps/bin/assets/ibl/lightroom_14b"
+# The SDK folder of tools/fetch_filament.py.
+LIGHTROOM = (Path(__file__).resolve().parents[2] / (".deps/filament-mac" if sys.platform == "darwin" else ".deps")
+             / "bin/assets/ibl/lightroom_14b")
 TONE_MAPPERS = ["linear", "aces_legacy", "aces", "filmic", "pbr_neutral", "gt7", "agx", "agx_punchy",
                 "agx_golden", "generic", "display_range"]
 

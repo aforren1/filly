@@ -28,6 +28,12 @@ def test_linux_module_exports_only_its_entry_point(module_image):
     assert check_native_imports.unexpected_exports(module_image) == []
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Mach-O symbol table")
+def test_macos_module_exports_only_its_entry_point(module_image):
+    assert "PyInit__native" in check_native_imports.macho_exports(module_image)
+    assert check_native_imports.unexpected_exports(module_image) == []
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows C runtime layout")
 def test_windows_module_uses_the_hybrid_crt(module_image):
     names = [name.lower() for name in check_native_imports.imports(module_image)]

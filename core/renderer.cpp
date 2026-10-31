@@ -932,6 +932,10 @@ struct TargetData : Resource {
     // Every pixel buffer of the target's readbacks, and those that no readback holds.
     std::vector<std::shared_ptr<PackBuffer>> buffers, free_buffers;
 #endif
+#if defined(__APPLE__)
+    // Set for a CopyTarget.
+    std::unique_ptr<HostCopy> host_copy;
+#endif
     void check() const {
         state->check();
         if (!target) throw FillyError("Render target is closed");
@@ -943,6 +947,15 @@ struct TargetData : Resource {
                 host_done = nullptr;
                 state->interop->destroy(*state->engine, ready);
             }
+#if defined(__APPLE__)
+            // Garbage collection can run with another context current, whose names could match.
+            if (host_copy) {
+                try {
+                    state->interop->delete_host_copy(*state->engine, *host_copy,
+                                                     current_gl_context() == host_copy->context);
+                } catch (...) {}
+            }
+#endif
             for (auto* rt : {target, linear_target, graded_target, output, ldr_target}) if (rt) state->engine->destroy(rt);
             for (auto* texture : {linear, graded, linear_depth, ldr, depth, color}) if (texture) state->engine->destroy(texture);
 #if !defined(__EMSCRIPTEN__)
@@ -955,6 +968,9 @@ struct TargetData : Resource {
         color_name = 0;
         buffers.clear();
         free_buffers.clear();
+#endif
+#if defined(__APPLE__)
+        host_copy.reset();
 #endif
         if (state->encode.input && state->encode.input == linear) state->encode.input = nullptr;
         if (state->encode_graded.input && state->encode_graded.input == graded) state->encode_graded.input = nullptr;
@@ -1870,6 +1886,10 @@ void Renderer::render(const Scene& scene, const ImportedTarget& target, const Re
     if (data.access == detail::TargetData::Access::HOST)
         throw InteropError("Release the target (leave acquire()) before rendering to it again");
     const auto& settings = *scene.data_;
+    if (settings.direct && settings.encoding == "srgb" && !data.host_view && !state_->interop->texture_views())
+        throw InteropError("output_path 'direct' with sRGB encoding needs an sRGB view of the imported texture, "
+                           "and the host OpenGL driver has no glTextureView (OpenGL 4.3 or ARB_texture_view); "
+                           "macOS has OpenGL 4.1. Use output_path 'exact'");
     if (settings.direct && settings.encoding == "srgb" && !data.host_view)
         throw InteropError("output_path 'direct' with sRGB encoding needs an imported target whose texture has "
                            "immutable storage from glTexStorage2D; this texture was allocated with "
@@ -1885,6 +1905,45 @@ void Renderer::render(const Scene& scene, const ImportedTarget& target, const Re
     state_->stats.cpu_submit_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - start).count();
 }
+#if defined(__APPLE__)
+CopyTarget Renderer::create_copy_target(uint32_t texture, int64_t width, int64_t height, const std::string& transfer,
+                                        std::function<void()> on_renderer_close) {
+    state_->check();
+    check_target(width, height, "rgba8");
+    using Transfer = detail::HostCopy::Transfer;
+    if (transfer != "iosurface" && transfer != "readback")
+        throw std::invalid_argument("transfer must be 'iosurface' or 'readback', got '" + transfer + "'");
+    if (!current_gl_context()) throw InteropError("Make the host OpenGL context current first");
+    auto target = create_render_target(width, height, "rgba8", true);
+    auto& data = *target.data_;
+    try {
+        data.host_copy = state_->interop->create_host_copy(*state_->engine, texture, data.width, data.height,
+                                                           transfer == "readback" ? Transfer::READBACK : Transfer::IOSURFACE);
+    } catch (...) {
+        data.release();
+        throw;
+    }
+    data.on_renderer_close = std::move(on_renderer_close);
+    return CopyTarget(target.data_);
+}
+void Renderer::render(const Scene& scene, const CopyTarget& target, const RenderOptions& options) {
+    state_->check();
+    auto& data = *target.data_;
+    if (data.state != state_) throw std::invalid_argument("Scene and target must belong to this renderer");
+    data.check();
+    auto& copy = *data.host_copy;
+    if (current_gl_context() != copy.context) throw InteropError("Make the copy target's host OpenGL context current first");
+    if (data.access == detail::TargetData::Access::HOST)
+        throw InteropError("Release the target (leave acquire()) before rendering to it again");
+    const auto start = std::chrono::steady_clock::now();
+    state_->interop->before_copy(copy);
+    submit(scene, data, options);
+    state_->interop->publish(*state_->engine, copy, data.color_name);
+    data.access = detail::TargetData::Access::SUBMITTED;
+    state_->stats.cpu_submit_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+}
+#endif
 namespace {
 // Filament scales fog color by the IBL luminance (intensity times camera exposure). Dividing
 // it out makes the fog color the output color of fully fogged pixels.
@@ -3644,6 +3703,43 @@ void ImportedTarget::close() {
     detail::flush_and_wait(*data_->state->engine);
     data_->state->delete_views();
 }
+
+#if defined(__APPLE__)
+CopyTarget::CopyTarget(std::shared_ptr<detail::TargetData> data) : data_(std::move(data)) {}
+uint32_t CopyTarget::width() const { data_->check(); return data_->width; }
+uint32_t CopyTarget::height() const { data_->check(); return data_->height; }
+std::string CopyTarget::transfer() const {
+    data_->check();
+    return data_->host_copy->transfer == detail::HostCopy::Transfer::READBACK ? "readback" : "iosurface";
+}
+bool CopyTarget::closed() const { data_->state->check_thread(); return !data_->target || !data_->state->engine; }
+bool CopyTarget::acquired() const { data_->state->check_thread(); return data_->held > 0; }
+void CopyTarget::acquire() {
+    data_->check();
+    auto& copy = *data_->host_copy;
+    if (current_gl_context() != copy.context) throw InteropError("Make the copy target's host OpenGL context current first");
+    if (data_->held > 0) { ++data_->held; return; }
+    using Access = detail::TargetData::Access;
+    if (data_->access == Access::IDLE) throw InteropError("Render to the target before acquiring it");
+    const auto start = std::chrono::steady_clock::now();
+    // After a release without a new render, the host texture already has the last frame.
+    if (data_->access == Access::SUBMITTED) data_->state->interop->take(*data_->state->engine, copy);
+    data_->state->stats.host_wait_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    data_->access = Access::HOST;
+    data_->held = 1;
+}
+void CopyTarget::release() {
+    data_->check();
+    if (data_->held == 0) throw InteropError("release() requires a matching acquire()");
+    if (--data_->held > 0) return;
+    data_->access = detail::TargetData::Access::RELEASED;
+}
+void CopyTarget::close() {
+    data_->state->check_thread();
+    if (!data_->target || !data_->state->engine) return;
+    data_->release();
+}
+#endif
 #include "features.inc"
 #include "resources.inc"
 #include "memory.inc"

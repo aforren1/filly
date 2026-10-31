@@ -1,3 +1,5 @@
+import sys
+
 import numpy as np
 import pytest
 
@@ -172,9 +174,11 @@ def test_zero_thickness_keeps_thin_sheet_filter(renderer):
     for volume in (False, True):
         model = scene.load(striped_glass(volume=volume, thickness=0))
         renderer.render(scene, target)
-        images.append(target.read())
+        images.append(target.read().astype(int))
         model.close()
-    np.testing.assert_array_equal(*images)
+    # The volume entry is a different program. Apple's OpenGL, which runs on Metal, rounds the
+    # two by 1 in about 1% of pixels; a lost filter changes the stripes by far more.
+    np.testing.assert_allclose(*images, rtol=0, atol=1 if sys.platform == "darwin" else 0)
 
 
 @pytest.mark.parametrize("kind", ["point", "directional"])

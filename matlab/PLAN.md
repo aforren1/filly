@@ -28,7 +28,7 @@ How to build, use, and test the frontend: [docs/how-to/matlab.md](../docs/how-to
 
 ## Out of scope
 
-- macOS. See [macOS](#macos).
+- PTB windows on macOS. See [macOS](#macos).
 - A bridge from MATLAB to the Python package (`pyenv`, `py.*`). The bridge is MATLAB-only, it
   couples MATLAB and Python versions, and on Linux MATLAB's bundled runtime libraries can clash
   with the extension module.
@@ -197,8 +197,10 @@ four in any case.
 
 ### macOS
 
-The current design cannot work on macOS. CGL does not share objects between a legacy-profile and
-a core-profile context, and filly has no CGL platform. A possible path, not planned:
+PTB interop cannot work on macOS with the current design. CGL does not share objects between a
+legacy-profile and a core-profile context, and PTB makes a legacy context. filly's CGL platform
+(`core/cgl_platform.cpp`) renders offscreen and shares with core-profile hosts only. A possible
+path for PTB, not planned:
 
 1. Filament renders with its Metal backend into an IOSurface-backed `MTLTexture`.
 2. `CGLTexImageIOSurface2D` binds the IOSurface to a `GL_TEXTURE_RECTANGLE` in PTB's legacy

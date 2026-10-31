@@ -4,20 +4,70 @@ import numpy as np
 import pytest
 
 pytestmark = [pytest.mark.gpu, pytest.mark.psychopy,
-              pytest.mark.skipif(sys.platform not in ("win32", "linux"), reason="WGL/GLX adapter")]
+              pytest.mark.skipif(sys.platform not in ("win32", "linux", "darwin"), reason="WGL/GLX/CGL adapter")]
+# On macOS, each frame is copied into the window's context, by either of two paths.
+TRANSFERS = ["iosurface", "readback"] if sys.platform == "darwin" else ["shared"]
+
+
+@pytest.fixture(autouse=True, params=TRANSFERS)
+def transfer(request, monkeypatch):
+    if request.param != "shared":
+        monkeypatch.setenv("FILLY_PSYCHOPY_TRANSFER", request.param)
+    return request.param
+
+
+# pyglet 1.5, which PsychoPy releases use on macOS, often fails to open a window after another
+# window of the process has closed (docs/explanation/macos.md#third-party-issues). There, the
+# tests share one window per configuration and close it at the end of the module. Elsewhere,
+# each test has its own window.
+def _reuse_windows():
+    if sys.platform != "darwin":
+        return False
+    import pyglet
+    return int(pyglet.version.split(".")[0]) < 2
+
+
+_shared_windows = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _close_shared_windows():
+    yield
+    for win in _shared_windows.values():
+        win.close()
+    _shared_windows.clear()
+
+
+def _window(visual, size=(128, 128), use_fbo=False, allow_gui=True, shared=True):
+    options = dict(size=size, units="pix", winType="pyglet", useFBO=use_fbo, checkTiming=False,
+                   waitBlanking=False, autoLog=False, allowGUI=allow_gui)
+    if not (shared and _reuse_windows()):
+        return visual.Window(**options)
+    key = (tuple(size), use_fbo, allow_gui)
+    if key not in _shared_windows:
+        _shared_windows[key] = visual.Window(**options)
+    return _shared_windows[key]
+
+
+def _release(win):
+    if any(win is shared for shared in _shared_windows.values()):
+        # Clears the back buffer, as a new window would have it.
+        win.flip()
+    else:
+        win.close()
 
 
 @pytest.mark.parametrize("use_fbo", [False, True])
 @pytest.mark.parametrize("effects", [False, True])
-def test_psychopy_samples_texture_and_owns_flip(triangle_glb, monkeypatch, use_fbo, effects):
+def test_psychopy_samples_texture_and_owns_flip(triangle_glb, monkeypatch, use_fbo, effects, transfer):
     visual = pytest.importorskip("psychopy.visual")
     from filly.integrations.psychopy import HostTarget, create_renderer
 
-    win = visual.Window(size=(128, 128), units="pix", winType="pyglet", useFBO=use_fbo,
-                        checkTiming=False, waitBlanking=False, autoLog=False, allowGUI=False)
-    if use_fbo:
+    win = _window(visual, use_fbo=use_fbo, allow_gui=False)
+    if use_fbo and sys.platform != "darwin":
         # PsychoPy 2026.2.4 with pyglet 1.4.11 does not present FBO windows on any tested GPU,
-        # so only the FBO contents are checked.
+        # so only the FBO contents are checked. On macOS, PsychoPy's flip() waits for a callback
+        # from the window's display link, which a hidden window never sends.
         win.winHandle.set_visible(False)
     # Swap counting starts after this flip.
     win.flip()
@@ -45,7 +95,8 @@ def test_psychopy_samples_texture_and_owns_flip(triangle_glb, monkeypatch, use_f
             reference = renderer.create_render_target(width=128, height=128) if effects else None
             with HostTarget(renderer, win, width=128, height=128) as target:
                 stimulus = target.create_image_stim()
-                # The shared path has no CPU readback at all.
+                assert target.transfer == transfer
+                # The target has no CPU readback of its own.
                 assert not hasattr(target, "read")
                 for frame, color in enumerate([(1, 0, 0, 1), (0, 1, 0, 1), (0, 0, 1, 1)]):
                     model.material("red").base_color = color
@@ -82,7 +133,7 @@ def test_psychopy_samples_texture_and_owns_flip(triangle_glb, monkeypatch, use_f
             with pytest.raises(Exception, match="closed"):
                 stimulus.draw()
     finally:
-        win.close()
+        _release(win)
 
 
 @pytest.mark.parametrize("tone_mapping", ["linear", "aces_legacy"])
@@ -91,8 +142,7 @@ def test_point_shadows_and_skybox_shared_output(triangle_glb, tone_mapping):
     from filly.integrations.psychopy import HostTarget, create_renderer
     from test_lighting import shadow_asset, panorama
 
-    win = visual.Window(size=(128,128), units="pix", winType="pyglet", useFBO=False,
-                        checkTiming=False, waitBlanking=False, autoLog=False)
+    win = _window(visual)
     try:
         with create_renderer(win) as renderer:
             scene = renderer.create_scene()
@@ -125,7 +175,7 @@ def test_point_shadows_and_skybox_shared_output(triangle_glb, tone_mapping):
                     np.testing.assert_allclose(image,expected*255,atol=3)
                     win.flip()
     finally:
-        win.close()
+        _release(win)
 
 
 @pytest.mark.parametrize("projection", ["ortho", 110])
@@ -134,8 +184,7 @@ def test_rough_glass_shared_output(projection):
     from filly.integrations.psychopy import HostTarget, create_renderer
     from test_refraction import striped_glass, configure_camera
 
-    win = visual.Window(size=(128, 128), units="pix", winType="pyglet", useFBO=False,
-                        checkTiming=False, waitBlanking=False, autoLog=False)
+    win = _window(visual)
     try:
         with create_renderer(win) as renderer:
             scene = renderer.create_scene()
@@ -152,7 +201,7 @@ def test_rough_glass_shared_output(projection):
                 np.testing.assert_allclose(np.asarray(win._getFrame(buffer="back")), expected, atol=3)
                 win.flip()
     finally:
-        win.close()
+        _release(win)
 
 
 @pytest.mark.parametrize("fxaa", [False, True])
@@ -165,8 +214,7 @@ def test_transparent_compositing(triangle_glb, fxaa, opacity):
     doc, binary = unpack(triangle_glb)
     doc["materials"][0]["alphaMode"] = "BLEND"
     doc["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"][3] = 0.5
-    win = visual.Window(size=(128, 128), units="pix", winType="pyglet", useFBO=False,
-                        checkTiming=False, waitBlanking=False, autoLog=False)
+    win = _window(visual)
     try:
         underlay = visual.Rect(win, width=128, height=128, fillColor="blue", lineColor=None, autoLog=False)
         overlay = visual.Rect(win, width=12, height=12, pos=(45, 45), fillColor="green", lineColor=None, autoLog=False)
@@ -204,7 +252,7 @@ def test_transparent_compositing(triangle_glb, fxaa, opacity):
                 np.testing.assert_array_equal(image[19, 109], [0, 128, 0])
                 win.flip()
     finally:
-        win.close()
+        _release(win)
 
 
 def test_target_draw_and_shared_acquire(triangle_glb):
@@ -213,8 +261,7 @@ def test_target_draw_and_shared_acquire(triangle_glb):
     from filly import InteropError
     from filly.integrations.psychopy import HostTarget, create_renderer
 
-    win = visual.Window(size=(128, 128), units="pix", winType="pyglet", useFBO=False,
-                        checkTiming=False, waitBlanking=False, autoLog=False)
+    win = _window(visual)
     try:
         with create_renderer(win) as renderer:
             scene = renderer.create_scene()
@@ -248,12 +295,11 @@ def test_target_draw_and_shared_acquire(triangle_glb):
                 with pytest.raises(InteropError, match="Render to the target"):
                     stimulus.draw()
     finally:
-        win.close()
+        _release(win)
 
 
-def _small_window(visual):
-    return visual.Window(size=(64, 48), units="pix", winType="pyglet", useFBO=False,
-                         checkTiming=False, waitBlanking=False, autoLog=False, allowGUI=False)
+def _small_window(visual, shared=True):
+    return _window(visual, size=(64, 48), allow_gui=False, shared=shared)
 
 
 def test_host_target_accepts_integral_sizes():
@@ -270,7 +316,7 @@ def test_host_target_accepts_integral_sizes():
                     stimulus = target.create_image_stim()
                     assert tuple(stimulus.size) == (64, 48)
     finally:
-        win.close()
+        _release(win)
 
 
 @pytest.mark.parametrize("width, height, error, match", [
@@ -292,15 +338,19 @@ def test_host_target_rejects_invalid_sizes(width, height, error, match):
             with pytest.raises(error, match=match):
                 HostTarget(renderer, win, width=width, height=height)
     finally:
-        win.close()
+        _release(win)
 
 
-def test_close_after_window_close_releases_everything():
+def test_close_after_window_close_releases_everything(transfer):
     visual = pytest.importorskip("psychopy.visual")
     from filly import InteropError
     from filly.integrations.psychopy import HostTarget, create_renderer
 
-    win = _small_window(visual)
+    if _reuse_windows() and transfer == "readback":
+        # This test closes its window, and with pyglet 1.5 the next window to open after a close
+        # often fails. One closed window per process keeps the windows after it safe.
+        pytest.skip("pyglet 1.5 on macOS: only one test may close a window")
+    win = _small_window(visual, shared=False)
     renderer = create_renderer(win)
     target = HostTarget(renderer, win, width=64, height=48)
     stimulus = target.create_image_stim()
@@ -325,7 +375,7 @@ def test_stimulus_cleanup_stays_in_its_own_context(triangle_glb):
     from filly.integrations.psychopy import HostTarget, create_renderer
 
     win = _small_window(visual)
-    other = pyglet.window.Window(width=16, height=16, visible=False)
+    switch_to_other, close_other = _other_context(pyglet)
     try:
         with create_renderer(win) as renderer, HostTarget(renderer, win, width=64, height=48) as target:
             scene = renderer.create_scene()
@@ -337,7 +387,7 @@ def test_stimulus_cleanup_stays_in_its_own_context(triangle_glb):
             stimulus.draw()
             mask = stimulus._maskID.value
             assert gl.glIsTexture(mask)
-            other.switch_to()
+            switch_to_other()
             current = current_gl_context()
             stimulus.clearTextures()
             assert current_gl_context() == current and stimulus._maskID.value == 0
@@ -347,8 +397,26 @@ def test_stimulus_cleanup_stays_in_its_own_context(triangle_glb):
             assert gl.glIsTexture(mask)
             gl.glDeleteTextures(1, ctypes.byref(gl.GLuint(mask)))
     finally:
-        other.close()
-        win.close()
+        close_other()
+        _release(win)
+
+
+def _other_context(pyglet):
+    """Return functions that make a second OpenGL context current and destroy it."""
+    if sys.platform != "darwin":
+        other = pyglet.window.Window(width=16, height=16, visible=False)
+        return other.switch_to, other.close
+    # pyglet 2.1.19 crashes when it creates a second window beside a PsychoPy window on macOS
+    # (create_context in pyglet/gl/cocoa.py), with or without filly, so this is a plain CGL context.
+    import ctypes
+    cgl = ctypes.CDLL("/System/Library/Frameworks/OpenGL.framework/OpenGL")
+    attributes = (ctypes.c_int * 1)(0)
+    pixel_format, count, context = ctypes.c_void_p(), ctypes.c_int(), ctypes.c_void_p()
+    cgl.CGLChoosePixelFormat(attributes, ctypes.byref(pixel_format), ctypes.byref(count))
+    cgl.CGLCreateContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    assert cgl.CGLCreateContext(pixel_format, None, ctypes.byref(context)) == 0
+    cgl.CGLSetCurrentContext.argtypes = cgl.CGLDestroyContext.argtypes = [ctypes.c_void_p]
+    return (lambda: cgl.CGLSetCurrentContext(context)), (lambda: cgl.CGLDestroyContext(context))
 
 
 def test_renderer_close_releases_targets_and_stimuli(triangle_glb):
@@ -381,7 +449,7 @@ def test_renderer_close_releases_targets_and_stimuli(triangle_glb):
             target.draw()
         target.close()
     finally:
-        win.close()
+        _release(win)
 
 
 def test_draw_copy_and_blend(triangle_glb):
@@ -417,7 +485,7 @@ def test_draw_copy_and_blend(triangle_glb):
                     images.append(np.asarray(win._getFrame(buffer="back")).astype(int))
                     win.flip()
     finally:
-        win.close()
+        _release(win)
     blended, copied = images
     # Rows count down from the top; the texture covers the lower-left 48 x 48 pixels.
     np.testing.assert_allclose(blended[24, 24], (128, 0, 127), atol=3)
@@ -431,3 +499,97 @@ def gl_blend_enabled():
     from pyglet import gl
     return bool(gl.glIsEnabled(gl.GL_BLEND))
 
+
+def test_many_frames_without_a_cpu_wait_stay_ordered():
+    """Each frame reaches the window in order, although nothing reads the window between frames."""
+    visual = pytest.importorskip("psychopy.visual")
+    from filly.integrations.psychopy import HostTarget, create_renderer
+
+    win = _window(visual, allow_gui=False)
+    try:
+        with create_renderer(win) as renderer:
+            scene = renderer.create_scene()
+            scene.camera = renderer.create_camera()
+            values = [(index + 1) / 65 for index in range(64)]
+            # Expected bytes first: these reads wait for the GPU, and the loop below must not.
+            reference = renderer.create_render_target(width=16, height=16)
+            expected = []
+            for value in values:
+                scene.background = (value, 1 - value, 0.5, 1)
+                renderer.render(scene, reference)
+                expected.append(reference.read()[8, 8, :3])
+            with HostTarget(renderer, win, width=16, height=16) as target:
+                for index, value in enumerate(values):
+                    scene.background = (value, 1 - value, 0.5, 1)
+                    renderer.render(scene, target)
+                    target.draw(viewport=(16 * (index % 8), 16 * (index // 8), 16, 16), blend=False)
+                image = np.asarray(win._getFrame(buffer="back"))
+        for index, colors in enumerate(expected):
+            # Rows count down from the top; viewports count up from the bottom.
+            row, column = 127 - (16 * (index // 8) + 8), 16 * (index % 8) + 8
+            np.testing.assert_array_equal(image[row, column], colors, err_msg=f"frame {index}")
+    finally:
+        _release(win)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Frames are copied only on macOS")
+def test_macos_renderer_is_offscreen_and_falls_back_to_readback(monkeypatch, transfer):
+    visual = pytest.importorskip("psychopy.visual")
+    import filly
+    from filly.integrations.psychopy import HostTarget, create_renderer
+
+    monkeypatch.delenv("FILLY_PSYCHOPY_TRANSFER")
+    win = _small_window(visual)
+    try:
+        with create_renderer(win) as renderer:
+            # PsychoPy's legacy profile context cannot share objects with Filament's.
+            assert renderer.shared_context == 0 and renderer.gl_platform == "cgl"
+            with HostTarget(renderer, win, width=8, height=8) as target:
+                assert target.transfer == "iosurface" and target.fallback_reason is None
+            create = filly.Renderer._create_copy_target
+
+            def unavailable(self, texture, **options):
+                if options["transfer"] == "iosurface":
+                    raise filly.InteropError("no IOSurface for the test")
+                return create(self, texture, **options)
+
+            monkeypatch.setattr(filly.Renderer, "_create_copy_target", unavailable)
+            with HostTarget(renderer, win, width=8, height=8) as target:
+                assert target.transfer == "readback"
+                assert "no IOSurface for the test" in target.fallback_reason
+            # A forced transfer does not fall back.
+            monkeypatch.setenv("FILLY_PSYCHOPY_TRANSFER", "iosurface")
+            with pytest.raises(filly.InteropError, match="no IOSurface"):
+                HostTarget(renderer, win, width=8, height=8)
+            monkeypatch.setenv("FILLY_PSYCHOPY_TRANSFER", "gpu")
+            with pytest.raises(ValueError, match="FILLY_PSYCHOPY_TRANSFER"):
+                HostTarget(renderer, win, width=8, height=8)
+    finally:
+        _release(win)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Covers the copy into the window's texture")
+@pytest.mark.parametrize("encoding", ["srgb", "linear"])
+def test_copy_keeps_the_stored_bytes_of_the_direct_path(encoding):
+    """The copies must not decode or encode sRGB: the direct path writes through an sRGB attachment."""
+    visual = pytest.importorskip("psychopy.visual")
+    from filly.integrations.psychopy import HostTarget, create_renderer
+
+    win = _small_window(visual)
+    try:
+        with create_renderer(win) as renderer:
+            scene = renderer.create_scene()
+            scene.camera = renderer.create_camera()
+            scene.background = (0.2, 0.5, 0.8, 1)
+            scene.output_path = "direct"
+            scene.encoding = encoding
+            reference = renderer.create_render_target(width=48, height=48)
+            renderer.render(scene, reference)
+            expected = reference.read()[24, 24, :3]
+            with HostTarget(renderer, win, width=48, height=48) as target:
+                renderer.render(scene, target)
+                target.draw(blend=False)
+                image = np.asarray(win._getFrame(buffer="back"))
+        np.testing.assert_array_equal(image[24, 24], expected)
+    finally:
+        _release(win)

@@ -95,6 +95,8 @@ GlInterop::~GlInterop() {
 filament::backend::Platform* GlInterop::platform() { return impl_->platform.get(); }
 const char* GlInterop::platform_name() const { return "webgl"; }
 bool GlInterop::shared() const { return true; }
+// WebGL2 has no texture views; see import_texture().
+bool GlInterop::texture_views() const { return false; }
 filament::Engine* GlInterop::create_engine() {
     require_host();
     const auto config = engine_config();

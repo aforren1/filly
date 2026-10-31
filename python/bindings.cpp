@@ -133,11 +133,28 @@ nb::dict shape_dict(ShapeArrays&& shape) {
     return result;
 }
 
-// Context manager returned by ImportedTarget.acquire(). It holds the Python object so that
-// `with target.acquire() as t` yields the caller's own (possibly subclassed) target.
-struct Acquisition {
+// Context manager returned by ImportedTarget.acquire() and, on macOS, _CopyTarget.acquire(). It
+// holds the Python object so that `with target.acquire() as t` yields the caller's own (possibly
+// subclassed) target.
+template <class Target> struct Acquisition {
     nb::object target;
 };
+template <class Target> void bind_acquisition(nb::module_& module, const char* name) {
+    nb::class_<Acquisition<Target>>(module, name)
+        .def("__enter__", [](Acquisition<Target>& self) {
+            auto& target = nb::cast<Target&>(self.target);
+            {
+                nb::gil_scoped_release release;
+                target.acquire();
+            }
+            return self.target;
+        })
+        .def("__exit__", [](Acquisition<Target>& self, nb::handle, nb::handle, nb::handle) {
+            auto& target = nb::cast<Target&>(self.target);
+            nb::gil_scoped_release release;
+            target.release();
+        }, nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none());
+}
 // Context manager returned by ImportedTexture.write().
 struct TextureWrite {
     nb::object texture;
@@ -467,20 +484,7 @@ NB_MODULE(_native, module) {
             return read_pixels(self.width(), self.height(), out, [&](uint8_t* pixels) { self.read(pixels); });
         }, nb::kw_only(), "out"_a = nb::none());
 
-    nb::class_<Acquisition>(module, "_Acquisition")
-        .def("__enter__", [](Acquisition& self) {
-            auto& target = nb::cast<ImportedTarget&>(self.target);
-            {
-                nb::gil_scoped_release release;
-                target.acquire();
-            }
-            return self.target;
-        })
-        .def("__exit__", [](Acquisition& self, nb::handle, nb::handle, nb::handle) {
-            auto& target = nb::cast<ImportedTarget&>(self.target);
-            nb::gil_scoped_release release;
-            target.release();
-        }, nb::arg("exc_type").none(), nb::arg("exc_value").none(), nb::arg("traceback").none());
+    bind_acquisition<ImportedTarget>(module, "_Acquisition");
 
     nb::class_<Texture> texture_type(module, "Texture");
     closable(texture_type, "Texture is closed");
@@ -547,13 +551,31 @@ NB_MODULE(_native, module) {
         .def(nb::init<const ImportedTarget&>())
         .def("acquire", [](nb::object self) {
             nb::cast<ImportedTarget&>(self);
-            return Acquisition{self};
+            return Acquisition<ImportedTarget>{self};
         })
         .def_prop_ro("acquired", &ImportedTarget::acquired)
         .def("close", &ImportedTarget::close, nb::call_guard<nb::gil_scoped_release>())
         .def_prop_ro("closed", &ImportedTarget::closed)
         .def_prop_ro("width", &ImportedTarget::width)
         .def_prop_ro("height", &ImportedTarget::height);
+#if defined(__APPLE__)
+    // For filly.integrations.psychopy, whose windows cannot share objects with Filament's context.
+    bind_acquisition<CopyTarget>(module, "_CopyAcquisition");
+    nb::class_<CopyTarget> copy_target(module, "_CopyTarget");
+    closable(copy_target, "Render target is closed");
+    copy_target
+        .def(nb::init<const CopyTarget&>())
+        .def("acquire", [](nb::object self) {
+            nb::cast<CopyTarget&>(self);
+            return Acquisition<CopyTarget>{self};
+        })
+        .def_prop_ro("acquired", &CopyTarget::acquired)
+        .def_prop_ro("transfer", &CopyTarget::transfer)
+        .def("close", &CopyTarget::close, nb::call_guard<nb::gil_scoped_release>())
+        .def_prop_ro("closed", &CopyTarget::closed)
+        .def_prop_ro("width", &CopyTarget::width)
+        .def_prop_ro("height", &CopyTarget::height);
+#endif
 
     nb::class_<Preparation>(module, "Preparation")
         .def("ready", &Preparation::ready,
@@ -637,6 +659,21 @@ NB_MODULE(_native, module) {
             self.render(scene, target, options);
         }, "scene"_a, "target"_a, nb::kw_only(), "camera"_a.none() = nb::none(), "viewport"_a.none() = nb::none(),
            "clear"_a = true)
+#if defined(__APPLE__)
+        .def("render", [](Renderer& self, const Scene& scene, const CopyTarget& target, std::optional<Camera> camera,
+                          nb::handle viewport, bool clear) {
+            const auto options = render_options(camera, viewport, clear);
+            nb::gil_scoped_release release;
+            self.render(scene, target, options);
+        }, "scene"_a, "target"_a, nb::kw_only(), "camera"_a.none() = nb::none(), "viewport"_a.none() = nb::none(),
+           "clear"_a = true)
+        .def("_create_copy_target", [](Renderer& self, uint32_t texture, nb::handle width, nb::handle height,
+                                       const std::string& transfer, nb::handle on_renderer_close) {
+            return self.create_copy_target(texture, pixel_size(width, "width"), pixel_size(height, "height"), transfer,
+                                           on_renderer_close.is_none() ? nullptr : python_callback(on_renderer_close));
+        }, "texture_id"_a, nb::kw_only(), "width"_a, "height"_a, "transfer"_a,
+           "on_renderer_close"_a.none() = nb::none())
+#endif
         .def("create_texture", [](Renderer& self, Pixels pixels, const std::string& color_space, bool mipmaps,
                                   const std::string& filter, const std::string& wrap) {
             const auto [channels, is_float] = pixel_layout(pixels);

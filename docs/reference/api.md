@@ -80,7 +80,7 @@ Assets with roughly 18,000 or more meshes can still exceed the ring and abort th
 | `close()` | Call the `on_renderer_close` callbacks of open imported targets, then release every resource of the renderer. Repeated calls are valid. |
 | `closed` | Report whether the engine is closed. |
 | `shared_context` | The host context handle given at creation, or `0` for an offscreen renderer. Read-only. |
-| `gl_platform` | The OpenGL binding of the engine: `"wgl"`, `"glx"`, or `"egl"`. Read-only. |
+| `gl_platform` | The OpenGL binding of the engine: `"wgl"`, `"glx"`, `"egl"`, or `"cgl"` (macOS). Read-only. |
 | `stats` | Return a `Stats` snapshot of frame counters, CPU timings, and the GPU time of an earlier frame. See [statistics](#statistics). |
 
 The names tell what filly does with an object and who owns its storage. `render()` writes into a

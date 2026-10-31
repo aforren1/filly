@@ -88,8 +88,8 @@ in [material precompilation](../explanation/material-precompilation.md).
 
 The build also compiles the materials of filly's output passes (encode and FXAA) with `matc`.
 The archive step also needs `uberz`, and optionally `matinfo`. All come from the same Filament
-version as the SDK. The build looks for them in `FILAMENT_ROOT/bin`. The Windows SDK archive contains them.
-The Linux SDK tool builds them (see [Build on Linux](#build-on-linux)). To use other copies, set
+version as the SDK. The build looks for them in `FILAMENT_ROOT/bin`. The Windows and macOS SDK
+archives contain them. The Linux SDK tool builds them (see [Build on Linux](#build-on-linux)). To use other copies, set
 `-Ccmake.define.FILLY_MATERIAL_TOOLS=<directory>`. `matinfo` lets the build check that the
 optimized refraction shader still contains filly's orthographic refraction hook; without it,
 the check does not run.
@@ -186,7 +186,70 @@ env -u DISPLAY -u WAYLAND_DISPLAY uv run --no-sync python -m pytest -q -m 'not p
 Pyglet is needed for the shared-context tests. Install `pyglet==1.4.11` and Pillow to run all
 non-PsychoPy tests; the tests use Pillow only to encode PNG fixtures. The moderngl and zengl
 host tests also need `moderngl` and `zengl`. Software tests do not measure GPU performance.
-Native Wayland, macOS, and ARM builds are not implemented.
+Native Wayland and Linux ARM builds are not implemented.
+
+## macOS requirements
+
+- macOS 11 or later on Apple silicon (arm64). The Filament release archive for macOS contains
+  arm64 libraries only, so Intel Macs are not supported.
+- The Xcode Command Line Tools (Apple Clang). Xcode itself is not necessary.
+- uv and Python 3.12. The development environment gets CMake and Ninja from PyPI, so Homebrew
+  is not necessary.
+- Network access for the first configure, which downloads libwebp. See [libwebp](#libwebp).
+
+## Build on macOS
+
+From the project directory, run:
+
+```bash
+uv venv --python 3.12
+uv pip install cmake ninja nanobind scikit-build-core numpy pytest
+uv run --no-project tools/fetch_filament.py
+uv pip install --no-build-isolation -e .
+```
+
+The download tool checks the SHA-256 hash of the Filament 1.77.1 macOS archive (about 44 MiB)
+and extracts it to `.deps/filament-mac`. The build uses this folder by default. To use a
+different SDK, add `-Ccmake.define.FILAMENT_ROOT=<folder>`. The SDK must contain `include`,
+`lib/arm64`, and `bin` with `matc` and `uberz`.
+
+The core library is compiled with `-fno-rtti`, because the release SDK has no RTTI. For this
+and the other differences of the macOS build, see [macOS](../explanation/macos.md).
+
+To build a wheel for macOS 11 and later, as CI does, set the deployment target:
+
+```bash
+MACOSX_DEPLOYMENT_TARGET=11.0 uv build --wheel --no-build-isolation
+```
+
+Without it, the module requires the version of macOS that built it.
+
+## Run on macOS
+
+Renderers use CGL, through filly's own CGL platform. `Renderer.gl_platform` reports `"cgl"`. To
+learn why filly does not use Filament's `PlatformCocoaGL`, see
+[macOS](../explanation/macos.md#fillys-own-cgl-platform).
+
+macOS has OpenGL 4.1 only (on Apple silicon, OpenGL runs on Metal). These limits apply:
+
+- A `shared_context` host must have a core profile context (OpenGL 3.2 or later). pyglet 2 makes
+  one by default. macOS does not share objects between a legacy profile (OpenGL 2.1) context and
+  a core profile context, so a legacy host gets `InteropError`. PsychoPy and Psychtoolbox make
+  legacy contexts. The PsychoPy adapter therefore uses an offscreen renderer and copies each
+  frame into the window's context; see [PsychoPy on macOS](psychopy.md#use-psychopy-on-macos).
+  The Psychtoolbox classes do not work on macOS.
+- pyglet 1.4.11 does not load on Apple silicon. Use pyglet 2.
+- OpenGL 4.1 has no `glTextureView` (OpenGL 4.3), so filly cannot make sRGB views of host
+  textures. `import_gl_texture(..., color_space="srgb")` raises `InteropError`; import the texture
+  with `color_space="linear"` instead. An imported target supports `output_path="exact"`, the
+  default, for both encodings. With `output_path="direct"`, it supports only `encoding="linear"`.
+
+To run the tests, including the shared-context tests:
+
+```bash
+uv pip install pillow pyglet moderngl zengl
+uv run --no-sync python -m pytest -q -m 'not psychopy'
+```
 
 ## Build for the web
 
@@ -312,7 +375,10 @@ CXX=clang++ CMAKE_ARGS="-DFILAMENT_ROOT=$PWD/.deps/filament-linux" uv build --wh
 The extension links Filament statically. The wheel does not need a separate Filament SDK at runtime.
 The host still needs an OpenGL driver and its platform libraries. Windows 10 or later supplies
 the Universal CRT; the Visual C++ Redistributable is not necessary. Linux needs `libGL.so.1` and
-`libX11.so.6` to load the module, and EGL or an X display to render.
+`libX11.so.6` to load the module, and EGL or an X display to render. On macOS, the module imports
+system libraries and frameworks only. Filament's backend library also contains its Metal and
+Cocoa platforms, so the module imports AppKit, Metal, QuartzCore, and CoreVideo, although filly
+renders with OpenGL.
 The wheel includes the licenses of Filament, cgltf, meshoptimizer, and libwebp.
 
 Build with Python 3.12 to produce a `cp312-abi3` wheel. This wheel supports Python 3.12 and later
@@ -320,7 +386,8 @@ standard CPython builds. Python 3.10 and 3.11 builds produce version-specific wh
 Python is not included in this matrix. See [nanobind's stable ABI configuration](https://nanobind.readthedocs.io/en/latest/packaging.html).
 
 On Linux, the module exports only `PyInit__native`; a linker version script keeps Filament,
-libwebp, and C++ template symbols local. scikit-build-core strips the installed module
+libwebp, and C++ template symbols local. On macOS, an exported symbols list (`-exported_symbols_list`)
+does the same. scikit-build-core strips the installed module
 (`install.strip`). The copy in `build/<wheel tag>` keeps its symbol table (`NOSTRIP`) and has
 the same GNU build ID, so use it to symbolize stacks from the wheel's module. Release builds
 contain no DWARF debug information.
@@ -328,13 +395,15 @@ contain no DWARF debug information.
 ## Automated wheels
 
 [Build wheels](../../.github/workflows/wheels.yml) runs on pull requests, pushes to `main` or
-`master`, version tags, and manual dispatch. It uses cibuildwheel for Windows AMD64 and
-manylinux_2_28 x86_64, with Python 3.10 through 3.14 tests and stable-ABI wheel reuse.
+`master`, version tags, and manual dispatch. It uses cibuildwheel for Windows AMD64,
+manylinux_2_28 x86_64, and macOS arm64 (macOS 11.0 and later), with Python 3.10 through 3.14 tests
+and stable-ABI wheel reuse.
 Linux builds Filament inside the manylinux container, repairs dependencies with auditwheel,
 and tests rendering and shared textures under Xvfb/Mesa. Cibuildwheel audits limited-ABI wheels
 with abi3audit. After the build, `tools/check_native_imports.py` rejects a wheel whose module
 imports a library outside its allowed list, such as `msvcp140.dll`. Windows CI runs CPU smoke tests because hosted runners lack a reliable OpenGL
-device; run the full suite on a Windows machine with a GPU.
+device; run the full suite on a Windows machine with a GPU. macOS CI runs the offscreen tests
+without the shared-context tests, which need a window; run those on a Mac.
 
 Download wheels from the workflow artifacts. The same workflow builds the sdist and publishes
 releases; see [publish a release](#publish-a-release).

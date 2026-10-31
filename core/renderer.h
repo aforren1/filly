@@ -651,6 +651,33 @@ private:
     friend class Renderer;
 };
 
+#if defined(__APPLE__)
+// A Filament-owned target whose frames reach a host OpenGL texture, for a host context that
+// cannot share objects with Filament's. macOS shares objects only between contexts of one
+// profile, and Filament needs the core profile, while PsychoPy windows have the legacy one.
+// render() queues a copy of each frame; acquire() waits for it and copies it into the host
+// texture, which the host then samples. The host context is the one current at creation.
+class CopyTarget {
+public:
+    explicit CopyTarget(std::shared_ptr<detail::TargetData> data);
+    uint32_t width() const;
+    uint32_t height() const;
+    // "iosurface": the GPU copies each frame through an IOSurface that both contexts bind.
+    // "readback": the frame goes through CPU memory, as RenderTarget::read() reads it.
+    std::string transfer() const;
+    void acquire();
+    void release();
+    bool acquired() const;
+    // With the host context current, also deletes the host-side objects; otherwise they go away
+    // with the host context. The host texture stays the host's.
+    void close();
+    bool closed() const;
+private:
+    std::shared_ptr<detail::TargetData> data_;
+    friend class Renderer;
+};
+#endif
+
 class Renderer {
 public:
     explicit Renderer(uintptr_t shared_context = 0);
@@ -685,6 +712,14 @@ public:
                                     std::function<void()> on_renderer_close = {});
     void render(const Scene& scene, const RenderTarget& target, const RenderOptions& options = {});
     void render(const Scene& scene, const ImportedTarget& target, const RenderOptions& options = {});
+#if defined(__APPLE__)
+    // texture is a GL_TEXTURE_2D with GL_RGBA8 storage in the current host context; transfer is
+    // "iosurface" or "readback". Throws InteropError when the transfer is unavailable, so that a
+    // host adapter can choose the other one. on_renderer_close as for import_gl_target().
+    CopyTarget create_copy_target(uint32_t texture, int64_t width, int64_t height, const std::string& transfer,
+                                  std::function<void()> on_renderer_close = {});
+    void render(const Scene& scene, const CopyTarget& target, const RenderOptions& options = {});
+#endif
     // Queues a query for what the scene shows at target pixel (x, y), counted from the
     // lower-left corner like viewports. The scene's next render takes it.
     PickQuery pick(const Scene& scene, double x, double y);
@@ -710,7 +745,7 @@ public:
     void close();
     bool closed() const;
     uintptr_t shared_context() const;
-    // "wgl", "glx", "egl", or "webgl".
+    // "wgl", "glx", "egl", "cgl", or "webgl".
     std::string gl_platform() const;
     Stats stats() const;
 private:

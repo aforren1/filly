@@ -62,8 +62,14 @@ file(COPY "${PROJECT_SOURCE_DIR}/samples/" DESTINATION "${FILLY_MEX_OUTPUT_DIR}/
 
 if(FILLY_MATLAB)
   find_package(Matlab REQUIRED COMPONENTS MX_LIBRARY)
-  # On Linux, matlab_add_mex also applies MATLAB's export map, so the file exports only
-  # mexFunction and the API version symbols.
+  if(APPLE)
+    # The gateway uses the C MEX API only. With the C++ API, matlab_add_mex also links the
+    # MATLAB Engine and Data Array libraries and exports the C++ entry points, which this file
+    # does not define; Apple's linker then fails, although MATLAB's own mex links the file.
+    set(Matlab_HAS_CPP_API 0)
+  endif()
+  # On Linux and macOS, matlab_add_mex also applies MATLAB's export list, so the file exports
+  # only mexFunction and the API version symbols.
   # CMAKE_DL_LIBS: dlsym and dladdr, for the check of which library provides Mesa's _glapi
   # symbols. Through LINK_TO, because FindMatlab links with the plain target_link_libraries
   # signature, which a keyword call on the same target cannot mix with.
@@ -76,17 +82,18 @@ if(FILLY_MATLAB)
     # As for the Python module: the static C++ runtime avoids the older msvcp140.dll that MATLAB
     # loads, and one shared UCRT keeps one heap per process.
     target_link_options(filly_mex PRIVATE /NODEFAULTLIB:libucrt.lib /DEFAULTLIB:ucrt.lib)
-  else()
+  elseif(NOT APPLE)
     # MATLAB puts its own libstdc++ and libgcc_s first in the search path, and they are older
     # than the ones that the core is built with. Static copies make the file independent of
-    # them; the export map keeps their symbols out of the process.
+    # them; the export map keeps their symbols out of the process. On macOS, MATLAB and the
+    # core use the system's libc++.
     target_link_options(filly_mex PRIVATE -static-libstdc++ -static-libgcc)
   endif()
 endif()
 
 if(FILLY_OCTAVE)
   if(WIN32)
-    message(FATAL_ERROR "FILLY_OCTAVE supports Linux only. See phase 6 of matlab/PLAN.md.")
+    message(FATAL_ERROR "FILLY_OCTAVE supports Linux and macOS only. See phase 6 of matlab/PLAN.md.")
   endif()
   # A plain module with mkoctfile's include directories, not a custom command that runs
   # mkoctfile --mex: mkoctfile cannot take filly_core's link libraries from CMake. mkoctfile
@@ -130,15 +137,23 @@ if(FILLY_OCTAVE)
       execute_process(COMMAND "${FILLY_MKOCTFILE}" -p OCTLIBDIR OUTPUT_VARIABLE _libdir
         OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
     endif()
-    file(GLOB _candidates RELATIVE "${_libdir}" "${_libdir}/liboctmex.so.*")
+    # liboctmex.so.1 on Linux, liboctmex.1.dylib on macOS.
+    if(APPLE)
+      set(_pattern "liboctmex.*.dylib")
+      set(_regex "^liboctmex\\.([0-9]+)\\.dylib$")
+    else()
+      set(_pattern "liboctmex.so.*")
+      set(_regex "^liboctmex\\.so\\.([0-9]+)$")
+    endif()
+    file(GLOB _candidates RELATIVE "${_libdir}" "${_libdir}/${_pattern}")
     foreach(_name IN LISTS _candidates)
-      if(_name MATCHES "^liboctmex\\.so\\.([0-9]+)$")
+      if(_name MATCHES "${_regex}")
         set(_octmex "${_libdir}/${_name}")
         set(_soversion "${CMAKE_MATCH_1}")
       endif()
     endforeach()
     if(NOT _octmex)
-      message(FATAL_ERROR "No liboctmex.so.<version> in ${_libdir}, which Octave ${_octave_major} MEX files link")
+      message(FATAL_ERROR "No ${_pattern} in ${_libdir}, which Octave ${_octave_major} MEX files link")
     endif()
     string(APPEND _exports " __octave_mex_soversion__;")
   endif()
@@ -157,8 +172,20 @@ if(FILLY_OCTAVE)
   # exported, so that Filament and libwebp cannot bind to other copies in the process. The
   # gateway is not compiled with -fvisibility=hidden: Octave's mex.h gives mexFunction no
   # visibility attribute, and a hidden symbol cannot be exported.
-  set(_map "${CMAKE_CURRENT_BINARY_DIR}/filly_octave_mex.map")
-  file(WRITE "${_map}" "{\n  global: ${_exports}\n  local: *;\n};\n")
-  target_link_options(filly_octave_mex PRIVATE "LINKER:--version-script=${_map}")
+  if(APPLE)
+    # Apple's linker takes a list of C names, with the underscore prefix. As mkoctfile --mex
+    # does, the bundle leaves the MEX API to the running Octave, which loaded liboctmex already.
+    string(REGEX MATCHALL "[A-Za-z_]+" _names "${_exports}")
+    list(TRANSFORM _names PREPEND "_")
+    list(JOIN _names "\n" _list)
+    set(_map "${CMAKE_CURRENT_BINARY_DIR}/filly_octave_mex.exp")
+    file(WRITE "${_map}" "${_list}\n")
+    target_link_options(filly_octave_mex PRIVATE "LINKER:-exported_symbols_list,${_map}"
+      "LINKER:-undefined,dynamic_lookup")
+  else()
+    set(_map "${CMAKE_CURRENT_BINARY_DIR}/filly_octave_mex.map")
+    file(WRITE "${_map}" "{\n  global: ${_exports}\n  local: *;\n};\n")
+    target_link_options(filly_octave_mex PRIVATE "LINKER:--version-script=${_map}")
+  endif()
   set_property(TARGET filly_octave_mex APPEND PROPERTY LINK_DEPENDS "${_map}")
 endif()

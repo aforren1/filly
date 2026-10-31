@@ -8,6 +8,20 @@
 #include <windows.h>
 #include <GL/gl.h>
 #include <backend/platforms/PlatformWGL.h>
+#elif defined(__APPLE__)
+#define GL_SILENCE_DEPRECATION
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOSurface/IOSurface.h>
+#include <OpenGL/CGLIOSurface.h>
+#include <OpenGL/OpenGL.h>
+#include <OpenGL/gl3.h>
+#include <cstring>
+#include <dlfcn.h>
+#include "cgl_platform.h"
+// Apple's headers use no calling convention macro.
+#ifndef APIENTRY
+#define APIENTRY
+#endif
 #else
 #include <GL/gl.h>
 #include <GL/glx.h>
@@ -34,6 +48,8 @@ namespace filly {
 uintptr_t current_gl_context() {
 #if defined(_WIN32)
     return reinterpret_cast<uintptr_t>(wglGetCurrentContext());
+#elif defined(__APPLE__)
+    return reinterpret_cast<uintptr_t>(CGLGetCurrentContext());
 #else
     return reinterpret_cast<uintptr_t>(glXGetCurrentContext());
 #endif
@@ -62,11 +78,20 @@ template <class T> T procedure(const char* name) {
     const auto address = reinterpret_cast<intptr_t>(ptr);
     if (address == 0 || address == 1 || address == 2 || address == 3 || address == -1)
         throw InteropError(std::string("Host OpenGL context lacks ") + name);
+#elif defined(__APPLE__)
+    // CGL has no GetProcAddress: the framework exports every entry point of its OpenGL version.
+    static void* const library = dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", RTLD_LAZY | RTLD_LOCAL);
+    auto ptr = library ? dlsym(library, name) : nullptr;
+    if (!ptr) throw InteropError(std::string("Host OpenGL context lacks ") + name);
 #else
     auto ptr = glXGetProcAddressARB(reinterpret_cast<const GLubyte*>(name));
     if (!ptr) throw InteropError(std::string("Host OpenGL context lacks ") + name);
 #endif
     return reinterpret_cast<T>(ptr);
+}
+template <class T> T optional_procedure(const char* name) {
+    try { return procedure<T>(name); }
+    catch (const InteropError&) { return nullptr; }
 }
 void discard_errors() {
     for (int i = 0; i < 64 && glGetError() != GL_NO_ERROR; ++i) {}
@@ -92,6 +117,12 @@ uint32_t create_host_texture(int64_t width, int64_t height) {
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
     storage(GL_TEXTURE_2D, 1, RGBA8, GLint(width), GLint(height));
+#if defined(__APPLE__)
+    // macOS has no ARB_texture_storage in legacy profile contexts, such as PsychoPy's. Their
+    // textures reach Filament through a copy target, which needs no immutable storage.
+    if (glGetError() != GL_NO_ERROR)
+        glTexImage2D(GL_TEXTURE_2D, 0, RGBA8, GLsizei(width), GLsizei(height), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+#endif
     // Without mipmaps, the default minification filter would leave the texture incomplete.
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -310,9 +341,13 @@ struct SyncQueue {
     WaitFn wait = nullptr;
     ClientWaitFn client_wait = nullptr;
     DeleteFn delete_sync = nullptr;
+    // Null without OpenGL 4.3 or ARB_texture_view, as on macOS (OpenGL 4.1).
     ViewFn texture_view = nullptr;
     std::mutex mutex;
     std::deque<Request> requests;
+    // Filament creates and destroys a sync for every queued request, on its driver thread only,
+    // so freed ones are reused instead of allocating one per request.
+    std::vector<NativeSync*> spare;
 
     explicit SyncQueue(uintptr_t context) : context(context) {
         if (!context) return;
@@ -320,7 +355,10 @@ struct SyncQueue {
         wait = procedure<WaitFn>("glWaitSync");
         client_wait = procedure<ClientWaitFn>("glClientWaitSync");
         delete_sync = procedure<DeleteFn>("glDeleteSync");
-        texture_view = procedure<ViewFn>("glTextureView");
+        texture_view = optional_procedure<ViewFn>("glTextureView");
+    }
+    ~SyncQueue() {
+        for (auto* sync : spare) delete sync;
     }
     void queue(Request request) {
         std::lock_guard lock(mutex);
@@ -345,7 +383,13 @@ struct SyncQueue {
             wait(request.incoming, 0, UINT64_MAX);
             delete_sync(request.incoming);
         }
-        auto* result = new NativeSync();
+        NativeSync* result = nullptr;
+        if (spare.empty()) {
+            result = new NativeSync();
+        } else {
+            result = spare.back();
+            spare.pop_back();
+        }
         if (request.outgoing) {
             result->handle = fence(SYNC_GPU_COMMANDS_COMPLETE, 0);
             // A different context cannot wait on commands still buffered by the producer.
@@ -362,7 +406,8 @@ struct SyncQueue {
     void destroy_sync(filament::backend::Platform::Sync* value) noexcept {
         auto* sync = static_cast<NativeSync*>(value);
         if (sync->handle) delete_sync(sync->handle);
-        delete sync;
+        sync->handle = nullptr;
+        spare.push_back(sync);
     }
 };
 
@@ -520,10 +565,19 @@ PlatformPtr select_offscreen(SyncQueue& sync, const char*& name) {
 GlInterop::GlInterop(uintptr_t context) {
     if (context && current_gl_context() != context)
         throw InteropError("shared_context must be the current host OpenGL context");
+#if defined(__APPLE__)
+    if (context) {
+        if (auto problem = cgl_share_problem(reinterpret_cast<void*>(context)); !problem.empty())
+            throw InteropError(problem);
+    }
+#endif
     impl_ = std::make_unique<Impl>(context);
 #if defined(_WIN32)
     impl_->platform = std::make_unique<SyncPlatform<filament::backend::PlatformWGL>>(impl_->sync);
     impl_->name = "wgl";
+#elif defined(__APPLE__)
+    impl_->platform = std::make_unique<SyncPlatform<CglPlatform>>(impl_->sync);
+    impl_->name = "cgl";
 #else
     if (context) {
         impl_->display = glXGetCurrentDisplay();
@@ -556,12 +610,19 @@ void GlInterop::on_host_display_close(std::function<void()> callback) {
 filament::backend::Platform* GlInterop::platform() { return impl_->platform.get(); }
 const char* GlInterop::platform_name() const { return impl_->name; }
 bool GlInterop::shared() const { return impl_->sync.context != 0; }
+bool GlInterop::texture_views() const { return impl_->sync.texture_view != nullptr; }
 filament::Engine* GlInterop::create_engine() {
     const auto config = engine_config();
     if (!shared())
         return filament::Engine::Builder().backend(filament::Engine::Backend::OPENGL)
             .platform(platform()).config(&config).build();
     require_host();
+#if defined(__APPLE__)
+    // Unlike WGL, CGL shares with a context that is current on another thread, so the host
+    // context stays current while the driver thread creates Filament's.
+    return filament::Engine::Builder().backend(filament::Engine::Backend::OPENGL).platform(platform())
+        .sharedContext(reinterpret_cast<void*>(impl_->sync.context)).config(&config).build();
+#else
 #if defined(_WIN32)
     auto dc = wglGetCurrentDC();
     auto context = reinterpret_cast<HGLRC>(impl_->sync.context);
@@ -596,6 +657,7 @@ filament::Engine* GlInterop::create_engine() {
         throw InteropError("Could not restore the host context after engine creation");
     }
     return engine;
+#endif
 }
 void GlInterop::require_host() const {
     if (current_gl_context() != impl_->sync.context)
@@ -624,10 +686,13 @@ uint32_t GlInterop::import_texture(uint32_t texture, uint32_t width, uint32_t he
     if (error != GL_NO_ERROR || actual_width != GLint(width) || actual_height != GLint(height)
             || format != RGBA8)
         throw InteropError("Import requires a GL_TEXTURE_2D with matching dimensions and GL_RGBA8 storage");
+    if (view == SrgbView::REQUIRED && !impl_->sync.texture_view)
+        throw InteropError("An sRGB view of the host texture needs glTextureView (OpenGL 4.3 or "
+                           "ARB_texture_view), which the host OpenGL driver lacks; macOS has OpenGL 4.1");
     if (view == SrgbView::REQUIRED && !immutable)
         throw InteropError("An sRGB view of the host texture needs immutable storage from "
                            "glTexStorage2D; this texture was allocated with glTexImage2D");
-    if (view == SrgbView::NONE || !immutable) return texture;
+    if (view == SrgbView::NONE || !immutable || !impl_->sync.texture_view) return texture;
     // Filament renders into or samples an sRGB view of the same storage, so the GPU converts
     // while the host still sees plain RGBA8 values.
     GLuint name = 0;
@@ -865,5 +930,272 @@ void GlInterop::finish_host() {
     if (status != ALREADY_SIGNALED && status != CONDITION_SATISFIED)
         throw InteropError("Host GPU work did not complete during close");
 }
+
+#if defined(__APPLE__)
+// Filament's side of a copy target's IOSurface. The driver thread owns everything but the
+// surface reference, which keeps the surface alive until the rectangle texture is deleted.
+struct SurfaceLink {
+    IOSurfaceRef surface = nullptr;
+    // Read framebuffer for the color texture, draw framebuffer for the rectangle texture.
+    GLuint rectangle = 0, framebuffers[2] = {};
+    GLuint attached = 0;
+    GLsync fence = nullptr;
+    uint32_t width = 0, height = 0;
+    // take()'s wait for the copy. Each wait has a number, so that the late answer of a wait
+    // that timed out cannot end a later one.
+    std::mutex mutex;
+    std::condition_variable answer;
+    uint64_t requested = 0, answered = 0;
+    bool ok = false;
+};
+
+namespace {
+constexpr uint64_t TEN_SECONDS = 10000000000ULL;
+
+// Runs the task on the driver thread and waits for its answer. False if the driver thread did
+// not run it within 10 s.
+bool run_and_wait(GlInterop& interop, filament::Engine& engine, std::function<bool()> task) {
+    struct Result { std::mutex mutex; std::condition_variable ready; bool done = false, ok = false; };
+    auto result = std::make_shared<Result>();
+    interop.run(engine, [task = std::move(task), result] {
+        bool ok = false;
+        try { ok = task(); } catch (...) {}
+        std::lock_guard lock(result->mutex);
+        result->ok = ok;
+        result->done = true;
+        result->ready.notify_one();
+    });
+    engine.flush();
+    std::unique_lock lock(result->mutex);
+    return result->ready.wait_for(lock, std::chrono::seconds(10), [&] { return result->done; }) && result->ok;
+}
+
+void set_number(CFMutableDictionaryRef properties, CFStringRef key, int value) {
+    CFNumberRef number = CFNumberCreate(nullptr, kCFNumberIntType, &value);
+    CFDictionarySetValue(properties, key, number);
+    CFRelease(number);
+}
+
+// BGRA with the reversed packed type is the layout that CGL binds an IOSurface with in both
+// the legacy and the core profile. Both contexts address texels as RGBA, so the channel order
+// in memory does not reach either side.
+bool bind_surface(CGLContextObj context, GLuint texture, IOSurfaceRef surface, uint32_t width, uint32_t height) {
+    GLint previous = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_RECTANGLE, &previous);
+    glBindTexture(GL_TEXTURE_RECTANGLE, texture);
+    const bool ok = CGLTexImageIOSurface2D(context, GL_TEXTURE_RECTANGLE, GL_RGBA, GLsizei(width), GLsizei(height),
+                                           GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, surface, 0) == kCGLNoError;
+    glBindTexture(GL_TEXTURE_RECTANGLE, GLuint(previous));
+    return ok;
+}
+
+// Copies the read framebuffer's color into the draw framebuffer's, pixel for pixel. The blit
+// applies the scissor test and, from an sRGB source, can decode with GL_FRAMEBUFFER_SRGB, so
+// both are off for it; the stored bytes are the frame's output. The bindings and both states
+// are restored, because Filament and PsychoPy cache them.
+void blit(GLuint read, GLuint draw, uint32_t width, uint32_t height) {
+    GLint previous_read = 0, previous_draw = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw);
+    const bool scissor = glIsEnabled(GL_SCISSOR_TEST), srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
+    if (scissor) glDisable(GL_SCISSOR_TEST);
+    if (srgb) glDisable(GL_FRAMEBUFFER_SRGB);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, read);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw);
+    glBlitFramebuffer(0, 0, GLint(width), GLint(height), 0, 0, GLint(width), GLint(height), GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous_read));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(previous_draw));
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+    if (srgb) glEnable(GL_FRAMEBUFFER_SRGB);
+}
+
+bool attach(GLuint framebuffer, GLenum target, GLuint texture) {
+    GLint previous = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target, texture, 0);
+    const bool complete = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous));
+    return complete;
+}
+
+void delete_link(SurfaceLink& link) {
+    if (link.fence) glDeleteSync(link.fence);
+    if (link.framebuffers[0]) glDeleteFramebuffers(2, link.framebuffers);
+    if (link.rectangle) glDeleteTextures(1, &link.rectangle);
+    if (link.surface) CFRelease(link.surface);
+    link.fence = nullptr;
+    link.framebuffers[0] = link.framebuffers[1] = link.rectangle = link.attached = 0;
+    link.surface = nullptr;
+}
+}
+
+std::unique_ptr<HostCopy> GlInterop::create_host_copy(filament::Engine& engine, uint32_t texture, uint32_t width,
+                                                      uint32_t height, HostCopy::Transfer transfer) {
+    auto* context = CGLGetCurrentContext();
+    if (!context) throw InteropError("Make the host OpenGL context current first");
+    discard_errors();
+    GLint previous = 0, actual_width = 0, actual_height = 0, format = 0;
+    glGetIntegerv(TEXTURE_BINDING_2D, &previous);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    const bool bound = texture && glGetError() == GL_NO_ERROR;
+    if (bound) {
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &actual_width);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &actual_height);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &format);
+    }
+    glBindTexture(GL_TEXTURE_2D, GLuint(previous));
+    if (!bound || actual_width != GLint(width) || actual_height != GLint(height) || format != RGBA8)
+        throw InteropError("A copy target requires a GL_TEXTURE_2D with matching dimensions and GL_RGBA8 storage");
+    auto copy = std::make_unique<HostCopy>();
+    copy->transfer = transfer;
+    copy->context = reinterpret_cast<uintptr_t>(context);
+    copy->texture = texture;
+    copy->width = width;
+    copy->height = height;
+    if (transfer == HostCopy::Transfer::READBACK) {
+        copy->buffer = std::make_shared<PackBuffer>();
+        copy->rows.reset(new uint8_t[size_t(width) * height * 4]);
+        return copy;
+    }
+    CFMutableDictionaryRef properties = CFDictionaryCreateMutable(nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
+                                                                  &kCFTypeDictionaryValueCallBacks);
+    set_number(properties, kIOSurfaceWidth, int(width));
+    set_number(properties, kIOSurfaceHeight, int(height));
+    set_number(properties, kIOSurfaceBytesPerElement, 4);
+    set_number(properties, kIOSurfacePixelFormat, 0x42475241);  // 'BGRA'
+    auto* surface = IOSurfaceCreate(properties);
+    CFRelease(properties);
+    if (!surface) throw InteropError("Could not create an IOSurface of " + std::to_string(width) + "x" + std::to_string(height));
+    copy->surface = surface;
+    auto fail = [&](const std::string& reason) {
+        delete_host_copy(engine, *copy, true);
+        throw InteropError(reason);
+    };
+    glGenTextures(1, &copy->rectangle);
+    if (!bind_surface(context, copy->rectangle, surface, width, height))
+        fail("The host OpenGL context could not bind an IOSurface");
+    glGenFramebuffers(2, copy->framebuffers);
+    if (!attach(copy->framebuffers[0], GL_TEXTURE_RECTANGLE, copy->rectangle)
+            || !attach(copy->framebuffers[1], GL_TEXTURE_2D, texture) || glGetError() != GL_NO_ERROR)
+        fail("The host OpenGL context cannot copy from an IOSurface into the texture: framebuffer incomplete");
+    copy->link = std::make_shared<SurfaceLink>();
+    copy->link->width = width;
+    copy->link->height = height;
+    const bool linked = run_and_wait(*this, engine, [link = copy->link, surface, width, height] {
+        link->surface = (IOSurfaceRef)CFRetain(surface);
+        glGenTextures(1, &link->rectangle);
+        glGenFramebuffers(2, link->framebuffers);
+        return bind_surface(CGLGetCurrentContext(), link->rectangle, link->surface, width, height)
+            && attach(link->framebuffers[1], GL_TEXTURE_RECTANGLE, link->rectangle);
+    });
+    if (!linked) fail("Filament's OpenGL context could not bind the IOSurface");
+    return copy;
+}
+void GlInterop::before_copy(HostCopy& copy) {
+    if (!copy.copied) return;
+    auto* fence = static_cast<GLsync>(std::exchange(copy.copied, nullptr));
+    const auto status = glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, TEN_SECONDS);
+    glDeleteSync(fence);
+    if (status != GL_ALREADY_SIGNALED && status != GL_CONDITION_SATISFIED)
+        throw InteropError("The host GPU did not finish its copy of the last frame within 10 s");
+}
+void GlInterop::publish(filament::Engine& engine, HostCopy& copy, uint32_t texture) {
+    if (copy.transfer == HostCopy::Transfer::READBACK) {
+        pack(engine, texture, copy.width, copy.height, copy.buffer, ++copy.buffer->copies);
+    } else {
+        // A raw pointer keeps the task within std::function's inline storage, so a frame
+        // allocates nothing here. delete_host_copy() queues the task that owns the link after
+        // every task that uses it.
+        run(engine, [link = copy.link.get(), texture] {
+            if (link->attached != texture) {
+                if (!attach(link->framebuffers[0], GL_TEXTURE_2D, texture)) return;
+                link->attached = texture;
+            }
+            blit(link->framebuffers[0], link->framebuffers[1], link->width, link->height);
+            if (link->fence) glDeleteSync(link->fence);
+            link->fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            // The host waits for this fence through the driver thread, which flushes as it
+            // waits; this flush lets the copy start before that.
+            glFlush();
+        });
+    }
+    engine.flush();
+}
+void GlInterop::take(filament::Engine& engine, HostCopy& copy) {
+    if (copy.transfer == HostCopy::Transfer::READBACK) {
+        const size_t size = size_t(copy.width) * copy.height * 4;
+        // glReadPixels stored the bottom row first, which is the order glTexSubImage2D takes.
+        const bool ok = unpack(engine, copy.buffer, copy.width, copy.height, [&](const uint8_t* top, ptrdiff_t stride) {
+            std::memcpy(copy.rows.get(), top + stride * ptrdiff_t(copy.height - 1), size);
+        });
+        if (!ok) throw InteropError("The readback of the frame did not complete");
+        GLint texture = 0, alignment = 0, row_length = 0, unpack_buffer = 0;
+        glGetIntegerv(TEXTURE_BINDING_2D, &texture);
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpack_buffer);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glBindTexture(GL_TEXTURE_2D, copy.texture);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, GLsizei(copy.width), GLsizei(copy.height), GL_RGBA, GL_UNSIGNED_BYTE,
+                        copy.rows.get());
+        glBindTexture(GL_TEXTURE_2D, GLuint(texture));
+        glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, row_length);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, GLuint(unpack_buffer));
+        return;
+    }
+    // The contexts share no fence, so the CPU waits until the driver thread has issued Filament's
+    // copy into the surface and the GPU has finished it. Without the first part, the host read
+    // stale frames. Without only the second, Apple's driver still ordered the host's read after
+    // the copy in every test, but Apple documents no such guarantee for OpenGL. It costs 0.3 ms
+    // at 512 x 512 and 0.8 ms at 1920 x 1080 (see docs/how-to/psychopy.md).
+    // The wait state lives in the link rather than in a run_and_wait() result, so a frame
+    // allocates nothing here; see publish() for the lifetime.
+    auto* link = copy.link.get();
+    const uint64_t number = ++link->requested;
+    run(engine, [link, number] {
+        bool ok = false;
+        if (link->fence) {
+            const auto status = glClientWaitSync(link->fence, GL_SYNC_FLUSH_COMMANDS_BIT, TEN_SECONDS);
+            ok = status == GL_ALREADY_SIGNALED || status == GL_CONDITION_SATISFIED;
+        }
+        std::lock_guard lock(link->mutex);
+        link->answered = number;
+        link->ok = ok;
+        link->answer.notify_one();
+    });
+    engine.flush();
+    bool done = false;
+    {
+        std::unique_lock lock(link->mutex);
+        done = link->answer.wait_for(lock, std::chrono::seconds(10), [&] { return link->answered >= number; })
+            && link->ok;
+    }
+    if (!done) throw InteropError("Filament's copy of the frame into the IOSurface did not complete");
+    blit(copy.framebuffers[0], copy.framebuffers[1], copy.width, copy.height);
+    if (copy.copied) glDeleteSync(static_cast<GLsync>(copy.copied));
+    copy.copied = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glFlush();
+}
+void GlInterop::delete_host_copy(filament::Engine& engine, HostCopy& copy, bool host_current) {
+    if (host_current && CGLGetCurrentContext() == reinterpret_cast<CGLContextObj>(copy.context)) {
+        if (copy.copied) glDeleteSync(static_cast<GLsync>(copy.copied));
+        if (copy.framebuffers[0]) glDeleteFramebuffers(2, copy.framebuffers);
+        if (copy.rectangle) glDeleteTextures(1, &copy.rectangle);
+    }
+    copy.copied = nullptr;
+    copy.framebuffers[0] = copy.framebuffers[1] = copy.rectangle = 0;
+    if (copy.link) run(engine, [link = std::move(copy.link)] { delete_link(*link); });
+    if (copy.buffer) delete_objects(engine, 0, {std::move(copy.buffer)});
+    copy.link.reset();
+    copy.buffer.reset();
+    copy.rows.reset();
+    if (copy.surface) CFRelease(copy.surface);
+    copy.surface = nullptr;
+}
+#endif
 }
 }

@@ -19,7 +19,7 @@ pytest.importorskip("pyglet")
 from filly.integrations.pyglet import HostTarget, create_renderer  # noqa: E402
 
 pytestmark = [pytest.mark.gpu, pytest.mark.interop,
-              pytest.mark.skipif(sys.platform not in ("win32", "linux"), reason="WGL/GLX implementation")]
+              pytest.mark.skipif(sys.platform not in ("win32", "linux", "darwin"), reason="WGL/GLX/CGL implementation")]
 
 SIZE = 64
 CELL = 32

@@ -10,7 +10,9 @@ import pytest
 import filly
 
 pytestmark = [pytest.mark.gpu, pytest.mark.interop,
-              pytest.mark.skipif(sys.platform not in ("win32", "linux"), reason="WGL/GLX implementation")]
+              pytest.mark.skipif(sys.platform not in ("win32", "linux", "darwin"), reason="WGL/GLX/CGL implementation")]
+# sRGB views of host textures need glTextureView (OpenGL 4.3); macOS has OpenGL 4.1.
+TEXTURE_VIEWS = sys.platform != "darwin"
 
 
 @pytest.fixture
@@ -138,6 +140,11 @@ def test_shared_texture_matches_transfer_function(host, triangle_glb, encoding, 
         scene.output_path = path
         material = scene.load(triangle_glb).material("red")
         target = renderer.import_gl_target(texture.value, width=64, height=64)
+        if path == "direct" and encoding == "srgb" and not TEXTURE_VIEWS:
+            with pytest.raises(filly.InteropError, match="output_path 'direct'.*glTextureView"):
+                renderer.render(scene, target)
+            target.close()
+            return
         actual = []
         for value in SWEEP:
             material.base_color = (value, value, value, 1)
@@ -155,6 +162,26 @@ def test_shared_texture_matches_transfer_function(host, triangle_glb, encoding, 
         below, above = half_neighbors(SWEEP)
         candidates = np.stack([np.round(255 * f(below)), np.round(255 * f(above))], axis=1)
         assert (actual[:, :, None] == candidates[:, None, :]).any(axis=2).all()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="CGL profiles")
+def test_legacy_profile_host_is_rejected():
+    """macOS shares objects only between contexts of one profile, and Filament needs a core one."""
+    cgl = ctypes.CDLL("/System/Library/Frameworks/OpenGL.framework/OpenGL")
+    # kCGLPFAOpenGLProfile, kCGLOGLPVersion_Legacy
+    attributes = (ctypes.c_int * 3)(99, 0x1000, 0)
+    format_, count, context = ctypes.c_void_p(), ctypes.c_int(), ctypes.c_void_p()
+    assert cgl.CGLChoosePixelFormat(attributes, ctypes.byref(format_), ctypes.byref(count)) == 0
+    try:
+        assert cgl.CGLCreateContext(format_, None, ctypes.byref(context)) == 0
+        assert cgl.CGLSetCurrentContext(context) == 0
+        with pytest.raises(filly.InteropError, match="legacy profile"):
+            filly.Renderer(shared_context=filly.current_gl_context())
+    finally:
+        cgl.CGLSetCurrentContext(None)
+        if context:
+            cgl.CGLReleaseContext(context)
+        cgl.CGLReleasePixelFormat(format_)
 
 
 @pytest.fixture
@@ -205,7 +232,8 @@ def test_direct_srgb_output_rejects_a_mutable_texture(mutable, triangle_glb):
         scene = grey_scene(renderer, triangle_glb)
         scene.output_path = "direct"
         target = renderer.import_gl_target(texture.value, width=64, height=64)
-        with pytest.raises(filly.InteropError, match="output_path 'direct'.*glTexStorage2D"):
+        missing = "glTexStorage2D" if TEXTURE_VIEWS else "glTextureView"
+        with pytest.raises(filly.InteropError, match=f"output_path 'direct'.*{missing}"):
             renderer.render(scene, target)
         # The failed call changed nothing: the target still renders on the default path.
         scene.output_path = "exact"
@@ -268,15 +296,19 @@ def test_queued_host_sampling_before_texture_reuse(host, triangle_glb, source):
             scene.camera = camera
             material = scene.load(triangle_glb).material("red") if source == "material" else None
             target = renderer.import_gl_target(texture.value, width=64, height=64)
-            gl.glUseProgram(0)
-            gl.glDisable(gl.GL_DEPTH_TEST)
-            gl.glDisable(gl.GL_BLEND)
-            gl.glMatrixMode(gl.GL_PROJECTION)
-            gl.glLoadIdentity()
-            gl.glMatrixMode(gl.GL_MODELVIEW)
-            gl.glLoadIdentity()
-            gl.glEnable(gl.GL_TEXTURE_2D)
-            gl.glTexEnvi(gl.GL_TEXTURE_ENV, gl.GL_TEXTURE_ENV_MODE, gl.GL_REPLACE)
+            # Immediate mode, as pyglet 1.4 and Psychtoolbox draw: Mesa fences missed such draws
+            # (GlInterop::host_fence). macOS shares only core-profile contexts, which lack it.
+            quad = filly._native._create_host_quad() if sys.platform == "darwin" else None
+            if quad is None:
+                gl.glUseProgram(0)
+                gl.glDisable(gl.GL_DEPTH_TEST)
+                gl.glDisable(gl.GL_BLEND)
+                gl.glMatrixMode(gl.GL_PROJECTION)
+                gl.glLoadIdentity()
+                gl.glMatrixMode(gl.GL_MODELVIEW)
+                gl.glLoadIdentity()
+                gl.glEnable(gl.GL_TEXTURE_2D)
+                gl.glTexEnvi(gl.GL_TEXTURE_ENV, gl.GL_TEXTURE_ENV_MODE, gl.GL_REPLACE)
             # 0.5 grey checks the encoding as the host samples it: sRGB 188, not linear 128.
             colors = [(1, 0, 0, 1), (0, 1, 0, 1), (0, 0, 1, 1), (0.5, 0.5, 0.5, 1)]
             expected = [(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255), (188, 188, 188, 255)]
@@ -287,6 +319,10 @@ def test_queued_host_sampling_before_texture_reuse(host, triangle_glb, source):
                     scene.background = colors[frame % 4]
                 renderer.render(scene, target)
                 with target.acquire():
+                    if quad is not None:
+                        filly._native._draw_host_quad(quad, texture.value, (frame % 16) * 32, (frame // 16) * 32,
+                                                      32, 32, False)
+                        continue
                     gl.glViewport((frame % 16) * 32, (frame // 16) * 32, 32, 32)
                     gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
                     gl.glBegin(gl.GL_QUADS)
@@ -302,6 +338,8 @@ def test_queued_host_sampling_before_texture_reuse(host, triangle_glb, source):
                 np.testing.assert_allclose(pixels[(frame // 16) * 32 + 16, (frame % 16) * 32 + 16],
                                            expected[frame % 4], atol=1, err_msg=f"{source} frame {frame}")
             target.close()
+            if quad is not None:
+                filly._native._delete_host_quad(quad)
     finally:
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
         gl.glDeleteFramebuffers(1, ctypes.byref(framebuffer))

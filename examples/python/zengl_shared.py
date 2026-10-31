@@ -11,7 +11,7 @@ def main():
     args = parse_args(__doc__)
     filly.set_log_level("warning")
     window = open_window(args, "filly + zengl")
-    # zengl loads GL functions from the current WGL/GLX context, which open_window() made
+    # zengl loads GL functions from the current WGL, GLX, or CGL context, which open_window() made
     # current, and keeps one context per process.
     ctx = zengl.context()
     renderer = create_renderer()

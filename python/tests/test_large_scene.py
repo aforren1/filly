@@ -51,8 +51,8 @@ def many_meshes(triangle_glb, count=10000):
 @pytest.mark.parametrize("shared", [False, pytest.param(True, marks=pytest.mark.interop)])
 def test_large_asset_load_render_and_close_in_child(tmp_path, triangle_glb, shared):
     if shared:
-        if sys.platform not in ("win32", "linux"):
-            pytest.skip("WGL/GLX implementation")
+        if sys.platform not in ("win32", "linux", "darwin"):
+            pytest.skip("WGL/GLX/CGL implementation")
         pytest.importorskip("pyglet")
     asset = tmp_path / "many-meshes.glb"
     asset.write_bytes(many_meshes(triangle_glb))

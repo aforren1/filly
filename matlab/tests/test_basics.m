@@ -2,7 +2,7 @@
 filly.setLogLevel('warning');
 r = filly.Renderer();
 assert(~r.closed);
-assert(ismember(r.glPlatform, {'wgl', 'glx', 'egl'}));
+assert(ismember(r.glPlatform, {'wgl', 'glx', 'egl', 'cgl'}));
 assert(r.sharedContext == 0);
 
 scene = r.createScene();
