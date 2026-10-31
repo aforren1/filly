@@ -70,11 +70,14 @@ def test_windows_renderer_uses_wgl():
         assert renderer.gl_platform == "wgl"
 
 
+@pytest.mark.gpu
 def test_macos_renderer_uses_cgl():
     if sys.platform != "darwin":
         pytest.skip("CGL is the macOS binding")
-    with filly.Renderer() as renderer:
-        assert renderer.gl_platform == "cgl"
+    result = _run()
+    assert result.get("platform") == "cgl", result
+    assert result["center"] == [255, 0, 0, 255]
+    assert result["corner"] == [0, 0, 0, 255]
 
 
 linux = pytest.mark.skipif(sys.platform != "linux", reason="EGL and GLX selection is Linux only")

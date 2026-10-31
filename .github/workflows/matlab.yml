@@ -17,6 +17,10 @@ name: MATLAB and Octave
 #   Screen('OpenWindow') with llvmpipe under Xvfb. Windows runners have no usable OpenGL device,
 #   so Windows runs only the tests that need no renderer. Parity and the Psychtoolbox tests in
 #   MATLAB run on a machine with a GPU (docs/how-to/matlab.md).
+# - macOS runners are VMs whose OpenGL is Apple's software renderer, too slow for the offscreen
+#   tests (the Python suite took an hour there). The macOS jobs build with MATLAB R2023b, the
+#   first release for Apple silicon, and Homebrew's Octave, and run the gateway tests in both.
+#   They do not publish packages yet.
 #
 # The Python wheels have their own workflow; the paths below keep this one off changes that
 # cannot affect the MEX files. Path filters do not apply to tag pushes.
@@ -320,6 +324,101 @@ jobs:
         run: |
           timeout 1500 dbus-run-session -- xvfb-run -a -s "-screen 0 1024x768x24" \
             octave-cli --no-gui --no-init-file --quiet --eval "exit(run_ptb_tests() > 0)"
+
+  # ================================================================ macOS =====
+  # Not in the release until these jobs have passed on hosted runners. The Octave file links no
+  # Octave library (matlab/CMakeLists.txt), so it loads in any Octave 10 or later; CI tests only
+  # Homebrew's current Octave.
+  macos-build:
+    name: build · macos · MATLAB R2023b, Octave (Homebrew)
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      # Native Apple silicon MATLAB starts at R2023b, so macOS has its own floor.
+      MATLAB_MAC_FLOOR: R2023b
+      # The release archive's libraries are built for macOS 11.0, as for the wheels.
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # The tags, for the version.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      # The same key as the wheel workflow, so that the two share one SDK download.
+      - name: Cache macOS SDK
+        uses: actions/cache@v6
+        with:
+          path: .deps
+          key: filament-macos-arm64-${{ hashFiles('tools/fetch_filament.py') }}
+      - name: Fetch the Filament SDK
+        run: python tools/fetch_filament.py
+      - name: Install Ninja and Octave
+        run: |
+          python -m pip install 'ninja>=1.11'
+          brew install octave
+          octave-cli --version | head -n 1
+      - id: matlab
+        uses: matlab-actions/setup-matlab@v3
+        with:
+          release: ${{ env.MATLAB_MAC_FLOOR }}
+          cache: true
+      - name: Build the packages
+        run: |
+          cmake -S . -B build/mex-mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DFILLY_PYTHON=OFF \
+            -DFILLY_MEX_OUTPUT_DIR="$PWD/build/mex-mac/mex" \
+            -DFILLY_MATLAB=ON -DMatlab_ROOT_DIR="${{ steps.matlab.outputs.matlabroot }}" -DFILLY_OCTAVE=ON
+          cmake --build build/mex-mac --target filly_mex filly_octave_mex
+          cmake --install build/mex-mac --component matlab --prefix dist/filly-matlab-macos
+          cmake --install build/mex-mac --component octave --prefix dist/filly-octave-macos
+      - name: Check MEX libraries and exports
+        run: |
+          python tools/check_native_imports.py dist/filly-matlab-macos/filly_mex.mexmaca64
+          python tools/check_native_imports.py dist/filly-octave-macos/filly_mex.mex
+          otool -L dist/filly-matlab-macos/filly_mex.mexmaca64 dist/filly-octave-macos/filly_mex.mex
+      - uses: actions/upload-artifact@v7
+        with:
+          name: filly-matlab-macos
+          path: dist/filly-matlab-macos
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: filly-octave-macos
+          path: dist/filly-octave-macos
+          if-no-files-found: error
+      # Over the checkout's matlab folder, as the downloaded packages in the Linux test jobs, so
+      # that the tests run the package's files. The two MEX files have different extensions.
+      # Backdated as in octave-test; BSD touch takes an adjustment, not a date.
+      - name: Put the packages over the matlab folder
+        run: |
+          cp -R dist/filly-matlab-macos/. dist/filly-octave-macos/. matlab/
+          find matlab -exec touch -A -010000 {} +
+      - name: Run the MATLAB gateway tests
+        uses: matlab-actions/run-command@v3
+        with:
+          command: cd matlab/tests; assert(run_tests('test_gateway*') == 0, 'filly:test', 'gateway tests failed')
+      - name: Run the Octave gateway tests
+        working-directory: matlab/tests
+        run: octave-cli --no-gui --no-init-file --quiet --eval "exit(run_tests('test_gateway*') > 0)"
+
+  macos-forward:
+    name: test · macos · MATLAB latest
+    needs: macos-build
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: filly-matlab-macos
+          path: matlab
+      - uses: matlab-actions/setup-matlab@v3
+        with:
+          release: latest
+      - name: Run the MATLAB gateway tests
+        uses: matlab-actions/run-command@v3
+        with:
+          command: cd matlab/tests; assert(run_tests('test_gateway*') == 0, 'filly:test', 'gateway tests failed')
 
   # ============================================================== Release =====
   # On a v<version> tag, publish the packages that every test above ran on. The gateway tests

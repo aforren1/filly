@@ -159,7 +159,12 @@ if(FILLY_OCTAVE)
   endif()
   add_library(filly_octave_mex MODULE filly_mex.cpp)
   if(_octmex)
-    target_link_libraries(filly_octave_mex PRIVATE "${_octmex}")
+    # On macOS, a linked liboctmex is recorded by its full path, which contains the Octave
+    # version, so the file would load only in the Octave that it was built with. octave-cli and
+    # octave-gui link liboctmex themselves, so the bundle can resolve the MEX API at load time.
+    if(NOT APPLE)
+      target_link_libraries(filly_octave_mex PRIVATE "${_octmex}")
+    endif()
     target_compile_definitions(filly_octave_mex PRIVATE FILLY_OCTAVE_MEX_SOVERSION=${_soversion})
   endif()
   set_target_properties(filly_octave_mex PROPERTIES PREFIX "" OUTPUT_NAME filly_mex SUFFIX ".mex")
@@ -173,8 +178,8 @@ if(FILLY_OCTAVE)
   # gateway is not compiled with -fvisibility=hidden: Octave's mex.h gives mexFunction no
   # visibility attribute, and a hidden symbol cannot be exported.
   if(APPLE)
-    # Apple's linker takes a list of C names, with the underscore prefix. As mkoctfile --mex
-    # does, the bundle leaves the MEX API to the running Octave, which loaded liboctmex already.
+    # Apple's linker takes a list of C names, with the underscore prefix. The bundle leaves the
+    # MEX API to the running Octave, which loaded liboctmex already.
     string(REGEX MATCHALL "[A-Za-z_]+" _names "${_exports}")
     list(TRANSFORM _names PREPEND "_")
     list(JOIN _names "\n" _list)

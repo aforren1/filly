@@ -402,8 +402,9 @@ Linux builds Filament inside the manylinux container, repairs dependencies with 
 and tests rendering and shared textures under Xvfb/Mesa. Cibuildwheel audits limited-ABI wheels
 with abi3audit. After the build, `tools/check_native_imports.py` rejects a wheel whose module
 imports a library outside its allowed list, such as `msvcp140.dll`. Windows CI runs CPU smoke tests because hosted runners lack a reliable OpenGL
-device; run the full suite on a Windows machine with a GPU. macOS CI runs the offscreen tests
-without the shared-context tests, which need a window; run those on a Mac.
+device; run the full suite on a Windows machine with a GPU. macOS CI runs the same smoke tests
+and `test_headless.py`, which renders one triangle: the OpenGL of hosted macOS runners is
+Apple's software renderer, which is too slow for the suite. Run the full suite on a Mac.
 
 Download wheels from the workflow artifacts. The same workflow builds the sdist and publishes
 releases; see [publish a release](#publish-a-release).

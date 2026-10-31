@@ -88,13 +88,12 @@ jobs:
           CIBW_TEST_COMMAND_LINUX: 'timeout 600 xvfb-run -a python -m pytest {project}/python/tests -q -m "not psychopy" -o faulthandler_timeout=60'
           # Hosted Windows runners do not supply a reliable OpenGL rendering device.
           CIBW_TEST_COMMAND_WINDOWS: 'python -m pytest {project}/python/tests/test_stress.py {project}/python/tests/test_native_imports.py -q'
-          # Hosted macOS runners are Apple silicon VMs with a paravirtual Metal GPU, on which
-          # Apple's OpenGL runs, so the offscreen suite needs no window server. The shared-context
-          # tests need a pyglet window from the window server, which hosted runners do not
-          # promise, and pyglet 1.4.11 does not load on arm64; run them on a Mac
-          # (docs/how-to/build.md).
-          CIBW_TEST_REQUIRES_MACOS: 'pytest pillow'
-          CIBW_TEST_COMMAND_MACOS: 'python -m pytest {project}/python/tests -q -m "not psychopy and not interop" -o faulthandler_timeout=60'
+          # Hosted macOS runners are VMs whose OpenGL is Apple's software renderer: the offscreen
+          # suite took 62 minutes for one Python version there, and 17 tests failed on readback
+          # time limits and the software renderer's output. test_headless renders one triangle
+          # with CglPlatform. Run the full suite on a Mac (docs/how-to/build.md).
+          CIBW_TEST_REQUIRES_MACOS: 'pytest'
+          CIBW_TEST_COMMAND_MACOS: 'python -m pytest {project}/python/tests/test_stress.py {project}/python/tests/test_native_imports.py {project}/python/tests/test_headless.py -q'
       - name: Check extension imports
         shell: bash
         run: python tools/check_native_imports.py wheelhouse/*.whl

@@ -129,9 +129,9 @@ To build only one of the files, leave out the other option and target. The build
 system C++ runtime.
 
 - The MATLAB file is a C API MEX file. It links only `libmx` and `libmex`.
-- The Octave file links the `liboctmex` of the Octave that `mkoctfile` belongs to, by that
-  installation's path, as `mkoctfile --mex` does. Build it again after you move or upgrade
-  Octave.
+- The Octave file links no Octave library. It gets the MEX API from the running Octave, whose
+  `octave-cli` and `octave-gui` link `liboctmex`, so the file loads in other installations of
+  Octave 10 and later too. The MEX API headers of Octave 10.1 and 11.3 are the same.
 
 The tests passed with MATLAB R2026b and Octave 11.3. If `matlab -batch` stops at startup, look
 for a macOS prompt that asks for access to the folder: MATLAB waits until you accept it.
@@ -360,6 +360,8 @@ do, so they need glibc 2.28 or later.
 | `filly-matlab-linux` | MATLAB R2021b headers | R2021b (Ubuntu 22.04) and the latest MATLAB (Ubuntu 24.04): the offscreen tests, under Xvfb with Mesa's llvmpipe |
 | `filly-octave-linux-6.4` | Octave 6.4 headers | Octave 6.4 and 9.4: the offscreen tests with llvmpipe. Ubuntu's Octave 8.4: the Psychtoolbox tests with Ubuntu's Psychtoolbox, under Zink |
 | `filly-octave-linux-10` | Octave 10.1 headers and `liboctmex` | Octave 10.1 and 11.3: the offscreen tests with llvmpipe |
+| `filly-matlab-macos` | MATLAB R2023b, the first release for Apple silicon | R2023b and the latest MATLAB: `test_gateway.m` only. The OpenGL of hosted macOS runners is Apple's software renderer, which is too slow for the offscreen tests. Not published. |
+| `filly-octave-macos` | Homebrew's Octave | The same Octave: `test_gateway.m` only. Not published. |
 
 Run the parity test and the Psychtoolbox tests in MATLAB on a machine with a GPU before a
 release.
