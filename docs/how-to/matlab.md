@@ -8,13 +8,13 @@ Supported now:
 
 | Platform | MATLAB | Octave |
 | --- | --- | --- |
-| Windows x64 | R2021b and later | No (see phase 6 of the plan) |
+| Windows x64 | R2021b and later | 7.3, and 10 and later |
 | Linux x86_64, glibc 2.28 or later | R2021b and later | 6.4 and later |
-| macOS arm64, built from source | R2026b tested | 10 and later; 11.3 tested |
+| macOS arm64 | R2023b and later | 10 and later |
 
-On macOS, there are no release packages, and Psychtoolbox windows cannot share textures with
-filly: Psychtoolbox makes a legacy OpenGL 2.1 context, and macOS shares objects only between
-contexts of the same profile. Offscreen rendering works.
+On macOS, Psychtoolbox windows cannot share textures with filly: Psychtoolbox makes a legacy
+OpenGL 2.1 context, and macOS shares objects only between contexts of the same profile.
+Offscreen rendering works.
 
 ## Install a release
 
@@ -26,11 +26,16 @@ Each `v<version>` release on GitHub has one zip file for each package:
 | `filly-matlab-linux` | MATLAB R2021b and later on Linux |
 | `filly-octave-linux-6.4` | Octave 6.4 through 9 on Linux |
 | `filly-octave-linux-10` | Octave 10 and later on Linux |
+| `filly-octave-windows-7.3` | Octave 7 on Windows. Psychtoolbox for Windows supports only Octave 7.3 |
+| `filly-octave-windows-10` | Octave 10 and later on Windows |
+| `filly-matlab-macos` | MATLAB R2023b and later on macOS arm64 |
+| `filly-octave-macos` | Octave 10 and later on macOS arm64 |
 
 Octave 10 changed the MEX ABI, so each side of that change has its own package. A package for
 the wrong Octave does not load: Octave 11 rejects a file without the version symbol that Octave
 10 introduced, and Octave 10 crashes on the first error from a file built for an earlier
-release.
+release. On Windows, a package for the wrong Octave fails at the first call with "opening the
+library ... failed (error 126)". See [Build the MEX files on Windows](#build-the-mex-files-on-windows).
 
 1. Unzip the package into an empty folder.
 2. In MATLAB or Octave, go to that folder and run `SetupFilly`. See
@@ -40,10 +45,11 @@ release.
 
 To build the MEX files yourself, use the next sections.
 
-## Build the MEX file on Windows
+## Build the MEX files on Windows
 
 Requirements: the requirements of the [Python build](build.md) (Visual Studio 2022, CMake 3.28
-or later, the Filament SDK in `.deps`), and MATLAB. Python and nanobind are not necessary.
+or later, the Filament SDK in `.deps`), and MATLAB or Octave. Python and nanobind are not
+necessary.
 
 From the project directory, run:
 
@@ -59,6 +65,30 @@ Python build. To build offline, add `-DFETCHCONTENT_SOURCE_DIR_LIBWEBP=<folder>`
 The MEX file uses the same C runtime as the Python module: the static C++ runtime and the
 dynamic Universal CRT. It does not load MATLAB's `msvcp140.dll`. Its only other imports are
 `libmx.dll`, `libmex.dll`, and Windows system DLLs.
+
+For Octave, run:
+
+```powershell
+cmake -S . -B build/octave -G "Visual Studio 17 2022" -A x64 -DFILLY_PYTHON=OFF -DFILLY_OCTAVE=ON `
+  "-DFILLY_MKOCTFILE=C:/Program Files/GNU Octave/Octave-10.1.0/mingw64/bin/mkoctfile.exe"
+cmake --build build/octave --config Release --target filly_octave_mex
+```
+
+The build writes `matlab/filly_mex.mex`. Octave for Windows is built with MinGW, and filly with
+MSVC. The two cannot share C++ objects, but the MEX API is a C API. At configure time, CMake
+makes an MSVC import library from the export table of the DLL that has the API. The MEX file
+imports only that DLL and Windows system DLLs, not MinGW's C++ runtime.
+
+A Windows MEX file names the DLL that it imports, and the name changes between Octave releases.
+Build with the Octave that you run:
+
+| Octave | MEX API DLL | The file loads in |
+| --- | --- | --- |
+| 7.3 (the Octave that Psychtoolbox for Windows supports) | `liboctinterp-10.dll` | Octave 7 |
+| 10 and later | `liboctmex-1.dll` | Octave 10 and later |
+
+In an Octave that the file was not built for, the first call fails with "opening the library
+... failed (error 126): The specified module could not be found."
 
 The Python wheel build sets no options, so it does not need MATLAB or Octave.
 
@@ -105,7 +135,7 @@ the library path, and they are older than the system copies. The MEX file theref
 statically. Both files can be in the same folder: MATLAB loads `.mexa64` and Octave loads `.mex`.
 
 To check the libraries that a file imports and the symbols that it exports, run
-`python3 tools/check_native_imports.py matlab/filly_mex.mex` (or `.mexa64`).
+`python3 tools/check_native_imports.py matlab/filly_mex.mex` (or `.mexa64`, `.mexw64`).
 
 ## Build the MEX files on macOS
 
@@ -360,8 +390,10 @@ do, so they need glibc 2.28 or later.
 | `filly-matlab-linux` | MATLAB R2021b headers | R2021b (Ubuntu 22.04) and the latest MATLAB (Ubuntu 24.04): the offscreen tests, under Xvfb with Mesa's llvmpipe |
 | `filly-octave-linux-6.4` | Octave 6.4 headers | Octave 6.4 and 9.4: the offscreen tests with llvmpipe. Ubuntu's Octave 8.4: the Psychtoolbox tests with Ubuntu's Psychtoolbox, under Zink |
 | `filly-octave-linux-10` | Octave 10.1 headers and `liboctmex` | Octave 10.1 and 11.3: the offscreen tests with llvmpipe |
-| `filly-matlab-macos` | MATLAB R2023b, the first release for Apple silicon | R2023b and the latest MATLAB: `test_gateway.m` only. The OpenGL of hosted macOS runners is Apple's software renderer, which is too slow for the offscreen tests. Not published. |
-| `filly-octave-macos` | Homebrew's Octave | The same Octave: `test_gateway.m` only. Not published. |
+| `filly-octave-windows-7.3` | MSVC, against the official Octave 7.3 zip | Octave 7.3: `test_gateway.m` only |
+| `filly-octave-windows-10` | MSVC, against the official Octave 10.1 zip | Octave 10.1 and 11.3: `test_gateway.m` only |
+| `filly-matlab-macos` | MATLAB R2023b, the first release for Apple silicon | R2023b and the latest MATLAB: `test_gateway.m` only. The OpenGL of hosted macOS runners is Apple's software renderer, which is too slow for the offscreen tests. |
+| `filly-octave-macos` | Homebrew's Octave | The same Octave: `test_gateway.m` only. |
 
 Run the parity test and the Psychtoolbox tests in MATLAB on a machine with a GPU before a
 release.

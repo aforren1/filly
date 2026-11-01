@@ -104,7 +104,14 @@ assert(asset.memory.models == 1);
 name = native2unicode(uint8([195 188 110 105 99 111 100 101 45 230 181 139 232 175 149]), 'UTF-8');
 folder = fullfile(tempdir, ['filly-' name]);
 if ~isfolder(folder), mkdir(folder); end
-copyfile(filly.samples.horse(), fullfile(folder, 'horse.glb'));
+% Not copyfile: Octave for Windows runs xcopy, which gets the name in the console's code page.
+source = fopen(filly.samples.horse(), 'r');
+bytes = fread(source, Inf, '*uint8');
+fclose(source);
+copy = fopen(fullfile(folder, 'horse.glb'), 'w');
+assert(copy >= 0, 'filly:test', 'Cannot write in %s', folder);
+fwrite(copy, bytes);
+fclose(copy);
 unicode = scene.load(fullfile(folder, 'horse.glb'));
 assert(isequal(unicode.nodeNames, horse.nodeNames));
 rmdir(folder, 's');

@@ -14,7 +14,7 @@ Status (October 26, 2026):
 | 3: PTB target | Done on Windows with MATLAB. See [Phase 3 findings](#phase-3-findings). |
 | 4: Linux | Done for Octave. MATLAB on Linux: CI job added, not run yet. See [Phase 4 findings](#phase-4-findings). |
 | 5: float targets and PTB inputs | Not started. |
-| 6: Octave on Windows | Not started (conditional). |
+| 6: Octave on Windows | Done locally for Octave 7.3 and for 10 and later. CI jobs and release packages added, not run yet. See [Phase 6 findings](#phase-6-findings). |
 
 How to build, use, and test the frontend: [docs/how-to/matlab.md](../docs/how-to/matlab.md).
 
@@ -680,6 +680,51 @@ shim (see [When to add a C ABI](#when-to-add-a-c-abi)).
 
 Done when: the frontend tests pass in Octave for Windows.
 
+#### Phase 6 findings
+
+2026-11-01, Octave 10.1.0 for Windows (MinGW-w64, UCRT), Intel Iris Xe.
+
+- Option 2 holds. `liboctmex-1.dll` exports all `mex*` and `mx*` functions with C names, and
+  `mexproto.h` declares them `extern "C"`. The DLL imports the UCRT (`api-ms-win-crt-*`), as
+  filly's MSVC builds do, so both sides use one C heap.
+- MinGW's `liboctmex.dll.a` is not used. CMake makes an MSVC import library from the DLL's
+  export table (`dumpbin /exports`, then `lib /def`). The MEX file exports only `mexFunction`
+  and `__octave_mex_soversion__`, and it imports only `liboctmex-1.dll` and system DLLs.
+- `mkoctfile -p INCFLAGS` also lists `mingw64/include`, whose C headers replace MSVC's. The
+  build drops include folders that contain `stddef.h` on Windows.
+- `mexErrMsgIdAndTxt` throws a MinGW C++ exception through one MSVC frame, `mexFunction`. The
+  gateway's rule (no C++ objects alive at that call) makes this safe: `test_error_paths.m`
+  passes, and filly's error identifiers and messages arrive.
+- All 10 test files pass. The MEX lock holds across `clear mex`, and Octave exits without a
+  crash with a renderer open. `test_parity.m` skipped, because the local reference report is
+  stale.
+- In `test_basics.m`, `copyfile` to a non-ASCII folder failed under PowerShell: Octave for
+  Windows runs `xcopy`, which gets the name in the console's code page. The test now copies with
+  `fopen` and `fwrite`. filly's own UTF-8 path handling was not the cause.
+- Not tested: Octave 11, the Octave GUI, and Psychtoolbox on Octave for Windows.
+
+Psychtoolbox 3.0.22 supports only Octave 7.3 on Windows (Octave 6 to 9 on Linux, 10 and later on
+macOS), so the Octave 10 build does not serve PTB users on Windows. A second build covers 7.3
+(tested 2026-11-01 with the official `octave-7.3.0-w64.zip`):
+
+- Before Octave 10, `liboctinterp-10.dll` (the interpreter) exports the MEX API: 166 `mex*` and
+  `mx*` functions with C names. The build makes its import library the same way as for
+  `liboctmex`. The file exports only `mexFunction`; Octave 7 has no `__octave_mex_soversion__`.
+- Octave 7.3 uses the old `msvcrt.dll`, not the UCRT, so the two sides have separate C heaps.
+  This is safe because the gateway never frees memory that Octave allocated: arrays come from
+  `mxCreate*`, and its one formatted call is `mexErrMsgIdAndTxt(id, "%s", message)`. Keep it so.
+- All 10 test files pass in Octave 7.3. The MEX lock holds across `clear mex`, and Octave exits
+  without a crash with a renderer open.
+- A DLL import names its DLL, and `liboctinterp`'s version changes with each Octave release
+  series, so this file loads only in Octave 7. Each build in the wrong Octave (7.3 file in 10.1,
+  10.1 file in 7.3) fails at the first call with Windows error 126, without a crash.
+
+CI (`windows-octave-build`, `windows-octave-forward`) builds `filly-octave-windows-7.3` and
+`filly-octave-windows-10` from the official zips, whose extracted trees it caches, and runs
+`test_gateway.m` in Octave 7.3, 10.1, and 11.3. Hosted Windows runners have no usable OpenGL
+device, so the offscreen tests run on a machine with a GPU only. The release job publishes both
+packages.
+
 ## Tests
 
 - **Core.** The Python test suite and the gltf_viewer parity harness (`tools/compare_reference.py`)
@@ -738,7 +783,7 @@ Done when: the frontend tests pass in Octave for Windows.
 | `mexErrMsgIdAndTxt` skips C++ destructors in Octave | Octave 8.4 raises a C++ exception, not `longjmp`; no leak in `test_error_paths.m` | Done; the design rule stays |
 | Static C++ runtime in the MEX file on Linux | Linked and tested on a proxy (the Octave module); the MATLAB file is built in CI only | Check the first CI run |
 | Octave `classdef` performance for per-frame calls | Measured in phase 4: about 10 µs per class call | Use the batch calls |
-| Demand for Octave on Windows | Not known | Ask PTB users before phase 6 |
+| Demand for Octave on Windows | Not known; Psychtoolbox for Windows supports Octave 7.3 only | Packages for 7.3 and for 10 and later are cheap to keep (phase 6 findings) |
 | Linux has not been rebuilt or tested since the first pass of the Python package | Python suite passes with llvmpipe and Zink (phase 4) | Done |
 | MATLAB's libstdc++ is older than the one that Mesa's drivers need | Not observed; the CI job preloads the system copy | Check the first CI run |
 | Mesa's `glFenceSync` skips buffered immediate-mode vertices | Found under Zink in phase 4; filly flushes before each host fence | Done |

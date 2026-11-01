@@ -60,6 +60,14 @@ endfunction()
 # filly.samples.horse() also works in a build's output folder.
 file(COPY "${PROJECT_SOURCE_DIR}/samples/" DESTINATION "${FILLY_MEX_OUTPUT_DIR}/samples")
 
+# As for the Python module: the static C++ runtime avoids the older msvcp140.dll that MATLAB
+# loads and the MinGW libstdc++ that Octave loads, and one shared UCRT keeps one heap per
+# process.
+function(_filly_msvc_mex target)
+  target_compile_options(${target} PRIVATE /Zc:__cplusplus /EHsc)
+  target_link_options(${target} PRIVATE /NODEFAULTLIB:libucrt.lib /DEFAULTLIB:ucrt.lib)
+endfunction()
+
 if(FILLY_MATLAB)
   find_package(Matlab REQUIRED COMPONENTS MX_LIBRARY)
   if(APPLE)
@@ -78,10 +86,7 @@ if(FILLY_MATLAB)
   _filly_mex_output(filly_mex)
   _filly_package(filly_mex matlab)
   if(MSVC)
-    target_compile_options(filly_mex PRIVATE /Zc:__cplusplus /EHsc)
-    # As for the Python module: the static C++ runtime avoids the older msvcp140.dll that MATLAB
-    # loads, and one shared UCRT keeps one heap per process.
-    target_link_options(filly_mex PRIVATE /NODEFAULTLIB:libucrt.lib /DEFAULTLIB:ucrt.lib)
+    _filly_msvc_mex(filly_mex)
   elseif(NOT APPLE)
     # MATLAB puts its own libstdc++ and libgcc_s first in the search path, and they are older
     # than the ones that the core is built with. Static copies make the file independent of
@@ -92,9 +97,6 @@ if(FILLY_MATLAB)
 endif()
 
 if(FILLY_OCTAVE)
-  if(WIN32)
-    message(FATAL_ERROR "FILLY_OCTAVE supports Linux and macOS only. See phase 6 of matlab/PLAN.md.")
-  endif()
   # A plain module with mkoctfile's include directories, not a custom command that runs
   # mkoctfile --mex: mkoctfile cannot take filly_core's link libraries from CMake. mkoctfile
   # --mex links no Octave library either; the MEX API resolves against the running Octave.
@@ -106,10 +108,19 @@ if(FILLY_OCTAVE)
     find_program(FILLY_MKOCTFILE NAMES mkoctfile REQUIRED)
     execute_process(COMMAND "${FILLY_MKOCTFILE}" -p INCFLAGS OUTPUT_VARIABLE _flags
       OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-    separate_arguments(_flags UNIX_COMMAND "${_flags}")
+    # On Windows, mkoctfile quotes each path, which has spaces ("C:\Program Files\GNU Octave").
+    if(WIN32)
+      separate_arguments(_flags WINDOWS_COMMAND "${_flags}")
+    else()
+      separate_arguments(_flags UNIX_COMMAND "${_flags}")
+    endif()
     foreach(_flag IN LISTS _flags)
       if(_flag MATCHES "^-I(.+)$")
-        list(APPEND _includes "${CMAKE_MATCH_1}")
+        file(TO_CMAKE_PATH "${CMAKE_MATCH_1}" _dir)
+        # On Windows, one directory holds MinGW's C library, whose headers would replace MSVC's.
+        if(NOT (WIN32 AND EXISTS "${_dir}/stddef.h"))
+          list(APPEND _includes "${_dir}")
+        endif()
       endif()
     endforeach()
     if(NOT _includes)
@@ -129,16 +140,32 @@ if(FILLY_OCTAVE)
   endforeach()
   set(_exports "mexFunction;")
   set(_octmex "")
-  if(_octave_major GREATER_EQUAL 10)
-    set(FILLY_OCTAVE_LIBRARY_DIR "" CACHE PATH "Folder of Octave's liboctmex; empty asks mkoctfile")
+  # Windows: the DLL that exports the MEX API. A DLL import names its DLL, so the file loads only
+  # in Octave releases with that DLL name.
+  set(_api_dll "")
+  if(_octave_major GREATER_EQUAL 10 OR WIN32)
+    set(FILLY_OCTAVE_LIBRARY_DIR "" CACHE PATH
+      "Folder of Octave's liboctmex, or on Windows of its DLLs; empty asks mkoctfile")
     set(_libdir "${FILLY_OCTAVE_LIBRARY_DIR}")
     if(NOT _libdir)
       find_program(FILLY_MKOCTFILE NAMES mkoctfile REQUIRED)
-      execute_process(COMMAND "${FILLY_MKOCTFILE}" -p OCTLIBDIR OUTPUT_VARIABLE _libdir
+      # Windows keeps the DLLs in BINDIR; OCTLIBDIR has only MinGW import libraries.
+      if(WIN32)
+        set(_variable BINDIR)
+      else()
+        set(_variable OCTLIBDIR)
+      endif()
+      execute_process(COMMAND "${FILLY_MKOCTFILE}" -p ${_variable} OUTPUT_VARIABLE _libdir
         OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+      file(TO_CMAKE_PATH "${_libdir}" _libdir)
     endif()
-    # liboctmex.so.1 on Linux, liboctmex.1.dylib on macOS.
-    if(APPLE)
+  endif()
+  if(_octave_major GREATER_EQUAL 10)
+    # liboctmex.so.1 on Linux, liboctmex.1.dylib on macOS, liboctmex-1.dll on Windows.
+    if(WIN32)
+      set(_pattern "liboctmex-*.dll")
+      set(_regex "^liboctmex-([0-9]+)\\.dll$")
+    elseif(APPLE)
       set(_pattern "liboctmex.*.dylib")
       set(_regex "^liboctmex\\.([0-9]+)\\.dylib$")
     else()
@@ -156,13 +183,54 @@ if(FILLY_OCTAVE)
       message(FATAL_ERROR "No ${_pattern} in ${_libdir}, which Octave ${_octave_major} MEX files link")
     endif()
     string(APPEND _exports " __octave_mex_soversion__;")
+    set(_api_dll "${_octmex}")
+  elseif(WIN32)
+    # Before Octave 10, liboctinterp, the interpreter's DLL, exports the MEX API. Its name has
+    # the library version (liboctinterp-10.dll in Octave 7.3), so one build serves one release
+    # series; Psychtoolbox for Windows supports only Octave 7.3.
+    file(GLOB _candidates RELATIVE "${_libdir}" "${_libdir}/liboctinterp-*.dll")
+    foreach(_name IN LISTS _candidates)
+      if(_name MATCHES "^liboctinterp-[0-9]+\\.dll$")
+        set(_api_dll "${_libdir}/${_name}")
+      endif()
+    endforeach()
+    if(NOT _api_dll)
+      message(FATAL_ERROR "No liboctinterp-*.dll in ${_libdir}, which Octave ${_octave_major} MEX files link")
+    endif()
   endif()
   add_library(filly_octave_mex MODULE filly_mex.cpp)
+  if(WIN32)
+    # Octave for Windows is built with MinGW, and its import libraries are in MinGW's format.
+    # The MEX API has C linkage (mexproto.h), so an import library made from the DLL's export
+    # table lets MSVC code call it; no C++ type crosses the boundary.
+    get_filename_component(_tools "${CMAKE_LINKER}" DIRECTORY)
+    find_program(FILLY_DUMPBIN NAMES dumpbin HINTS "${_tools}" REQUIRED)
+    execute_process(COMMAND "${FILLY_DUMPBIN}" /nologo /exports "${_api_dll}" OUTPUT_VARIABLE _dump
+      COMMAND_ERROR_IS_FATAL ANY)
+    get_filename_component(_dll "${_api_dll}" NAME)
+    set(_def "LIBRARY ${_dll}\nEXPORTS\n")
+    string(REPLACE "\r" "" _dump "${_dump}")
+    string(REPLACE "\n" ";" _lines "${_dump}")
+    foreach(_line IN LISTS _lines)
+      # "    ordinal hint RVA      name"
+      if(_line MATCHES "^ +[0-9]+ +[0-9A-F]+ +[0-9A-F]+ +((mex|mx)[A-Za-z0-9_]+)$")
+        string(APPEND _def "  ${CMAKE_MATCH_1}\n")
+      endif()
+    endforeach()
+    if(NOT _def MATCHES "mexFunctionName")
+      message(FATAL_ERROR "No MEX API in the exports of ${_api_dll}")
+    endif()
+    set(_import "${CMAKE_CURRENT_BINARY_DIR}/octave_mex_api.lib")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/octave_mex_api.def" "${_def}")
+    execute_process(COMMAND "${CMAKE_AR}" /nologo /machine:x64
+      "/def:${CMAKE_CURRENT_BINARY_DIR}/octave_mex_api.def" "/out:${_import}" COMMAND_ERROR_IS_FATAL ANY)
+    target_link_libraries(filly_octave_mex PRIVATE "${_import}")
+  endif()
   if(_octmex)
     # On macOS, a linked liboctmex is recorded by its full path, which contains the Octave
     # version, so the file would load only in the Octave that it was built with. octave-cli and
     # octave-gui link liboctmex themselves, so the bundle can resolve the MEX API at load time.
-    if(NOT APPLE)
+    if(NOT WIN32 AND NOT APPLE)
       target_link_libraries(filly_octave_mex PRIVATE "${_octmex}")
     endif()
     target_compile_definitions(filly_octave_mex PRIVATE FILLY_OCTAVE_MEX_SOVERSION=${_soversion})
@@ -173,11 +241,18 @@ if(FILLY_OCTAVE)
   target_compile_features(filly_octave_mex PRIVATE cxx_std_20)
   target_include_directories(filly_octave_mex PRIVATE ${_includes})
   target_link_libraries(filly_octave_mex PRIVATE filly_core)
-  # Octave uses the system libstdc++, so the C++ runtime stays dynamic. Only the entry point is
-  # exported, so that Filament and libwebp cannot bind to other copies in the process. The
-  # gateway is not compiled with -fvisibility=hidden: Octave's mex.h gives mexFunction no
-  # visibility attribute, and a hidden symbol cannot be exported.
-  if(APPLE)
+  # On Linux and macOS, Octave uses the system libstdc++, so the C++ runtime stays dynamic. Only
+  # the entry point is exported, so that Filament and libwebp cannot bind to other copies in the
+  # process. The gateway is not compiled with -fvisibility=hidden: Octave's mex.h gives
+  # mexFunction no visibility attribute, and a hidden symbol cannot be exported.
+  if(WIN32)
+    # A DLL exports only what it names. Octave's mex.h declares mexFunction without dllexport.
+    _filly_msvc_mex(filly_octave_mex)
+    target_link_options(filly_octave_mex PRIVATE /EXPORT:mexFunction)
+    if(_octmex)
+      target_link_options(filly_octave_mex PRIVATE /EXPORT:__octave_mex_soversion__,DATA)
+    endif()
+  elseif(APPLE)
     # Apple's linker takes a list of C names, with the underscore prefix. The bundle leaves the
     # MEX API to the running Octave, which loaded liboctmex already.
     string(REGEX MATCHALL "[A-Za-z_]+" _names "${_exports}")
@@ -192,5 +267,7 @@ if(FILLY_OCTAVE)
     file(WRITE "${_map}" "{\n  global: ${_exports}\n  local: *;\n};\n")
     target_link_options(filly_octave_mex PRIVATE "LINKER:--version-script=${_map}")
   endif()
-  set_property(TARGET filly_octave_mex APPEND PROPERTY LINK_DEPENDS "${_map}")
+  if(NOT WIN32)
+    set_property(TARGET filly_octave_mex APPEND PROPERTY LINK_DEPENDS "${_map}")
+  endif()
 endif()

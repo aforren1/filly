@@ -31,6 +31,10 @@ ALLOWED_PE = SYSTEM_PE + [
 ]
 # The C MEX API only: libmat or the C++ MATLAB Data API would tie the file to more of MATLAB.
 ALLOWED_MEX_PE = SYSTEM_PE + ["libmx.dll", "libmex.dll"]
+# Octave for Windows is built with MinGW: the file may import only the C MEX API, from liboctmex
+# (Octave 10 and later) or liboctinterp (earlier), never MinGW's C++ runtime (libstdc++-6.dll,
+# libgcc_s_seh-1.dll).
+ALLOWED_OCTAVE_PE = SYSTEM_PE + ["liboctmex-*.dll", "liboctinterp-*.dll"]
 # Only the glibc family, the GCC C++ runtime, and the GL/X11 client libraries. manylinux_2_28
 # allows all of these, so auditwheel must not graft any library into the wheel.
 SYSTEM_ELF = [
@@ -221,9 +225,7 @@ def frontend(label):
 def unexpected(data, kind="python"):
     """Return the imported names that are outside the allowed set for the format and frontend."""
     if data[:2] == b"MZ":
-        if kind == "octave":
-            raise ValueError("Octave MEX files are built for Linux only")
-        allowed = ALLOWED_MEX_PE if kind == "matlab" else ALLOWED_PE
+        allowed = {"python": ALLOWED_PE, "matlab": ALLOWED_MEX_PE, "octave": ALLOWED_OCTAVE_PE}[kind]
     elif data[:4] == MACHO_MAGIC:
         allowed = {"python": ALLOWED_MACHO, "matlab": ALLOWED_MEX_MACHO, "octave": ALLOWED_OCTAVE_MACHO}[kind]
     else:
