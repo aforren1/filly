@@ -390,6 +390,7 @@ NB_MODULE(_native, module) {
                                                    count, stride, mode, filter);
         return nb::bytes(output.data(), output.size());
     });
+    module.attr("filament_version") = filament_version();
     module.def("set_log_level", &set_log_level, "level"_a,
                "Set the minimum Filament log severity for all renderers in this process.");
     module.def("current_gl_context", &current_gl_context);

@@ -12,7 +12,7 @@ material {
     depthCulling : false,
     flipUV : false,
     // No lighting, skinning, fog, shadows, or stereo: fewer variants to compile.
-    variantFilter : [ directionalLighting, shadowReceiver, skinning, fog, vsm, ssr, stereo ],
+    variantFilter : [ shadowReceiver, skinning, fog, vsm, ssr, stereo ],
     parameters : [
         { type : sampler2d, name : source, format : float, precision : high },
         { type : int, name : flags },

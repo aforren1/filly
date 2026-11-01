@@ -63,6 +63,73 @@ against 0.26 ms offscreen), most of it the wait in `acquire()`. The host draw co
 GPU time for the pyglet blit and 0.78 ms for PsychoPy's `ImageStim` at 1080p. Since
 2026-10-12, the pyglet adapter draws a blended quad instead of a blit; it was not measured again.
 
+## Filament 1.79.0 (November 1, 2026)
+
+Filament 1.77.1 and 1.79.0 compared in two scratch venvs: the commit before the upgrade with the
+1.77.1 SDK, and the upgraded tree with the 1.79.0 SDK. Intel Iris Xe, AC, 1920 x 1080
+offscreen, 5 rounds in rotated order, a fresh process per run. Cells: median of the per-round
+medians, range in brackets, ms.
+
+Single models, `profile_frame.py cpu` through `profile_matrix.py` (600 frames after 120 warmup,
+60 Hz pacing):
+
+| Scenario | GPU frame 1.77.1 | GPU frame 1.79.0 | Native submit 1.77.1 | Native submit 1.79.0 |
+| --- | ---: | ---: | ---: | ---: |
+| DamagedHelmet | 2.560 [2.554-2.567] | 2.572 [2.561-2.579] | 0.328 [0.319-0.335] | 0.210 [0.198-0.254] |
+| SheenChair | 2.901 [2.832-2.907] | 2.899 [2.895-2.915] | 0.337 [0.331-0.348] | 0.221 [0.215-0.243] |
+| DamagedHelmet, shadows | 3.985 [3.978-4.008] | 3.417 [3.411-3.422] | 0.358 [0.350-0.419] | 0.318 [0.281-0.321] |
+
+The clearcoat, anisotropy, and specular scenarios did not run: their assets were not in
+`.deps/sample-audit`.
+
+Many nodes, `tools/benchmark_nodes.py`: N nodes on a grid that share one 256-triangle sphere and
+one material, a directional light, `finish()` after each frame (300 frames after 60 warmup).
+"Update" is the camera move or the `set_transforms()` call before `render()`.
+
+| Nodes | Per frame | Native submit 1.77.1 | Native submit 1.79.0 | Update 1.77.1 | Update 1.79.0 | GPU frame 1.77.1 | GPU frame 1.79.0 |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5,000 | nothing | 1.802 [1.575-1.891] | 2.097 [2.095-2.455] | - | - | 6.511 [6.442-9.576] | 7.367 [6.620-8.349] |
+| 5,000 | camera moves | 1.745 [1.325-1.851] | 2.194 [1.927-2.346] | 0.035 | 0.046 | 6.602 [2.015-7.283] | 7.390 [7.267-7.473] |
+| 5,000 | `set_transforms()` | 1.821 [1.383-1.834] | 2.485 [2.003-2.833] | 2.007 [0.751-2.184] | 2.498 [2.077-2.728] | 9.711 [2.018-9.760] | 9.786 [9.729-9.846] |
+| 20,000 | nothing | 7.968 [6.317-8.621] | 7.320 [6.603-8.184] | - | - | 16.844 | 16.853 |
+| 20,000 | camera moves | 7.538 [7.063-8.026] | 8.270 [5.405-8.578] | 0.058 | 0.056 | 16.648 | 16.650 |
+| 20,000 | `set_transforms()` | 5.983 [5.660-6.097] | 6.920 [6.179-7.067] | 6.183 [5.601-6.685] | 6.811 [5.263-7.261] | 16.872 | 16.872 |
+
+Findings:
+
+- One model: native submit fell by about 0.12 ms per frame (36%). Lit shading GPU time did not
+  change; with shadows, the GPU frame fell by 0.57 ms (14%).
+- Many nodes: the table above overstates the regression for a static scene and a moving
+  camera; the 1.77.1 ranges are wide (one round of each case ran at about a third of the GPU
+  time). A second run, with Tracy-instrumented builds of both releases (`tools/profile_tracy.py`,
+  no capture, 3 alternating runs), gave the results below.
+
+5,000 nodes, second run:
+
+| Per frame | Native submit 1.77.1 | Native submit 1.79.0 | Update 1.77.1 | Update 1.79.0 |
+| --- | ---: | ---: | ---: | ---: |
+| nothing | 1.637 [1.594-1.664] | 1.573 [1.506-1.634] | - | - |
+| camera moves | 1.707 [1.659-1.709] | 1.564 [1.447-1.593] | 0.030 | 0.031 |
+| `set_transforms()` | 1.558 [1.540-1.568] | 1.887 [1.767-1.955] | 1.036 [1.022-1.048] | 1.222 [1.122-1.254] |
+
+Only a change of every node's transform in every frame is slower: about 0.5 ms per frame for
+5,000 nodes, or 0.1 microseconds per changed node. The Tracy zones put all of the native submit
+increase in `Filament::render` (1.468 to 1.829 ms; `beginFrame`, `endFrame`, and filly's output
+passes did not change). 1.79.0 defers world-transform updates to the next read or frame, so
+`render()` now also does that work. A run that read a world transform after `set_transforms()`
+(through `camera.frame()`), which makes Filament update the transforms there, separates the two:
+
+| Part | 1.77.1 | 1.79.0 |
+| --- | ---: | ---: |
+| `set_transforms()` and the world-transform update | 0.888 [0.882-1.033] | 1.152 [1.102-1.228] |
+| `Filament::render`, transforms already updated | 1.421 [1.397-1.469] | 1.734 [1.679-1.886] |
+
+So about half of the increase is in the transform update (per-node change tracking), and half in
+`render()` after it: the incremental scene cache of 1.79.0 updates 5,000 changed entities more
+slowly than 1.77.1 rebuilt the whole cache. Both are inside Filament; filly has no batch call left
+to use. Filament's notes measured these changes on Android, with hierarchies and few changed
+nodes.
+
 ## Channel-mixing tone mappers (September 30, 2026)
 
 A tone mapper that mixes channels (`aces_legacy` here) with sRGB encoding now lets Filament's
@@ -699,7 +766,8 @@ outlier per run (4 renders, 84 ms) is the first pick of the renderer, measured b
 
 In browsers (`web/tests/test_web.py`, one render per `requestAnimationFrame`, Intel), the answer
 arrived 2 or 3 frames after the render that took the query in Chrome, Edge, and Firefox: WebGL
-signals fences only after the page returns to the event loop.
+signals fences only after the page returns to the event loop. With Filament 1.79.0 (November 1,
+2026), the same test measured 1 frame in Chrome and Firefox.
 
 ### First pick after prepare()
 

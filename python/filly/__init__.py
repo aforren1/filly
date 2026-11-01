@@ -30,6 +30,7 @@ from ._native import (
     Stats,
     Texture,
     current_gl_context,
+    filament_version,
     set_log_level,
     set_material_parameters,
     set_morph_weights,

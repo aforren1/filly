@@ -7,14 +7,16 @@ import tarfile
 import urllib.request
 
 
-VERSION = "1.77.1"
+# The Filament release of every filly build (FILAMENT_VERSION at the repository root). The
+# hashes below belong to that release; change them together.
+VERSION = (Path(__file__).resolve().parents[1] / "FILAMENT_VERSION").read_text().strip()
 # The release archives of github.com/google/filament. The macOS archive has one top-level folder,
 # `filament/`, which is removed, so that both SDKs have `include` at the root of their folder.
 ARCHIVES = {
-    "Windows": {"name": f"filament-v{VERSION}-windows.tgz", "size": "813 MiB", "folder": "",
-                "sha256": "6f1e16102e4feec3dada51c31237e1b07d8fcf9d4893376668bf3276530457ec"},
+    "Windows": {"name": f"filament-v{VERSION}-windows.tgz", "size": "826 MiB", "folder": "",
+                "sha256": "5fc8ea5a06bd3de3f43da9ec72a09458193db3e0b574e06b6b3f8ef94c21fce9"},
     "Darwin": {"name": f"filament-v{VERSION}-mac.tgz", "size": "44 MiB", "folder": "filament-mac",
-               "sha256": "ab99d67b456d3917de3e8778330e36a8bdf0f510981484b2c34e72b7f4e20d04"},
+               "sha256": "a1c4dd85b2ec5789d202630026febc019bc8a774e231ce0bb4407032c2bd2103"},
 }
 MACHINES = {"Windows": {"amd64", "x86_64"}, "Darwin": {"arm64"}}
 

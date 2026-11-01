@@ -186,6 +186,11 @@ def test_platform(page_results):
     assert page_results["framesRendered"] > 5
 
 
+def test_filament_version(page_results):
+    pinned = (Path(__file__).resolve().parents[2] / "FILAMENT_VERSION").read_text().strip()
+    assert page_results["filamentVersion"] == pinned
+
+
 def test_prepare(page_results):
     value = _value(page_results, "prepare")
     assert value["framesRendered"] == 1

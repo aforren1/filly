@@ -172,7 +172,7 @@ void TextureData::release() noexcept {
         // A slot from begin_update() has no upload that would mark it free.
         if (pending) pending->busy = false;
         pending = nullptr;
-        if (upload.busy()) detail::flush_and_wait(*state->engine);
+        if (upload.busy()) state->engine->flushAndWait();
         state->engine->destroy(texture);
     }
     if (host_view) state->stale_views.push_back(host_view);

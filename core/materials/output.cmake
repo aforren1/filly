@@ -8,9 +8,20 @@
 
 set(FILLY_MATERIAL_TOOLS "${FILAMENT_ROOT}/bin" CACHE PATH
   "Directory with matc and uberz from the same Filament version as the SDK")
-find_program(FILLY_MATC matc PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+# NO_CACHE: a cached result would keep the matc of an earlier FILLY_MATERIAL_TOOLS. Builds
+# configured before this change have such an entry, which would skip the search.
+unset(FILLY_MATC CACHE)
+find_program(FILLY_MATC matc PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH NO_CACHE)
 if(NOT FILLY_MATC)
   message(FATAL_ERROR "filly's output passes need matc in ${FILLY_MATERIAL_TOOLS}. See docs/how-to/build.md.")
+endif()
+# matc --version prints the material version that it writes; the engine rejects other versions.
+execute_process(COMMAND "${FILLY_MATC}" --version OUTPUT_VARIABLE _matc_version
+  OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+if(NOT _matc_version STREQUAL FILLY_MATERIAL_VERSION)
+  message(FATAL_ERROR "${FILLY_MATC} writes material version '${_matc_version}', but Filament "
+    "${FILLY_FILAMENT_VERSION} needs ${FILLY_MATERIAL_VERSION}. Set FILLY_MATERIAL_TOOLS to the tools of "
+    "that release.")
 endif()
 # Desktop GL; the web build passes -p mobile (GLSL ES 3.00).
 set(FILLY_OUTPUT_MATC_FLAGS -a opengl -p desktop CACHE STRING "matc flags for the output-pass materials")

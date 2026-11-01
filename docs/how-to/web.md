@@ -14,6 +14,9 @@ page draws with its own WebGL2 renderer. For the design, see [the web build](../
   work. The files use `.js`, not `.mjs`: on Windows, `python -m http.server` can send `.mjs` as
   `text/plain`.
 
+To see the Filament release that the build links, call `await filamentVersion()` from
+`filly.js`.
+
 The page does not have to be cross-origin isolated. If it is (COOP and COEP headers), serve
 filly's files from the same origin.
 
@@ -336,8 +339,8 @@ function frame()
 
 `frameNumber` is the `framesRendered` value of the render that took the query, the frame that
 the answer describes. WebGL completes the readback only after the page returns to the event
-loop. With one render per `requestAnimationFrame`, the answer arrived 2 or 3 frames after the
-render that took the query, in Chrome, Edge, and Firefox. Outside a frame loop,
+loop. With one render per `requestAnimationFrame`, the answer arrived 1 frame after the render
+that took the query in Chrome and Firefox (Filament 1.79.0; 2 or 3 frames with 1.77.1). Outside a frame loop,
 `await query.wait()` resolves to the result after a render took the query. Set
 `scene.pickBlended = true` to hit blended surfaces. The answers are the same as on the desktop;
 see [picking](../reference/api.md#picking).

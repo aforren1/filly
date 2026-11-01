@@ -41,10 +41,11 @@ $envArgs = foreach ($name in 'JOBS', 'FILLY_WEB_SIMD') {
     if ($value) { '-e'; "$name=$value" }
 }
 # build_filament_web.sh takes about 20 s even when the SDK is complete (hash checks, CMake
-# configure), so skip it then. To rebuild the SDK, for example after its version pin changes,
-# remove the volume. The build logs to stdout because PowerShell 5.1 shows each stderr line of a
-# redirected native command as an error.
-$command = 'exec 2>&1; test -e /work/sdk/include/filament/Engine.h || bash /src/web/tools/build_filament_web.sh /work; ' +
+# configure), so skip it when the volume's SDK has a copy of FILAMENT_VERSION. The build logs to
+# stdout because PowerShell 5.1 shows each stderr line of a redirected native command as an
+# error. The command has no double quotes: PowerShell 5.1 does not escape them for wslc.
+$command = 'exec 2>&1; cmp -s /work/sdk/FILAMENT_VERSION /src/FILAMENT_VERSION || ' +
+    'bash /src/web/tools/build_filament_web.sh /work; ' +
     'bash /src/web/tools/build_filly_web.sh /out /work'
 Invoke-Wslc run --rm @envArgs -v "${Volume}:/work" -v "${repo}:/src:ro" -v "${OutDir}:/out" `
     $Image bash -euc $command

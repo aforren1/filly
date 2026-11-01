@@ -112,6 +112,13 @@ export const shapes = {
 		callNative(moduleNow(), () => moduleNow().shapeCylinder(radius, height, segments, caps)),
 };
 
+/** The Filament release that this build links, such as "1.79.0". */
+export async function filamentVersion()
+{
+	const module = await loadModule();
+	return module.filamentVersion();
+}
+
 /** Set the minimum Filament log severity: "verbose", "debug", "info", "warning", "error", "off". */
 export async function setLogLevel(level)
 {

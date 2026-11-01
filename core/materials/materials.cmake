@@ -6,8 +6,10 @@
 # output.cmake. Outputs: the target filly_material_archive, a static library that defines
 # filly_material_archive_data and filly_material_archive_size.
 
-find_program(FILLY_UBERZ uberz PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
-find_program(FILLY_MATINFO matinfo PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+unset(FILLY_UBERZ CACHE)
+unset(FILLY_MATINFO CACHE)
+find_program(FILLY_UBERZ uberz PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH NO_CACHE)
+find_program(FILLY_MATINFO matinfo PATHS "${FILLY_MATERIAL_TOOLS}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH NO_CACHE)
 if(NOT FILLY_MATC OR NOT FILLY_UBERZ)
   message(FATAL_ERROR "filly's material archive needs matc and uberz in ${FILLY_MATERIAL_TOOLS}. "
     "See docs/how-to/build.md.")

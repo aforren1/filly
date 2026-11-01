@@ -131,8 +131,9 @@ target_link_libraries(filly_core PRIVATE ws2_32 dbghelp)
                         "FrameMark")
     # After the nested-acquire early return, so that the adapters' inner acquire() calls in
     # draw() do not add zero-length instances.
-    text = replace_once(text, "    if (data_->held > 0) { ++data_->held; return; }\n",
-                        "    if (data_->held > 0) { ++data_->held; return; }\n"
+    # With the line before it: the macOS copy target's acquire() has the same check.
+    text = replace_once(text, "    interop.require_host();\n    if (data_->held > 0) { ++data_->held; return; }\n",
+                        "    interop.require_host();\n    if (data_->held > 0) { ++data_->held; return; }\n"
                         "    ZoneScopedN(\"ImportedTarget::acquire\");\n", "ImportedTarget::acquire")
     text = replace_once(text, "    if (data_->access == Access::SUBMITTED) interop.wait_on_host(data_->ready);\n",
                         "    if (data_->access == Access::SUBMITTED) { ZoneScopedN(\"wait_on_host\"); "
@@ -175,21 +176,29 @@ def cmd_build(args):
     if p["src"].exists():
         shutil.rmtree(p["src"])
     p["src"].mkdir(parents=True)
-    for item in ("CMakeLists.txt", "pyproject.toml", "README.md"):
-        shutil.copy2(source / item, p["src"] / item)
-    for item in ("core", "python"):
+    # FILAMENT_VERSION exists from the Filament 1.79.0 upgrade on; earlier snapshots lack it.
+    for item in ("CMakeLists.txt", "pyproject.toml", "README.md", "LICENSE", "FILAMENT_VERSION"):
+        if (source / item).exists():
+            shutil.copy2(source / item, p["src"] / item)
+    # samples/ holds the models that the wheel installs.
+    for item in ("core", "python", "samples"):
         shutil.copytree(source / item, p["src"] / item, ignore=shutil.ignore_patterns("__pycache__"))
     instrument(p["src"], tracy_source, tracy=not args.no_tracy)
     if not p["python"].exists():
         subprocess.run(["uv", "venv", str(p["venv"]), "--python", args.python_version], check=True)
     subprocess.run(["uv", "pip", "install", "--python", str(p["python"]), "nanobind", "scikit-build-core",
-                    "numpy", "ninja", "pyglet==1.4.11"], check=True)
-    defines = [f"-Ccmake.define.FILAMENT_ROOT={(ROOT / '.deps').as_posix()}", f"-Cbuild-dir={p['build']}"]
+                    "setuptools-scm", "numpy", "ninja", "pyglet==1.4.11"], check=True)
+    # A --define of FILAMENT_ROOT replaces the project's SDK: repeated keys do not override.
+    defines = [f"-Cbuild-dir={p['build']}"]
+    if not any(d.startswith("FILAMENT_ROOT=") for d in args.define):
+        defines.insert(0, f"-Ccmake.define.FILAMENT_ROOT={(ROOT / '.deps').as_posix()}")
     webp = next(ROOT.glob("build/*/_deps/libwebp-src"), None)
     if webp:
         defines.append(f"-Ccmake.define.FETCHCONTENT_SOURCE_DIR_LIBWEBP={webp.as_posix()}")
     defines += [f"-Ccmake.define.{d}" for d in args.define]
+    # The copy has no git history, from which setuptools-scm would take the version.
     env = dict(os.environ, CMAKE_BUILD_PARALLEL_LEVEL=str(args.jobs))
+    env.setdefault("SETUPTOOLS_SCM_PRETEND_VERSION", "0.0.0")
     command = ["uv", "pip", "install", "--python", str(p["python"]), "--no-build-isolation",
                "--reinstall-package", "filly", str(p["src"]), *defines]
     # Below-normal priority keeps the build from disturbing other measurements on the machine.
@@ -271,7 +280,7 @@ def main():
     build.add_argument("--no-tracy", action="store_true", help="no Tracy client: a plain scratch build, for example of --source")
     build.add_argument("--source", help="build this source tree instead of the project, for example a "
                        "snapshot of an earlier revision or a probe copy (needs CMakeLists.txt, "
-                       "pyproject.toml, README.md, native, src)")
+                       "pyproject.toml, README.md, core, python)")
     build.add_argument("--define", action="append", default=[],
                        help="extra CMake definition, NAME=VALUE")
     run = sub.add_parser("run", help="profile a scenario; other options go to profile_frame.py cpu")

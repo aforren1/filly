@@ -19,7 +19,7 @@ for that Python version, which avoids a source build.
 
 ```powershell
 uv venv --python 3.11 .deps/psychopy311
-uv pip install --python .deps/psychopy311/Scripts/python.exe nanobind scikit-build-core ninja pytest
+uv pip install --python .deps/psychopy311/Scripts/python.exe nanobind scikit-build-core setuptools-scm ninja pytest
 uv pip install --python .deps/psychopy311/Scripts/python.exe --no-build-isolation -e ".[psychopy,examples]"
 uv run --no-project --python .deps/psychopy311/Scripts/python.exe python examples/python/psychopy_shared.py
 ```
@@ -265,7 +265,7 @@ PsychoPy 2026.2 releases require Python 3.12 or earlier, and 2026.1 releases req
 
 ```bash
 uv venv --python 3.12 .deps/psychopy-venv
-uv pip install --python .deps/psychopy-venv/bin/python cmake ninja nanobind scikit-build-core pytest pillow
+uv pip install --python .deps/psychopy-venv/bin/python cmake ninja nanobind scikit-build-core setuptools-scm pytest pillow
 uv pip install --python .deps/psychopy-venv/bin/python "psychopy @ git+https://github.com/psychopy/psychopy@dev"
 MACOSX_DEPLOYMENT_TARGET=11.0 uv pip install --python .deps/psychopy-venv/bin/python --no-build-isolation -e .
 cd python/tests && ../../.deps/psychopy-venv/bin/python -m pytest test_psychopy.py -q

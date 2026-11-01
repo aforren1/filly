@@ -12,6 +12,11 @@ else
     assert(strcmp(['v' filly.version()], tag), 'filly.version() is %s, the release tag is %s', filly.version(), tag);
 end
 
+% The MEX file reports the Filament release of the checkout's FILAMENT_VERSION file.
+pinned = strtrim(fileread(fullfile(fileparts(fileparts(fileparts(mfilename('fullpath')))), 'FILAMENT_VERSION')));
+assert(strcmp(filly.filamentVersion(), pinned), 'filly.filamentVersion() is %s, FILAMENT_VERSION is %s', ...
+    filly.filamentVersion(), pinned);
+
 % Dispatch and handles.
 expect_error(@() filly_mex(), 'filly:invalidArgument');
 expect_error(@() filly_mex('noSuchCommand'), 'filly:invalidArgument');

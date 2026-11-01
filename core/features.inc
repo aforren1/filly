@@ -346,13 +346,11 @@ Camera Model::camera_at(size_t position) const {
 }
 void Model::reset_animation() {
     data_->check(); auto& tm = data_->state->engine->getTransformManager();
-    // One world-transform update for the whole reset instead of one per node and subtree.
-    tm.openLocalTransformTransaction();
+    // TransformManager defers world-transform updates to the next read or frame, so the whole
+    // reset costs one update.
     for (const auto& [entity, value] : data_->rest_transforms) tm.setTransform(tm.getInstance(entity), value);
     // gltfio's per-node translation, rotation, and scale must return to rest too; see RestSource.
-    // The animator commits the transaction.
     if (data_->rest_animation >= 0) data_->animator->applyAnimation(size_t(data_->rest_animation), 0);
-    tm.commitLocalTransformTransaction();
     auto& rm = data_->state->engine->getRenderableManager();
     for (const auto& [entity, weights] : data_->rest_morphs) rm.setMorphWeights(rm.getInstance(entity), weights.data(), weights.size());
     detail::reset_properties(*data_);
@@ -719,7 +717,7 @@ Environment Renderer::create_environment(const float* pixels, size_t count, uint
         data->skybox = uniform_cube(engine, radiance);
         data->reflections = uniform_cube(engine, radiance);
         data->irradiance = uniform_cube(engine, radiance);
-        detail::flush_and_wait(engine);
+        engine.flushAndWait();
         return Environment(data);
     }
     auto* source = f::Texture::Builder().width(width).height(height).levels(0xff)
@@ -740,7 +738,7 @@ Environment Renderer::create_environment(const float* pixels, size_t count, uint
     data->reflections = prefilter->specular()(data->skybox);
     data->irradiance = prefilter->irradiance()(data->skybox);
     engine.destroy(source);
-    detail::flush_and_wait(engine);
+    engine.flushAndWait();
     return Environment(data);
 }
 namespace {
@@ -851,7 +849,7 @@ Environment Renderer::load_environment_ktx(const std::string& ibl_path, const st
     if (sky) data->skybox = ktx_texture(engine, std::move(sky), skybox_path);
     data->bands = bands;
     data->pending_irradiance = std::move(pending);
-    detail::flush_and_wait(engine);
+    engine.flushAndWait();
     return Environment(data);
 }
 Environment Renderer::load_environment(const std::string& path) {

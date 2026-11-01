@@ -13,10 +13,12 @@
 # archives), EMSDK_DIR (an existing emsdk checkout), JOBS.
 set -euo pipefail
 
-VERSION=1.77.1
-SOURCE_SHA256=c55e2f99fd5e8840f132d03f1b019bc820c37d9df6d2c2ce2f3930367b081a45
-LINUX_SHA256=ec0f5287a3a2fb801a93fd7b0ffd80c894aac980716d6f91ec48e5370d2d0674
-# Filament 1.77.1 CI pins this emsdk (build/common/versions). Material packages and the
+# The Filament release of every filly build (FILAMENT_VERSION at the repository root). The hashes
+# below belong to that release; change them together.
+VERSION=$(tr -d '[:space:]' < "$(dirname "$0")/../../FILAMENT_VERSION")
+SOURCE_SHA256=bb7d0c4901fb6940dbb66e809f36056b68461e7836a423f77dcf29f472bdf811
+LINUX_SHA256=3d0dda90685488c2bc6baacc777ab7108229fee07b989802bf7e05b1e20cb4de
+# The pinned Filament's CI uses this emsdk (build/common/versions). Material packages and the
 # generated JavaScript glue depend on it, so do not float it to "latest".
 EMSDK_VERSION=5.0.4
 
@@ -54,7 +56,8 @@ if [[ ! -f "$SRC/CMakeLists.txt" ]]; then
 fi
 
 # Host tools. The web build runs them at build time to make materials and resources.
-TOOLS=$WORK/host-tools
+# Per version, so that a version change does not keep the old matc.
+TOOLS=$WORK/host-tools-$VERSION
 if [[ ! -x "$TOOLS/matc" ]]; then
     mkdir -p "$TOOLS"
     tar -xzf "$LINUX_TGZ" -C "$TOOLS" --strip-components=2 \
@@ -87,7 +90,8 @@ fi
 # shellcheck disable=SC1091
 source "$EMSDK_DIR/emsdk_env.sh" >/dev/null
 
-BUILD=$WORK/build-release
+# Per version: CMake rejects a build folder configured for another source folder.
+BUILD=$WORK/build-$VERSION
 SDK=$WORK/sdk
 # Single-threaded (no WASM_PTHREADS): the module needs no SharedArrayBuffer, so pages need no
 # cross-origin isolation.
@@ -100,6 +104,8 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DFILAMENT_SKIP_SAMPLES=ON \
     -DFILAMENT_BUILD_TESTING=OFF
 cmake --build "$BUILD" -j "$JOBS"
+# A fresh folder, so that no file of an earlier version remains.
+rm -rf "$SDK"
 cmake --install "$BUILD"
 
 # The stock module, for experiments that compare filly's build with Filament's own bindings.
@@ -107,4 +113,6 @@ mkdir -p "$SDK/filament-js"
 cp "$BUILD/web/filament-js/filament.js" "$BUILD/web/filament-js/filament.wasm" \
     "$BUILD/web/filament-js/filament.d.ts" "$SDK/filament-js/"
 emcc --version | head -1 > "$SDK/EMSCRIPTEN_VERSION"
+# build_web_container.ps1 compares it with FILAMENT_VERSION to decide whether to rebuild.
+cp "$(dirname "$0")/../../FILAMENT_VERSION" "$SDK/FILAMENT_VERSION"
 echo "Filament $VERSION wasm SDK: $SDK"

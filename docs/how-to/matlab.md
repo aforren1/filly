@@ -40,8 +40,8 @@ library ... failed (error 126)". See [Build the MEX files on Windows](#build-the
 1. Unzip the package into an empty folder.
 2. In MATLAB or Octave, go to that folder and run `SetupFilly`. See
    [Set up the path](#set-up-the-path).
-3. Run `filly.version` to see the version of the frontend. It has its own version, apart from
-   the Python package.
+3. Run `filly.version` to see the version of the frontend, the same as the Python package's.
+   `filly.filamentVersion` gives the Filament release that the MEX file links.
 
 To build the MEX files yourself, use the next sections.
 

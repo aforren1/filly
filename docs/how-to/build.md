@@ -35,12 +35,12 @@ From the project directory, run:
 
 ```powershell
 uv venv --python 3.12
-uv pip install --python .venv\Scripts\python.exe nanobind scikit-build-core numpy pytest ninja
+uv pip install --python .venv\Scripts\python.exe nanobind scikit-build-core setuptools-scm numpy pytest ninja
 uv run --no-project tools/fetch_filament.py
 uv pip install --python .venv\Scripts\python.exe --no-build-isolation -e .
 ```
 
-The download tool checks the SHA-256 hash of Filament 1.77.1 before extraction.
+The download tool checks the SHA-256 hash of Filament 1.79.0 before extraction.
 It downloads an official SDK archive. It does not use Git.
 
 To use a separate SDK directory, add this argument to the install command:
@@ -49,7 +49,10 @@ To use a separate SDK directory, add this argument to the install command:
 -Ccmake.define.FILAMENT_ROOT=C:/path/to/filament
 ```
 
-The SDK must match version 1.77.1 and contain `include` and `lib/x86_64/mt`.
+The SDK must match version 1.79.0 and contain `include` and `lib/x86_64/mt`.
+After a change of SDK, delete the build folder (`build/cp3*-win_amd64`) before you install
+again. The archive keeps its file times, so the new headers can be older than the objects of
+the last build, which then are not compiled again and fail to link.
 The build uses the hybrid C runtime: the static C++ runtime and vcruntime (`/MT`) and the
 dynamic Universal CRT. The module does not import `msvcp140.dll` or `vcruntime140*.dll`, so it
 does not need the Visual C++ Redistributable. To check the imports of a module or a wheel, run:
@@ -106,7 +109,7 @@ Windows release tool.
 ## Build on Linux
 
 Use Linux x86_64, Python 3.12 or later for the SDK tool, Clang, CMake 3.28 or later, Ninja, and the
-X11, OpenGL, and EGL development packages. Filament 1.77.1 is built from source with libstdc++ and
+X11, OpenGL, and EGL development packages. Filament 1.79.0 is built from source with libstdc++ and
 position-independent code. The wrapper build downloads libwebp as on Windows. Reserve several GiB
 for source and build files. The first SDK build takes about 15 minutes with 7 jobs.
 
@@ -121,7 +124,7 @@ Then run from the project directory:
 
 ```bash
 uv venv --python 3.12
-uv pip install nanobind scikit-build-core numpy pytest ninja
+uv pip install nanobind scikit-build-core setuptools-scm numpy pytest ninja
 uv run --no-project tools/build_filament_linux.py --jobs 2
 CXX=clang++ uv pip install --no-build-isolation -e . -Ccmake.define.FILAMENT_ROOT="$PWD/.deps/filament-linux"
 ```
@@ -203,12 +206,12 @@ From the project directory, run:
 
 ```bash
 uv venv --python 3.12
-uv pip install cmake ninja nanobind scikit-build-core numpy pytest
+uv pip install cmake ninja nanobind scikit-build-core setuptools-scm numpy pytest
 uv run --no-project tools/fetch_filament.py
 uv pip install --no-build-isolation -e .
 ```
 
-The download tool checks the SHA-256 hash of the Filament 1.77.1 macOS archive (about 44 MiB)
+The download tool checks the SHA-256 hash of the Filament 1.79.0 macOS archive (about 44 MiB)
 and extracts it to `.deps/filament-mac`. The build uses this folder by default. To use a
 different SDK, add `-Ccmake.define.FILAMENT_ROOT=<folder>`. The SDK must contain `include`,
 `lib/arm64`, and `bin` with `matc` and `uberz`.
@@ -260,7 +263,7 @@ page](web.md) for the API.
 
 Two scripts do the build. `web/tools/build_filament_web.sh` builds the Filament WebAssembly SDK
 once. `web/tools/build_filly_web.sh` builds filly's module with that SDK. They download a pinned
-CMake (3.31.6) and Emscripten (emsdk 5.0.4, the version that Filament 1.77.1 uses), and check
+CMake (3.31.6) and Emscripten (emsdk 5.0.4, the version that Filament 1.79.0 uses), and check
 the archives' SHA-256 hashes. No native compiler is necessary: the host tools come from
 Filament's Linux release archive. These tools need glibc 2.38 or later.
 
@@ -409,6 +412,34 @@ Apple's software renderer, which is too slow for the suite. Run the full suite o
 Download wheels from the workflow artifacts. The same workflow builds the sdist and publishes
 releases; see [publish a release](#publish-a-release).
 Source archives are pinned and hash checked; build dependencies and container images are not fully locked.
+
+## Change the Filament version
+
+`FILAMENT_VERSION` at the repository root holds the one Filament release of all builds. The SDK
+scripts read it, CMake compiles it into the module, and `filly.filament_version` (MATLAB:
+`filly.filamentVersion`, web: `filamentVersion()`) reports it. CMake stops if the SDK's
+`MATERIAL_VERSION` is not the minor version of `FILAMENT_VERSION`.
+
+1. Write the new version in `FILAMENT_VERSION`.
+2. Change the SHA-256 hashes in `tools/fetch_filament.py` (Windows and macOS archives),
+   `tools/build_filament_linux.py`, and `web/tools/build_filament_web.sh` (source archive and
+   Linux archive). The GitHub release page shows the hashes of the release archives. For the
+   source archive, download `https://codeload.github.com/google/filament/tar.gz/refs/tags/vX.Y.Z`
+   and hash it.
+3. Move the old SDK out of `.deps` (`bin`, `docs`, `include`, `lib`, `LICENSE`, `README.md`),
+   run `tools/fetch_filament.py`, and delete the build folders. See
+   [Build on Windows](#build-on-windows).
+4. Replace `core/vendor/cgltf/cgltf.h` with the release's `third_party/cgltf/cgltf.h`.
+5. Review the items in
+   [dependencies on Filament internals](../explanation/filament.md#maintenance-dependencies-on-filament-internals)
+   against the release's changes, and remove the workarounds in
+   [upstream Filament issues](../reference/upstream-issues.md) that the release fixes.
+6. Run the test suites and compare with `gltf_viewer` of the new release; see
+   [compare with gltf_viewer](reference-comparison.md).
+
+The CI caches of the SDKs use `FILAMENT_VERSION` in their keys, so the first CI run after a change
+builds or downloads the new SDKs. The web container rebuilds its SDK when the SDK in its volume
+has another version.
 
 ## Publish a release
 

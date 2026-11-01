@@ -54,19 +54,19 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .deps/filament-linux
-          key: filament-linux-x86_64-manylinux228-${{ hashFiles('tools/build_filament_linux.py', 'tools/ci_linux.sh') }}
+          key: filament-linux-x86_64-manylinux228-${{ hashFiles('FILAMENT_VERSION', 'tools/build_filament_linux.py', 'tools/ci_linux.sh') }}
       - name: Cache Windows SDK
         if: runner.os == 'Windows'
         uses: actions/cache@v6
         with:
           path: .deps
-          key: filament-windows-x86_64-${{ hashFiles('tools/fetch_filament.py') }}
+          key: filament-windows-x86_64-${{ hashFiles('FILAMENT_VERSION', 'tools/fetch_filament.py') }}
       - name: Cache macOS SDK
         if: runner.os == 'macOS'
         uses: actions/cache@v6
         with:
           path: .deps
-          key: filament-macos-arm64-${{ hashFiles('tools/fetch_filament.py') }}
+          key: filament-macos-arm64-${{ hashFiles('FILAMENT_VERSION', 'tools/fetch_filament.py') }}
       - name: Build, repair, audit, and test wheels
         uses: pypa/cibuildwheel@v4.2.1
         env:

@@ -74,6 +74,8 @@ namespace f = filament;
 namespace g = filament::gltfio;
 namespace m = filament::math;
 
+const char* filament_version() noexcept { return FILLY_FILAMENT_VERSION; }
+
 void set_log_level(const std::string& level) {
     const std::array<std::string, 6> levels = {"verbose", "debug", "info", "warning", "error", "off"};
     const auto found = std::find(levels.begin(), levels.end(), level);
@@ -227,7 +229,7 @@ struct State {
     // an earlier delete, but it is not needed and leaves more to the driver.
     void delete_views() noexcept {
         if (stale_views.empty() || !interop->shared() || !interop->host_current()) return;
-        if (engine) flush_and_wait(*engine);
+        if (engine) engine->flushAndWait();
         for (auto name : stale_views) interop->delete_host_texture(name);
         stale_views.clear();
     }
@@ -535,7 +537,7 @@ struct Staging {
     Slot& take(f::Engine& engine) {
         auto& slot = slots[next];
         next = (next + 1) % slots.size();
-        if (slot.busy) flush_and_wait(engine);
+        if (slot.busy) engine.flushAndWait();
         if (slot.busy) throw FillyError("A previous upload did not complete");
         if (!slot.bytes) slot.bytes = std::make_unique<uint8_t[]>(size);
         slot.busy = true;
@@ -572,7 +574,7 @@ struct MeshGeometry {
     // After the asset's renderables are destroyed, because `material` may be bound to them.
     void release(f::Engine& engine) noexcept {
         for (const auto* ring : {&position_upload, &tangent_upload, &uv_upload, &color_upload})
-            if (ring->busy()) { flush_and_wait(engine); break; }
+            if (ring->busy()) { engine.flushAndWait(); break; }
         if (vertices) engine.destroy(vertices);
         if (indices) engine.destroy(indices);
         if (material) engine.destroy(material);
@@ -1177,7 +1179,7 @@ void build_pending_irradiance(EnvironmentData& environment) {
     environment.irradiance = prefilter->irradiance()(options, source);
     engine.destroy(source);
     // Loading, not the first frame, pays for the filter's GPU work.
-    flush_and_wait(engine);
+    engine.flushAndWait();
 }
 
 // `only` limits the update to one new model of the scene. The others already have the scene's
@@ -1450,7 +1452,7 @@ g::FilamentInstance* create_instance(State& state, AssetData& shared, std::vecto
 
 void State::close() noexcept {
     if (!engine) return;
-    flush_and_wait(*engine);
+    engine->flushAndWait();
     prefilter.reset();
     // Dependents are registered after their owners and must be destroyed first.
     for (auto it = resources.rbegin(); it != resources.rend(); ++it)
@@ -2110,7 +2112,7 @@ bool PickQuery::ready() {
 #if defined(__EMSCRIPTEN__)
         // The single-threaded driver checks readback fences only when it runs; WebGL signals
         // them between turns of the event loop.
-        detail::flush_and_wait(*state.engine);
+        state.engine->flushAndWait();
 #else
         // Filament checks the readback's fence when a later frame begins or in finish(); the
         // callback then waits in the message queue. A caller that renders only after changes
@@ -2308,7 +2310,7 @@ void Renderer::submit(const Scene& scene, detail::TargetData& target, const Rend
 void Renderer::finish() {
     state_->check();
     const auto start = std::chrono::steady_clock::now();
-    detail::flush_and_wait(*state_->engine);
+    state_->engine->flushAndWait();
     state_->stats.finish_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 namespace detail {
@@ -2675,7 +2677,7 @@ std::shared_ptr<detail::AssetData> load_asset_data(const std::shared_ptr<detail:
         }
         if (!resources.loadResources(asset)) throw AssetError("Could not load glTF resources");
         // Upload lifetimes do not need this wait.
-        if (wait) detail::flush_and_wait(*state->engine);
+        if (wait) state->engine->flushAndWait();
     }
     // gltfio keeps its own copy of the document, and the parse points into it and into the
     // buffers that preparation loaded.
@@ -3418,19 +3420,13 @@ void Node::set_transforms(const std::vector<Node>& nodes, const ValueArray& tran
     }
     if (!state) return;
     auto& tm = state->engine->getTransformManager();
-    // One world-transform update for the whole batch, instead of one per node and its subtree.
-    tm.openLocalTransformTransaction();
-    try {
-        for (size_t i = 0; i < nodes.size(); ++i) {
-            const auto entity = utils::Entity::import(nodes[i].entity_);
-            tm.setTransform(tm.getInstance(entity), matrix(matrix_at(transforms, i)));
-            nodes[i].data_->mark_bones(entity);
-        }
-    } catch (...) {
-        tm.commitLocalTransformTransaction();
-        throw;
+    // TransformManager defers world-transform updates to the next read or frame, so the whole
+    // batch costs one update.
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const auto entity = utils::Entity::import(nodes[i].entity_);
+        tm.setTransform(tm.getInstance(entity), matrix(matrix_at(transforms, i)));
+        nodes[i].data_->mark_bones(entity);
     }
-    tm.commitLocalTransformTransaction();
 }
 
 void Material::set_parameters(const std::vector<Material>& materials, MaterialParameter parameter,
@@ -3501,7 +3497,7 @@ void RenderTarget::close() {
     data_->state->check_thread();
     if (!data_->target || !data_->state->engine) return;
     data_->release();
-    detail::flush_and_wait(*data_->state->engine);
+    data_->state->engine->flushAndWait();
 }
 namespace detail {
 struct ReadbackData {
@@ -3603,7 +3599,7 @@ bool Readback::ready() {
     if (!data.complete) {
         // The single-threaded driver checks the readback's fence when it runs; the callback then
         // arrives through the message queue.
-        detail::flush_and_wait(*state.engine);
+        state.engine->flushAndWait();
         state.engine->pumpMessageQueues();
         if (data.complete)
             state.stats.readback_ms = std::chrono::duration<double, std::milli>(
@@ -3700,7 +3696,7 @@ void ImportedTarget::close() {
     // Without the host context, only Filament's side can be fenced; see Renderer::close().
     if (data_->state->interop->host_current()) data_->state->interop->finish_host();
     data_->release();
-    detail::flush_and_wait(*data_->state->engine);
+    data_->state->engine->flushAndWait();
     data_->state->delete_views();
 }
 

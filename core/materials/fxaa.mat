@@ -14,7 +14,7 @@ material {
     depthWrite : false,
     depthCulling : false,
     flipUV : false,
-    variantFilter : [ directionalLighting, shadowReceiver, skinning, fog, vsm, ssr, stereo ],
+    variantFilter : [ shadowReceiver, skinning, fog, vsm, ssr, stereo ],
     parameters : [
         { type : sampler2d, name : ldr, format : float, precision : high },
         { type : float4, name : texel, precision : high },

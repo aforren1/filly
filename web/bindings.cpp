@@ -338,6 +338,7 @@ EMSCRIPTEN_BINDINGS(filly) {
                +[](Stats&, val) {});
 
     function("setLogLevel", &set_log_level);
+    function("filamentVersion", optional_override([] { return std::string(filament_version()); }));
     function("setTransforms", optional_override([](const val& nodes, const val& transforms) {
         const auto items = items_of<Node>(nodes);
         const auto values = numbers<float>(transforms, "transforms");

@@ -1,7 +1,7 @@
 # filly and Filament
 
 This page is for users and contributors who know Google Filament. It maps filly's concepts to
-Filament 1.77.1 and gltfio, explains where filly differs, and lists the places where filly
+Filament 1.79.0 and gltfio, explains where filly differs, and lists the places where filly
 depends on Filament internals. For the full design, see [design and limits](design.md). For the
 Filament defects and gaps that filly works around, with the data for upstream issues, see
 [upstream Filament issues](../reference/upstream-issues.md).
@@ -153,7 +153,7 @@ needs. The linked sections give the measurements.
 
 ### glTF extensions
 
-| Extension | gltfio 1.77.1 | filly |
+| Extension | gltfio 1.79.0 | filly |
 | --- | --- | --- |
 | `KHR_materials_unlit`, `clearcoat`, `sheen`, `transmission`, `volume`, `ior`, `specular`, `dispersion`, `pbrSpecularGlossiness`, `variants` | Yes | Through gltfio, with filly's material entries |
 | `KHR_materials_emissive_strength` | Yes, but the strength applies twice | Corrected |

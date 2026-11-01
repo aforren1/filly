@@ -93,12 +93,12 @@ while other GPU work ran):
 - **Buffer mapping.** WebGL2 cannot map buffers. Emscripten emulates mapping only with
   `FULL_ES3`, whose binding cache goes stale when the page calls WebGL itself. The web build
   links stubs that return no mapping; Filament then uses `glBufferSubData`.
-- **`flushAndWait()`.** In Filament 1.77.1's single-threaded build, `Engine::flushAndWait()`
-  runs only command buffers that an earlier flush submitted. Commands queued since then,
-  including the `finish()` it adds, wait for the next flush. filly frees the source buffers of an
-  asset after that wait, so the vertex uploads of the next render read freed memory, and models
-  rendered garbled at random. filly flushes first (`detail::flush_and_wait()`); a browser test
-  checks that no upload remains after a load.
+- **`flushAndWait()`.** Before Filament 1.79.0, the single-threaded build's
+  `Engine::flushAndWait()` ran only command buffers that an earlier flush submitted. Commands
+  queued since then, including the `finish()` it adds, waited for the next flush. filly frees the
+  source buffers of an asset after that wait, so the vertex uploads of the next render read freed
+  memory, and models rendered garbled at random. Filament 1.79.0 fixed this (google/filament
+  #10591); a browser test still checks that no upload remains after a load.
 - **RTTI.** Filament's WebAssembly libraries have no RTTI, and filly subclasses their types, so
   the core uses no `dynamic_pointer_cast`.
 - **Exceptions.** The core throws C++ exceptions as on the desktop, as WebAssembly exceptions.

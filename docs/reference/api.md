@@ -15,6 +15,16 @@ retaining warnings and errors. Use `"verbose"` to restore all native log streams
 is not called, Filament's default output is unchanged. This setting does not affect PsychoPy
 logging, Python exceptions, or direct output that bypasses Filament's log streams.
 
+## Versions
+
+| Name | Value |
+| --- | --- |
+| `filly.__version__` | The version of the filly package, such as `"0.4.0"` |
+| `filly.filament_version` | The Filament release that the native module links, such as `"1.79.0"` |
+
+The web build has `await filamentVersion()`, and the MATLAB and Octave frontend has
+`filly.filamentVersion()`. All builds of one filly version link the same Filament release.
+
 ## Renderer
 
 `Renderer(*, shared_context=None)` creates an OpenGL renderer.

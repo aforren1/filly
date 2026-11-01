@@ -15,7 +15,9 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=$(realpath -m "${1:-$REPO/build/web}")
 WORK=$(realpath -m "${2:-$HOME/filly-web}")
-for required in "$WORK/sdk/include/filament/Engine.h" "$WORK/host-tools/matc" "$WORK/emsdk/emsdk_env.sh"; do
+# build_filament_web.sh keeps the host tools of each Filament release in their own folder.
+TOOLS=$WORK/host-tools-$(tr -d '[:space:]' < "$REPO/FILAMENT_VERSION")
+for required in "$WORK/sdk/include/filament/Engine.h" "$TOOLS/matc" "$WORK/emsdk/emsdk_env.sh"; do
     if [[ ! -e "$required" ]]; then
         echo "Missing $required; run web/tools/build_filament_web.sh $WORK first" >&2
         exit 1
@@ -28,7 +30,7 @@ source "$WORK/emsdk/emsdk_env.sh" >/dev/null 2>&1
 # The build tree stays on the build machine's file system; WSL builds from /mnt/c are slow.
 BUILD=$WORK/filly-build
 emcmake cmake -S "$REPO" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-    -DFILAMENT_ROOT="$WORK/sdk" -DFILLY_MATERIAL_TOOLS="$WORK/host-tools" -DFILLY_WEB_SIMD="${FILLY_WEB_SIMD:-OFF}"
+    -DFILAMENT_ROOT="$WORK/sdk" -DFILLY_MATERIAL_TOOLS="$TOOLS" -DFILLY_WEB_SIMD="${FILLY_WEB_SIMD:-OFF}"
 cmake --build "$BUILD" -j "${JOBS:-$(nproc)}"
 
 mkdir -p "$OUT"

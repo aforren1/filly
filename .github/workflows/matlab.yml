@@ -38,6 +38,7 @@ on:
       - 'tools/ci_linux.sh'
       - 'tools/build_filament_linux.py'
       - 'tools/fetch_filament.py'
+      - 'FILAMENT_VERSION'
       - 'tools/check_native_imports.py'
       - 'samples/**'
       - '.github/workflows/matlab.yml'
@@ -51,6 +52,7 @@ on:
       - 'tools/ci_linux.sh'
       - 'tools/build_filament_linux.py'
       - 'tools/fetch_filament.py'
+      - 'FILAMENT_VERSION'
       - 'tools/check_native_imports.py'
       - 'samples/**'
       - '.github/workflows/matlab.yml'
@@ -87,7 +89,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .deps
-          key: filament-windows-x86_64-${{ hashFiles('tools/fetch_filament.py') }}
+          key: filament-windows-x86_64-${{ hashFiles('FILAMENT_VERSION', 'tools/fetch_filament.py') }}
       - name: Fetch the Filament SDK
         run: python tools/fetch_filament.py
       - id: matlab
@@ -157,7 +159,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .deps
-          key: filament-windows-x86_64-${{ hashFiles('tools/fetch_filament.py') }}
+          key: filament-windows-x86_64-${{ hashFiles('FILAMENT_VERSION', 'tools/fetch_filament.py') }}
       - name: Fetch the Filament SDK
         run: python tools/fetch_filament.py
       - name: Cache Octave
@@ -247,7 +249,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .deps/filament-linux
-          key: filament-linux-x86_64-manylinux228-${{ hashFiles('tools/build_filament_linux.py', 'tools/ci_linux.sh') }}
+          key: filament-linux-x86_64-manylinux228-${{ hashFiles('FILAMENT_VERSION', 'tools/build_filament_linux.py', 'tools/ci_linux.sh') }}
       - name: Build the SDK
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
@@ -267,7 +269,7 @@ jobs:
       - uses: actions/cache/restore@v6
         with:
           path: .deps/filament-linux
-          key: filament-linux-x86_64-manylinux228-${{ hashFiles('tools/build_filament_linux.py', 'tools/ci_linux.sh') }}
+          key: filament-linux-x86_64-manylinux228-${{ hashFiles('FILAMENT_VERSION', 'tools/build_filament_linux.py', 'tools/ci_linux.sh') }}
           fail-on-cache-miss: true
       # For its headers and libmx/libmex only: nothing in this job runs MATLAB.
       - id: matlab
@@ -454,7 +456,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .deps
-          key: filament-macos-arm64-${{ hashFiles('tools/fetch_filament.py') }}
+          key: filament-macos-arm64-${{ hashFiles('FILAMENT_VERSION', 'tools/fetch_filament.py') }}
       - name: Fetch the Filament SDK
         run: python tools/fetch_filament.py
       - name: Install Ninja and Octave
@@ -557,4 +559,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" packages/*.zip --repo "$GITHUB_REPOSITORY" \
-            --title "filly $VERSION" --generate-notes
+            --title "filly $VERSION" --notes "Built with Filament $(cat FILAMENT_VERSION)." --generate-notes

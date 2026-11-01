@@ -219,7 +219,7 @@ void ImportedTexture::close() {
     if (data_->state->interop->host_current()) data_->state->interop->finish_host();
     data_->writing = false;
     data_->release();
-    detail::flush_and_wait(*data_->state->engine);
+    data_->state->engine->flushAndWait();
     data_->state->delete_views();
 }
 

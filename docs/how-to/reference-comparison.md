@@ -1,14 +1,14 @@
 # Compare with gltf_viewer
 
 Use `tools/compare_reference.py` to compare filly output with Filament's `gltf_viewer`.
-Both come from Filament 1.77.1. This is the only parity target that uses the same engine,
+Both come from Filament 1.79.0. This is the only parity target that uses the same engine,
 the same gltfio loader, and the same shaders. Khronos reference images use other renderers
 and other lighting, so they cannot show pixel parity.
 
 ## Requirements
 
 - A built filly package in `.venv`.
-- `.deps/bin/gltf_viewer.exe` from the Filament 1.77.1 Windows release.
+- `.deps/bin/gltf_viewer.exe` from the Filament 1.79.0 Windows release.
 - Khronos sample assets in `.deps/sample-audit/assets`. To get them, run
   `uv run --no-sync python tools/check_sample_assets.py --download-only`.
 - An OpenGL 4.5 driver. The tool renders both sides with OpenGL.

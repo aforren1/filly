@@ -3,14 +3,14 @@
 # gl_interop.cpp; Emscripten builds use WebGL2 through gl_interop_web.cpp.
 #
 # Inputs:
-#   FILAMENT_ROOT         Filament 1.77.1 SDK: the desktop SDK (docs/how-to/build.md), or the
+#   FILAMENT_ROOT         Filament 1.79.0 SDK: the desktop SDK (docs/how-to/build.md), or the
 #                         WebAssembly SDK from web/tools/build_filament_web.sh
-#   FILLY_MATERIAL_TOOLS  matc and uberz of Filament 1.77.1 for the build machine
+#   FILLY_MATERIAL_TOOLS  matc and uberz of Filament 1.79.0 for the build machine
 #                         (materials/output.cmake)
 set(FILLY_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(EMSCRIPTEN)
-  set(FILAMENT_ROOT "" CACHE PATH "Filament 1.77.1 WebAssembly SDK directory")
+  set(FILAMENT_ROOT "" CACHE PATH "Filament 1.79.0 WebAssembly SDK directory")
   if(NOT EXISTS "${FILAMENT_ROOT}/include/filament/Engine.h")
     message(FATAL_ERROR "Set FILAMENT_ROOT to the WebAssembly SDK from web/tools/build_filament_web.sh")
   endif()
@@ -45,7 +45,7 @@ else()
   else()
     set(_sdk "${PROJECT_SOURCE_DIR}/.deps")
   endif()
-  set(FILAMENT_ROOT "${_sdk}" CACHE PATH "Filament 1.77.1 SDK directory")
+  set(FILAMENT_ROOT "${_sdk}" CACHE PATH "Filament 1.79.0 SDK directory")
   if(NOT EXISTS "${FILAMENT_ROOT}/include/filament/Engine.h")
     message(FATAL_ERROR "Filament SDK missing. See docs/how-to/build.md for the platform SDK and FILAMENT_ROOT.")
   endif()
@@ -88,6 +88,25 @@ else()
     list(APPEND FILAMENT_LIBRARIES bluevk)
   endif()
 endif()
+
+# The Filament release of every build, which the frontends report (filly.filament_version). The
+# SDK headers carry no release number, only MATERIAL_VERSION, which equals the minor version
+# (checked for 1.65 to 1.79), so a wrong minor version fails here; a wrong patch level does not.
+file(STRINGS "${PROJECT_SOURCE_DIR}/FILAMENT_VERSION" FILLY_FILAMENT_VERSION LIMIT_COUNT 1)
+if(NOT FILLY_FILAMENT_VERSION MATCHES "^1\\.([0-9]+)\\.[0-9]+$")
+  message(FATAL_ERROR "FILAMENT_VERSION must hold one version such as 1.79.0, not '${FILLY_FILAMENT_VERSION}'")
+endif()
+set(FILLY_MATERIAL_VERSION "${CMAKE_MATCH_1}")
+file(STRINGS "${FILAMENT_ROOT}/include/filament/MaterialEnums.h" _line REGEX "MATERIAL_VERSION = [0-9]+")
+string(REGEX MATCH "MATERIAL_VERSION = ([0-9]+)" _ignored "${_line}")
+set(_material "${CMAKE_MATCH_1}")
+if(NOT _material STREQUAL FILLY_MATERIAL_VERSION)
+  message(FATAL_ERROR "The SDK in ${FILAMENT_ROOT} has material version '${_material}', but filly "
+    "needs Filament ${FILLY_FILAMENT_VERSION} (material version ${FILLY_MATERIAL_VERSION}). Fetch or build that SDK; "
+    "see docs/how-to/build.md.")
+endif()
+message(STATUS "Filament ${FILLY_FILAMENT_VERSION}")
+
 foreach(name IN LISTS FILAMENT_LIBRARIES)
   add_library(filament_sdk_${name} STATIC IMPORTED)
   set_target_properties(filament_sdk_${name} PROPERTIES
@@ -109,6 +128,7 @@ add_library(filly_core STATIC renderer.cpp output_pass.cpp archive_materials.cpp
   shapes.cpp webp_provider.cpp
   vendor/meshoptimizer/vertexcodec.cpp vendor/meshoptimizer/indexcodec.cpp vendor/meshoptimizer/vertexfilter.cpp)
 target_compile_features(filly_core PUBLIC cxx_std_20)
+target_compile_definitions(filly_core PRIVATE FILLY_FILAMENT_VERSION="${FILLY_FILAMENT_VERSION}")
 target_include_directories(filly_core PUBLIC "${FILLY_CORE_DIR}"
   PRIVATE "${FILAMENT_ROOT}/include" "${libwebp_SOURCE_DIR}/src")
 target_link_libraries(filly_core PRIVATE filly_output_materials filly_material_archive webpdecoder)
