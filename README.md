@@ -12,7 +12,7 @@ One C++ renderer has three frontends:
 
 The frontends have the same objects, names (in each language's style), and behavior.
 
-![A wooden playground horse rocking on its spring, rendered with filly](docs/images/horse.gif)
+![A wooden playground horse rocking on its spring, rendered with filly](docs/images/horse.webp)
 
 *"[Wooden Playground Horse](https://sketchfab.com/3d-models/wooden-playground-horse-aa1c440f48a44e558dcc9097b35a6a6d)" by [Batuhan13](https://sketchfab.com/Batuhan13),
 [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/). See [attribution](examples/assets/ATTRIBUTION.md).*
@@ -151,7 +151,7 @@ Python examples are in `examples/python/`:
 
 | Example | Shows |
 | --- | --- |
-| `screenshot.py` | The animation above (`--gif`), or a still image, rendered offscreen. |
+| `screenshot.py` | The animation above (`--animation`), or a still image, rendered offscreen. |
 | `psychopy_shared.py` | A model in a PsychoPy window with all the bells and whistles. Pass your own GLB path. |
 | `psychopy_stress.py` | Repeated PsychoPy trials, with frame timing and memory reports. See [measure timing](docs/how-to/stress-test.md). |
 | `pyglet_shared.py`, `moderngl_shared.py`, `zengl_shared.py` | The same (minus the bells and whistles) in other OpenGL hosts. |
@@ -159,6 +159,7 @@ Python examples are in `examples/python/`:
 | `stereo.py` | Two cameras side by side in one window. |
 | `shapes.py` | Generated and deforming meshes. |
 | `pick.py` | Click a model in a pyglet window: picking, with the hit node, point, and latency. `--auto` clicks by itself. |
+| `host_sync.py` | A moving bar across a pyglet window and a filly inset, to show that they draw the same frame. L adds a lag for comparison. |
 
 MATLAB and Octave examples are in `examples/matlab/`:
 

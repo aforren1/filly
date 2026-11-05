@@ -74,12 +74,11 @@ def setup_scene(renderer, source=None, spin=False):
     return scene, model
 
 
-def save_gif(output, width, height, fps, sway):
-    """Render one cycle of the spring clip as a looping GIF.
+def save_animation(output, width, height, fps, sway):
+    """Render one cycle of the spring clip as a looping animated WebP.
 
     The yaw sways by `sway` degrees with the same period as the clip, so the last frame leads
-    back into the first. One palette for all frames keeps the colors from flickering. Error
-    diffusion is off: it made no visible difference at this size and cost 30% more bytes.
+    back into the first.
     """
     # The sphere fit leaves room for the sway and the rock, so render larger and crop to the area
     # the horse covers over the whole cycle. One crop for all frames keeps the loop steady.
@@ -111,43 +110,39 @@ def save_gif(output, width, height, fps, sway):
     crop = (left, top, left + int(round(crop_w)), top + int(round(crop_h)))
     frames = [Image.fromarray(image).crop(crop).resize((width, height), Image.Resampling.LANCZOS)
               for image in rendered]
-    # Build the shared palette from a strip of frames spread over the cycle.
-    sample = frames[:: max(1, count // 8)]
-    strip = Image.new("RGB", (width, height * len(sample)))
-    for row, frame in enumerate(sample):
-        strip.paste(frame, (0, row * height))
-    palette = strip.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
-    indexed = [frame.quantize(palette=palette, dither=Image.Dither.NONE) for frame in frames]
     output.parent.mkdir(parents=True, exist_ok=True)
-    # GIF delays are in 10 ms steps. Round the clip's frame interval to the nearest step, so the
-    # loop plays within 5% of the authored speed.
-    delay = max(10, int(round(period / count * 100)) * 10)
-    indexed[0].save(output, save_all=True, append_images=indexed[1:], duration=delay,
-                    loop=0, optimize=True, disposal=1)
+    # Quality 70 looks blocky on the horse's edges. 85 is the lowest tested setting that does not.
+    frames[0].save(output, save_all=True, append_images=frames[1:],
+                   duration=round(period / count * 1000), loop=0, lossless=False,
+                   quality=85, method=6)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--output", type=Path, default=None,
-                        help="Default: docs/images/horse.png, or horse.gif with --gif")
-    parser.add_argument("--width", type=int, default=None, help="Default: 1200, or 600 with --gif")
-    parser.add_argument("--height", type=int, default=None, help="Default: 800, or 400 with --gif")
+                        help="Default: docs/images/horse.png, or horse.webp with --animation")
+    parser.add_argument("--width", type=int, default=None,
+                        help="Default: 1200, or 600 with --animation")
+    parser.add_argument("--height", type=int, default=None,
+                        help="Default: 800, or 400 with --animation")
     parser.add_argument("--time", type=float, default=POSE_SECONDS, help="Pose time in seconds")
-    parser.add_argument("--gif", action="store_true", help="Render one looping cycle of the animation")
-    parser.add_argument("--fps", type=int, default=15, help="GIF frame rate")
-    parser.add_argument("--sway", type=float, default=20.0, help="GIF yaw sway in degrees")
+    parser.add_argument("--animation", action="store_true",
+                        help="Render one looping cycle of the animation as WebP")
+    parser.add_argument("--fps", type=int, default=50, help="Animation frame rate")
+    parser.add_argument("--sway", type=float, default=20.0, help="Animation yaw sway in degrees")
     args = parser.parse_args()
-    args.width = args.width or (600 if args.gif else 1200)
-    args.height = args.height or (400 if args.gif else 800)
-    args.output = args.output or ROOT / "docs/images" / ("horse.gif" if args.gif else "horse.png")
+    args.width = args.width or (600 if args.animation else 1200)
+    args.height = args.height or (400 if args.animation else 800)
+    default_name = "horse.webp" if args.animation else "horse.png"
+    args.output = args.output or ROOT / "docs/images" / default_name
     if args.width <= 0 or args.height <= 0:
         parser.error("Dimensions must be positive")
     if not np.isfinite(args.time) or args.time < 0:
         parser.error("--time must be finite and nonnegative")
     if not 1 <= args.fps <= 50 or not np.isfinite(args.sway):
         parser.error("--fps must be from 1 through 50 and --sway finite")
-    if args.gif:
-        save_gif(args.output, args.width, args.height, args.fps, args.sway)
+    if args.animation:
+        save_animation(args.output, args.width, args.height, args.fps, args.sway)
         print(args.output)
         return
     with filly.Renderer() as renderer:

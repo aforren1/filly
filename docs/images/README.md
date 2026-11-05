@@ -12,15 +12,15 @@ credited to Khronos, copyright 2019 Public, under CC0.
 
 ## Wooden playground horse
 
-`horse.gif`, shown in the README, and `horse.png` are rendered by `examples/python/screenshot.py` with
-filly. Run `uv run --no-sync python examples/python/screenshot.py --gif` for the animation and
+`horse.webp`, shown in the README, and `horse.png` are rendered by `examples/python/screenshot.py` with
+filly. Run `uv run --no-sync python examples/python/screenshot.py --animation` for the animation and
 `uv run --no-sync python examples/python/screenshot.py` for the still image.
 
-The animation is one cycle of the horse's spring clip, 74 frames at 15 frames per second and
+The animation is one cycle of the horse's spring clip, 248 frames at 50 frames per second and
 600 by 400 pixels, with a 20-degree yaw sway that has the same period, so it loops without a
 jump. The script renders at twice that size, crops to the area the horse covers over the
-whole cycle, and scales down. All frames share one 256-color palette, without error
-diffusion, which keeps the file at about 2.2 MB.
+whole cycle, and scales down. It saves lossy WebP at quality 85, which keeps the file at about
+1.3 MB.
 The script requires Pillow, available through the `examples` extra. Two runs on the same machine
 give byte-identical files.
 
