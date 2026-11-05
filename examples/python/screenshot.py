@@ -111,10 +111,13 @@ def save_animation(output, width, height, fps, sway):
     frames = [Image.fromarray(image).crop(crop).resize((width, height), Image.Resampling.LANCZOS)
               for image in rendered]
     output.parent.mkdir(parents=True, exist_ok=True)
+    # WebP delays are whole milliseconds, and one flat delay plays 2% slow at 60 fps. Rounding the
+    # frame times instead mixes neighboring delays, so the loop keeps the clip's period.
+    times = np.round(np.arange(count + 1) * period * 1000 / count)
+    delays = np.diff(times).astype(int).tolist()
     # Quality 70 looks blocky on the horse's edges. 85 is the lowest tested setting that does not.
-    frames[0].save(output, save_all=True, append_images=frames[1:],
-                   duration=round(period / count * 1000), loop=0, lossless=False,
-                   quality=85, method=6)
+    frames[0].save(output, save_all=True, append_images=frames[1:], duration=delays, loop=0,
+                   lossless=False, quality=85, method=6)
 
 
 def main():
@@ -128,7 +131,8 @@ def main():
     parser.add_argument("--time", type=float, default=POSE_SECONDS, help="Pose time in seconds")
     parser.add_argument("--animation", action="store_true",
                         help="Render one looping cycle of the animation as WebP")
-    parser.add_argument("--fps", type=int, default=50, help="Animation frame rate")
+    # 60 divides evenly into 60 and 120 Hz displays. 50 holds some frames longer than others there.
+    parser.add_argument("--fps", type=int, default=60, help="Animation frame rate")
     parser.add_argument("--sway", type=float, default=20.0, help="Animation yaw sway in degrees")
     args = parser.parse_args()
     args.width = args.width or (600 if args.animation else 1200)
@@ -139,8 +143,8 @@ def main():
         parser.error("Dimensions must be positive")
     if not np.isfinite(args.time) or args.time < 0:
         parser.error("--time must be finite and nonnegative")
-    if not 1 <= args.fps <= 50 or not np.isfinite(args.sway):
-        parser.error("--fps must be from 1 through 50 and --sway finite")
+    if not 1 <= args.fps <= 60 or not np.isfinite(args.sway):
+        parser.error("--fps must be from 1 through 60 and --sway finite")
     if args.animation:
         save_animation(args.output, args.width, args.height, args.fps, args.sway)
         print(args.output)
