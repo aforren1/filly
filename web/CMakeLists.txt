@@ -3,9 +3,13 @@
 # root with Emscripten's toolchain file; web/tools/build_filly_web.sh does that. The core's
 # CMakeLists.txt has the web inputs and options (FILAMENT_ROOT, FILLY_WEB_SIMD).
 
+# version() reports FILLY_VERSION, the version of the git tags.
+include("${PROJECT_SOURCE_DIR}/core/version.cmake")
+
 add_executable(filly_web bindings.cpp)
 set_target_properties(filly_web PROPERTIES OUTPUT_NAME filly-core SUFFIX ".js")
 target_link_libraries(filly_web PRIVATE filly_core)
+target_compile_definitions(filly_web PRIVATE FILLY_VERSION="${FILLY_VERSION}")
 target_link_options(filly_web PRIVATE -lembind
   -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createFillyModule -sENVIRONMENT=web
   -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2

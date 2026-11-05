@@ -7,15 +7,18 @@ page draws with its own WebGL2 renderer. For the design, see [the web build](../
 
 - A browser with WebGL2.
 - The files of filly's web build: `filly.js`, `filly-core.js`, and `filly-core.wasm`, in one
-  folder that the page can load. See [build for the web](build.md#build-for-the-web).
+  folder that the page can load. Each `v<version>` release on GitHub has them in
+  `filly-web-<version>.zip`, with the licenses of the code that they contain. The npm package
+  `@aforren1/filly` has the same files. To build them, see
+  [build for the web](build.md#build-for-the-web).
 - An HTTP server. Browsers do not load WebAssembly modules from `file://` pages. The server must
   send `.js` files with a JavaScript type, because browsers do not run modules of other types.
   The server can send `.wasm` files as `application/wasm` for faster loading; other types also
   work. The files use `.js`, not `.mjs`: on Windows, `python -m http.server` can send `.mjs` as
   `text/plain`.
 
-To see the Filament release that the build links, call `await filamentVersion()` from
-`filly.js`.
+To see the version of the build, call `await version()` from `filly.js`. To see the Filament
+release that it links, call `await filamentVersion()`.
 
 The page does not have to be cross-origin isolated. If it is (COOP and COEP headers), serve
 filly's files from the same origin.

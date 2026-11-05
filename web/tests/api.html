@@ -4,7 +4,7 @@
 <html><body><canvas width="16" height="16"></canvas>
 <script type="module">
 import { AssetError, createRenderer, filamentVersion, FillyError, ImportedTexture, setMaterialParameters, setMorphWeights, setTransforms,
-	shapes, Texture } from "./filly/filly.js";
+	shapes, Texture, version } from "./filly/filly.js";
 
 const gl = document.querySelector("canvas").getContext("webgl2");
 const renderer = await createRenderer(gl);
@@ -730,6 +730,7 @@ await check("readback", async () =>
 
 results.platform = renderer.glPlatform;
 results.filamentVersion = await filamentVersion();
+results.version = await version();
 results.framesRendered = renderer.stats.framesRendered;
 renderer.close();
 window.testResult = results;

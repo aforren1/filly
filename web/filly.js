@@ -112,6 +112,13 @@ export const shapes = {
 		callNative(moduleNow(), () => moduleNow().shapeCylinder(radius, height, segments, caps)),
 };
 
+/** The version of this build, the same as the Python package's, such as "0.4.0". */
+export async function version()
+{
+	const module = await loadModule();
+	return module.version();
+}
+
 /** The Filament release that this build links, such as "1.79.0". */
 export async function filamentVersion()
 {

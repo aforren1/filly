@@ -27,7 +27,8 @@ name: MATLAB and Octave
 #   first release for Apple silicon, and Homebrew's Octave, and run the gateway tests in both.
 #
 # The Python wheels have their own workflow; the paths below keep this one off changes that
-# cannot affect the MEX files. Path filters do not apply to tag pushes.
+# cannot affect the MEX files. Path filters do not apply to tag pushes. On a tag, this workflow
+# also calls web.yml, so that the GitHub release includes the web build.
 on:
   workflow_dispatch:
   pull_request:
@@ -526,16 +527,23 @@ jobs:
         with:
           command: cd matlab/tests; assert(run_tests('test_gateway*') == 0, 'filly:test', 'gateway tests failed')
 
+  # ================================================================== Web =====
+  # The web build (web.yml) uploads the filly-web artifact for the release. It runs here on a tag
+  # only; for pull requests and pushes, web.yml runs on its own.
+  web:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/web.yml
+
   # ============================================================== Release =====
-  # On a v<version> tag, publish the packages that every test above ran on. The gateway tests
-  # checked that their version matches the tag.
+  # On a v<version> tag, publish the packages that every test above ran on. The gateway tests and
+  # the web tests checked that their version matches the tag.
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
     # Every job that uploads a package must be here: the download takes all filly-* artifacts
     # that exist when this job starts.
     needs: [windows-build, windows-forward, windows-octave-build, windows-octave-forward, linux-build,
-            matlab-linux-test, octave-test, octave-ptb, macos-build, macos-forward]
+            matlab-linux-test, octave-test, octave-ptb, macos-build, macos-forward, web]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -560,3 +568,37 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" packages/*.zip --repo "$GITHUB_REPOSITORY" \
             --title "filly $VERSION" --notes "Built with Filament $(cat FILAMENT_VERSION)." --generate-notes
+
+  # ================================================================== npm =====
+  # After the GitHub release, publish its web build to npm as @aforren1/filly, with npm trusted
+  # publishing: no token is stored here. npm checks this workflow's file name (matlab.yml). A
+  # version that npm already has is skipped, so a re-run and a version published by hand pass.
+  npm:
+    name: Publish to npm
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: filly-web
+          path: filly-web
+      # Trusted publishing needs npm 11.5.1 or later; Node 24 comes with npm 11.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Publish @aforren1/filly
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          bash web/tools/make_npm_package.sh filly-web "$RUNNER_TEMP/npm-package" "$version"
+          if npm view "@aforren1/filly@$version" version > /dev/null 2>&1; then
+            echo "npm already has @aforren1/filly@$version"
+            exit 0
+          fi
+          cd "$RUNNER_TEMP/npm-package"
+          npm publish --access public

@@ -2,7 +2,9 @@
 
 Needs the web build in build/web (or FILLY_WEB_BUILD; see docs/how-to/build.md), Node.js,
 `npm install` in web/tests, and a browser: FILLY_TEST_BROWSERS lists chrome, edge, or firefox
-(default chrome), and FILLY_TEST_<BROWSER> overrides the executable path.
+(default chrome), FILLY_TEST_<BROWSER> overrides the executable path, and FILLY_TEST_BROWSER_ARGS
+adds browser arguments (separated by spaces). With FILLY_TEST_REQUIRE_BROWSER set, a missing
+build, Node.js, or browser fails the tests instead of skipping them.
 
 Run with: pytest -m browser
 """
@@ -10,6 +12,7 @@ Run with: pytest -m browser
 import importlib.util
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -102,10 +105,18 @@ def instances_glb():
             + struct.pack("<II", len(binary), 0x004E4942) + binary)
 
 
+def _skip(reason):
+    # CI sets FILLY_TEST_REQUIRE_BROWSER, so that a missing build or browser fails the job
+    # instead of skipping every test.
+    if os.environ.get("FILLY_TEST_REQUIRE_BROWSER"):
+        pytest.fail(reason)
+    pytest.skip(reason)
+
+
 def _web_build():
     build = Path(os.environ.get("FILLY_WEB_BUILD", ROOT / "build" / "web"))
     if not (build / "filly-core.wasm").is_file():
-        pytest.skip(f"no web build in {build}; run web/tools/build_filly_web.sh")
+        _skip(f"no web build in {build}; run web/tools/build_filly_web.sh")
     return build
 
 
@@ -115,11 +126,11 @@ def _run_page(browser, page, folder, wasm_type=None, report=False):
     executable = os.environ.get(f"FILLY_TEST_{browser.upper()}", EXECUTABLES.get(browser, ""))
     node = shutil.which("node")
     if not node:
-        pytest.skip("Node.js is not installed")
+        _skip("Node.js is not installed")
     if not (WEB / "node_modules" / "puppeteer-core").is_dir():
-        pytest.skip("run `npm install` in web/tests first")
+        _skip("run `npm install` in web/tests first")
     if not Path(executable).is_file():
-        pytest.skip(f"{browser} not found at {executable!r}")
+        _skip(f"{browser} not found at {executable!r}")
     build = _web_build()
     if not (folder / "filly").is_dir():
         shutil.copytree(build, folder / "filly")
@@ -189,6 +200,16 @@ def test_platform(page_results):
 def test_filament_version(page_results):
     pinned = (Path(__file__).resolve().parents[2] / "FILAMENT_VERSION").read_text().strip()
     assert page_results["filamentVersion"] == pinned
+
+
+def test_version(page_results):
+    # On a tag push, CI sets FILLY_RELEASE_TAG, so that a build from wrong or missing git history
+    # cannot be released.
+    tag = os.environ.get("FILLY_RELEASE_TAG")
+    if tag:
+        assert "v" + page_results["version"] == tag
+    else:
+        assert re.fullmatch(r"\d+\.\d+\.\d+(\.dev\d+)?", page_results["version"]), page_results["version"]
 
 
 def test_prepare(page_results):

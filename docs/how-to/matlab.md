@@ -435,4 +435,5 @@ with a GPU. CI cannot run them.
 
 After the tag push, CI builds and tests every package again. The gateway tests check that
 `filly.version()` matches the tag. When all jobs pass, the release job zips each package and
-creates the GitHub release for the tag.
+creates the GitHub release for the tag. The release also includes the web build; see
+[automated web build](build.md#automated-web-build).

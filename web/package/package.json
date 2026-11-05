@@ -1,0 +1,21 @@
+{
+  "name": "@aforren1/filly",
+  "version": "0.0.0",
+  "description": "filly's glTF renderer (Filament) for WebGL2 pages that have their own renderer, such as PsychoJS",
+  "keywords": ["gltf", "webgl2", "filament", "pbr", "psychojs", "webassembly"],
+  "license": "MIT",
+  "author": "Alex Forrence",
+  "homepage": "https://github.com/aforren1/filly/blob/main/docs/how-to/web.md",
+  "bugs": "https://github.com/aforren1/filly/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aforren1/filly.git",
+    "directory": "web"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./filly.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["filly.js", "filly-core.js", "filly-core.wasm", "licenses/"]
+}

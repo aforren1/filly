@@ -1,0 +1,158 @@
+name: Web
+
+# Builds the WebAssembly module (web/), tests it in headless Chrome against the desktop module, and
+# uploads it as the filly-web artifact: filly.js, filly-core.js, filly-core.wasm, and licenses/.
+# On a v<version> tag, matlab.yml calls this workflow, and its release job publishes the artifact
+# as filly-web-<version>.zip next to the toolbox packages. Its npm job publishes the same files
+# as @aforren1/filly.
+#
+# - The Filament WebAssembly SDK builds from source (web/tools/build_filament_web.sh), so it is
+#   cached by FILAMENT_VERSION and the script. A cache miss takes much longer than a hit.
+# - Hosted runners have no GPU. Chrome renders with SwiftShader, and the desktop module, which the
+#   tests compare pixels and picks with, renders with Mesa's llvmpipe under Xvfb. The run
+#   deselects the tests that measured SwiftShader's limits, not filly's (see the test step).
+on:
+  workflow_dispatch:
+  workflow_call:
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'core/**'
+      - 'python/**'
+      - 'CMakeLists.txt'
+      - 'pyproject.toml'
+      - 'FILAMENT_VERSION'
+      - 'tools/ci_linux.sh'
+      - 'tools/build_filament_linux.py'
+      - '.github/workflows/web.yml'
+  push:
+    branches: [main, master]
+    paths:
+      - 'web/**'
+      - 'core/**'
+      - 'python/**'
+      - 'CMakeLists.txt'
+      - 'pyproject.toml'
+      - 'FILAMENT_VERSION'
+      - 'tools/ci_linux.sh'
+      - 'tools/build_filament_linux.py'
+      - '.github/workflows/web.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # On a tag push, test_web.py checks that version() matches the tag.
+  FILLY_RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+
+jobs:
+  build:
+    name: build · web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # The tags, for the version.
+      - name: Install Ninja
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ninja-build
+      # Only what build_filly_web.sh reads: not Filament's source or build tree.
+      - id: cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/filly-web/sdk
+            ~/filly-web/emsdk
+            ~/filly-web/cmake
+            ~/filly-web/host-tools-*
+          key: filament-web-${{ hashFiles('FILAMENT_VERSION', 'web/tools/build_filament_web.sh') }}
+      - name: Build the Filament WebAssembly SDK
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash web/tools/build_filament_web.sh "$HOME/filly-web"
+      # Saved now, not at the end of the job, so that a failed filly build keeps the SDK.
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/filly-web/sdk
+            ~/filly-web/emsdk
+            ~/filly-web/cmake
+            ~/filly-web/host-tools-*
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Build filly for the web
+        run: bash web/tools/build_filly_web.sh dist/filly-web "$HOME/filly-web"
+      # Assembled as the release's npm job does, so that a broken package fails before a tag.
+      - name: Check the npm package
+        run: bash web/tools/make_npm_package.sh dist/filly-web "$RUNNER_TEMP/npm-package" 0.0.0-ci.0
+      - uses: actions/upload-artifact@v7
+        with:
+          name: filly-web
+          path: dist/filly-web
+          if-no-files-found: error
+
+  test:
+    name: test · web · Chrome (SwiftShader)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: filly-web
+          path: build/web
+      # The same key and path as the wheel and MATLAB workflows, so that all use one SDK build.
+      - id: linux-sdk
+        uses: actions/cache/restore@v6
+        with:
+          path: .deps/filament-linux
+          key: filament-linux-x86_64-manylinux228-${{ hashFiles('FILAMENT_VERSION', 'tools/build_filament_linux.py', 'tools/ci_linux.sh') }}
+      # The desktop module that the tests compare with, built as the wheels are. ci_linux.sh
+      # installs the compiler and builds the SDK if the cache had none. The version does not
+      # matter here, and git refuses the runner's checkout in the container.
+      - name: Build the desktop module in manylinux_2_28
+        run: |
+          docker run --rm -v "$PWD:/project" -w /project -e SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 \
+            quay.io/pypa/manylinux_2_28_x86_64 bash -euc '
+              bash tools/ci_linux.sh
+              CC=clang CXX=clang++ CMAKE_ARGS=-DFILAMENT_ROOT=/project/.deps/filament-linux \
+                /opt/python/cp312-cp312/bin/python -m pip wheel . --no-deps -w wheelhouse'
+          sudo chown -R "$(id -u):$(id -g)" .
+      - if: steps.linux-sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .deps/filament-linux
+          key: ${{ steps.linux-sdk.outputs.cache-primary-key }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install the desktop module, Xvfb, Mesa, and Puppeteer
+        run: |
+          python -m pip install wheelhouse/*.whl pytest
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb xauth libgl1-mesa-dri libegl1
+          npm ci --prefix web/tests
+          node --version
+          google-chrome --version
+      # Deselected, from a run with SwiftShader on 2026-11-05 (the same tests pass on a GPU):
+      # - test_instances_match_desktop: 2 of 16094 flat pixels differ by 2 levels; the limit is 1.
+      # - test_pick_matches_desktop: a picked depth differs by 1.3e-4; the limit is 1e-4.
+      # - test_gpu_frame_time: SwiftShader reports one timer result (frame 19) for every frame.
+      - name: Run the browser tests
+        env:
+          FILLY_TEST_CHROME: /usr/bin/google-chrome
+          FILLY_TEST_BROWSER_ARGS: --use-angle=swiftshader --enable-unsafe-swiftshader
+          FILLY_TEST_REQUIRE_BROWSER: '1'
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          timeout 1200 xvfb-run -a -s "-screen 0 1024x768x24" python -m pytest web/tests -m browser -q -rfEs \
+            -p no:cacheprovider -o faulthandler_timeout=300 \
+            --deselect web/tests/test_web.py::test_instances_match_desktop \
+            --deselect web/tests/test_web.py::test_pick_matches_desktop \
+            --deselect web/tests/test_web.py::test_gpu_frame_time

@@ -413,6 +413,26 @@ Download wheels from the workflow artifacts. The same workflow builds the sdist 
 releases; see [publish a release](#publish-a-release).
 Source archives are pinned and hash checked; build dependencies and container images are not fully locked.
 
+## Automated web build
+
+[Web](../../.github/workflows/web.yml) runs on pull requests and pushes to `main` or `master`
+that change the web module, the core, or the Python module, and on manual dispatch. On a
+version tag, the MATLAB workflow runs it, so that the release includes the web build.
+
+1. The build job runs `web/tools/build_filament_web.sh` and `web/tools/build_filly_web.sh` on
+   Ubuntu 24.04 and uploads the `filly-web` artifact. It also assembles the npm package with
+   `web/tools/make_npm_package.sh`, so that a broken package fails before a release. The job caches the Filament WebAssembly
+   SDK, emsdk, CMake, and the host tools, with `FILAMENT_VERSION` and the SDK script in the key.
+   A cache miss builds the SDK from source, which takes much longer than a cache hit.
+2. The test job builds the desktop module in `manylinux_2_28`, as the wheels are built, and runs
+   `web/tests` in headless Chrome. The runners have no GPU, so Chrome renders with SwiftShader
+   and the desktop module with Mesa's llvmpipe under Xvfb.
+
+The test job does not run three tests that fail with SwiftShader but pass on a GPU:
+`test_instances_match_desktop` and `test_pick_matches_desktop` (differences just above their
+limits) and `test_gpu_frame_time` (SwiftShader gives one timer result for all frames). Run the
+full browser suite on a machine with a GPU before a release.
+
 ## Change the Filament version
 
 `FILAMENT_VERSION` at the repository root holds the one Filament release of all builds. The SDK
@@ -445,11 +465,29 @@ has another version.
 
 One tag `vX.Y.Z` releases all frontends. The wheel workflow publishes the wheels and the sdist of
 that run to PyPI, after all builds and tests pass. The MATLAB workflow publishes the toolbox
-packages to a GitHub release; see [MATLAB and Octave](matlab.md#publish-a-release).
+packages to a GitHub release; see [MATLAB and Octave](matlab.md#publish-a-release). On the tag,
+the MATLAB workflow also runs the web workflow, and the release includes its output as
+`filly-web-X.Y.Z.zip`; see [automated web build](#automated-web-build). After the GitHub
+release, the MATLAB workflow publishes the same web files to npm as `@aforren1/filly`, with npm
+trusted publishing. It skips a version that npm already has.
+
+### Set up npm publishing once
+
+npm can add a trusted publisher only to a package that exists, so publish the first version by
+hand. The npm job of the first release with a web build fails, because npm has no trusted
+publisher for the package yet. The GitHub release is not affected.
+
+1. Download `filly-web-X.Y.Z.zip` from the GitHub release and unzip it into a folder.
+2. Assemble the package: `bash web/tools/make_npm_package.sh <folder> <package folder> X.Y.Z`.
+3. Run `npm login`, then `npm publish --access public` in the package folder.
+4. On npmjs.com, in the settings of `@aforren1/filly`, add a trusted publisher: GitHub Actions,
+   organization or user `aforren1`, repository `filly`, workflow file name `matlab.yml`.
+
+Later tags publish to npm without a token.
 
 The tags are the only source of the version. No file holds it. setuptools-scm computes the
-Python version from the newest `vX.Y.Z` tag before the commit, and `matlab/CMakeLists.txt`
-computes the same string for the MEX files:
+Python version from the newest `vX.Y.Z` tag before the commit, and `core/version.cmake`
+computes the same string for the MEX files and the web module:
 
 | Commit | Version |
 | --- | --- |
@@ -460,8 +498,8 @@ computes the same string for the MEX files:
 | No git history, for example a GitHub source archive | `0.0.0` |
 
 A build from the sdist reads the version from the sdist's `PKG-INFO`, so it does not need git.
-An editable install keeps the version of its last build until it builds again. The MATLAB build
-computes the version at configure time; to set it by hand, give `-DFILLY_VERSION=X.Y.Z`. CI
+An editable install keeps the version of its last build until it builds again. The MATLAB and
+web builds compute the version at configure time; to set it by hand, give `-DFILLY_VERSION=X.Y.Z`. CI
 fetches the full history (`fetch-depth: 0`) to get the tags. On a tag push, CI stops the
 release if a computed version does not match the tag.
 

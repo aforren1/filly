@@ -47,5 +47,8 @@ $envArgs = foreach ($name in 'JOBS', 'FILLY_WEB_SIMD') {
 $command = 'exec 2>&1; cmp -s /work/sdk/FILAMENT_VERSION /src/FILAMENT_VERSION || ' +
     'bash /src/web/tools/build_filament_web.sh /work; ' +
     'bash /src/web/tools/build_filly_web.sh /out /work'
-Invoke-Wslc run --rm @envArgs -v "${Volume}:/work" -v "${repo}:/src:ro" -v "${OutDir}:/out" `
+# The build reads its version from the git tags. Git refuses a repository that another user owns,
+# as the mount appears to the container, unless safe.directory allows it.
+$gitArgs = '-e', 'GIT_CONFIG_COUNT=1', '-e', 'GIT_CONFIG_KEY_0=safe.directory', '-e', 'GIT_CONFIG_VALUE_0=/src'
+Invoke-Wslc run --rm @envArgs @gitArgs -v "${Volume}:/work" -v "${repo}:/src:ro" -v "${OutDir}:/out" `
     $Image bash -euc $command

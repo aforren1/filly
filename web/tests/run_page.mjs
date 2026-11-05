@@ -34,7 +34,10 @@ const browser = await puppeteer.launch({
 	executablePath: executable,
 	browser: browserName === "firefox" ? "firefox" : "chrome",
 	headless: true,
-	args: browserName === "firefox" ? [] : ["--ignore-gpu-blocklist", "--enable-gpu"],
+	// FILLY_TEST_BROWSER_ARGS adds arguments, for example for a software renderer on a machine
+	// without a GPU.
+	args: [...(browserName === "firefox" ? [] : ["--ignore-gpu-blocklist", "--enable-gpu"]),
+		...(process.env.FILLY_TEST_BROWSER_ARGS ?? "").split(/\s+/).filter(Boolean)],
 });
 try
 {
