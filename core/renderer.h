@@ -13,7 +13,7 @@
 namespace filly {
 
 void set_log_level(const std::string& level);
-// The Filament release that this build links, such as "1.79.0" (FILAMENT_VERSION).
+// The Filament release that this build links, such as "1.80.1" (FILAMENT_VERSION).
 const char* filament_version() noexcept;
 
 using Vec3 = std::array<float, 3>;

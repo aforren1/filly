@@ -21,7 +21,8 @@ MODELS = DEPS / "sample-audit" / "assets" / "Models"
 VIEWER = DEPS / "bin" / "gltf_viewer.exe"
 # gltf_viewer always reserves this many pixels on the left for its ImGui sidebar, even headless.
 # The window must be wider by this amount to get a main viewport of the requested size.
-VIEWER_SIDEBAR = 410
+# Filament 1.80 widened it from 410 (samples/gltf_viewer.cpp, the ViewerGui constructor).
+VIEWER_SIDEBAR = 440
 # Filament's lens model uses a 24 mm sensor height (Camera::setLensProjection).
 SENSOR_HEIGHT_MM = 24.0
 # gltf_viewer's default lens (libs/viewer/include/viewer/Settings.h, CameraSettings::focalLength).

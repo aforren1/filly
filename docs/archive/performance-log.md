@@ -63,6 +63,63 @@ against 0.26 ms offscreen), most of it the wait in `acquire()`. The host draw co
 GPU time for the pyglet blit and 0.78 ms for PsychoPy's `ImageStim` at 1080p. Since
 2026-10-12, the pyglet adapter draws a blended quad instead of a blit; it was not measured again.
 
+## Filament 1.80.1 (November 12, 2026)
+
+Filament 1.79.0 and 1.80.1 compared in two scratch venvs (`tools/profile_tracy.py build
+--no-tracy`, Python 3.11): the commit before the upgrade with the 1.79.0 SDK, and the upgraded
+tree with the 1.80.1 SDK. The conditions are the same as for
+[Filament 1.79.0](#filament-1790-november-1-2026): Intel Iris Xe, AC, Balanced scheme,
+1920 x 1080 offscreen, 5 rounds in rotated order, a fresh process per run. Cells: median of the
+per-round medians, range in brackets, ms. CPU load before runs: median 18%, maximum 33%.
+
+Single models, `profile_frame.py cpu` through `profile_matrix.py` (600 frames after 120 warmup,
+60 Hz pacing):
+
+| Scenario | GPU frame 1.79.0 | GPU frame 1.80.1 | Native submit 1.79.0 | Native submit 1.80.1 |
+| --- | ---: | ---: | ---: | ---: |
+| DamagedHelmet | 2.588 [2.568-2.602] | 2.592 [2.589-2.602] | 0.258 [0.203-0.329] | 0.287 [0.191-0.323] |
+| SheenChair | 2.912 [2.844-2.917] | 2.902 [2.840-2.913] | 0.240 [0.209-0.322] | 0.295 [0.198-0.325] |
+| DamagedHelmet, shadows | 3.430 [3.427-3.442] | 3.426 [3.395-3.433] | 0.387 [0.315-0.442] | 0.384 [0.266-0.440] |
+| ClearCoatCarPaint | 2.912 [2.907-2.919] | 2.908 [2.907-2.911] | 0.281 [0.207-0.319] | 0.328 [0.196-0.350] |
+| CompareAnisotropy | 3.360 [3.357-3.374] | 3.361 [3.357-3.373] | 0.302 [0.199-0.322] | 0.298 [0.191-0.323] |
+| CompareSpecular | 2.718 [2.708-2.723] | 2.710 [2.134-2.713] | 0.298 [0.195-0.350] | 0.284 [0.179-0.325] |
+
+Many nodes, `tools/benchmark_nodes.py`, as for 1.79.0 (300 frames after 60 warmup, `finish()`
+after each frame):
+
+| Nodes | Per frame | Native submit 1.79.0 | Native submit 1.80.1 | Update 1.79.0 | Update 1.80.1 | GPU frame 1.79.0 | GPU frame 1.80.1 |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5,000 | nothing | 2.361 [2.195-2.502] | 2.228 [2.033-2.513] | - | - | 7.398 [7.321-8.459] | 6.568 [6.515-8.349] |
+| 5,000 | camera moves | 2.357 [2.100-2.481] | 2.140 [1.773-2.500] | 0.050 | 0.045 | 7.329 [7.303-7.458] | 7.341 [6.699-8.308] |
+| 5,000 | `set_transforms()` | 2.912 [2.632-3.270] | 3.022 [2.555-3.136] | 2.701 [2.513-2.962] | 2.964 [2.619-3.055] | 9.761 [9.752-9.828] | 9.747 [9.680-9.795] |
+| 20,000 | nothing | 7.605 [6.883-8.153] | 7.772 [6.871-8.769] | - | - | 16.869 | 16.868 |
+| 20,000 | camera moves | 8.251 [7.472-8.674] | 7.548 [7.257-8.302] | 0.055 | 0.054 | 16.650 | 16.658 |
+| 20,000 | `set_transforms()` | 6.685 [6.579-7.027] | 6.599 [6.394-6.802] | 6.617 [6.200-7.251] | 7.191 [6.507-7.366] | 16.883 | 16.880 |
+
+A second run of the 5,000-node cases, again 5 rounds:
+
+| Per frame | Native submit 1.79.0 | Native submit 1.80.1 | Update 1.79.0 | Update 1.80.1 |
+| --- | ---: | ---: | ---: | ---: |
+| nothing | 2.300 [1.682-2.459] | 2.220 [2.162-2.442] | - | - |
+| camera moves | 2.221 [2.010-2.378] | 2.205 [2.086-2.375] | 0.045 | 0.044 |
+| `set_transforms()` | 2.843 [2.674-3.512] | 2.882 [2.653-3.300] | 2.671 [2.626-3.172] | 2.743 [2.329-3.140] |
+
+Findings:
+
+- One model: the GPU frame did not change. The largest difference of the medians is 0.01 ms,
+  and the ranges overlap. The native submit ranges overlap in every scenario, so the 1.80.1
+  medians do not show a change.
+- Many nodes: no case changed by more than the spread of the rounds. The changes of
+  `TransformManager` in 1.80.0 (google/filament#10700) did not recover the 1.79.0 cost of a
+  transform change on every node in every frame.
+- The 1.79.0 values of this session are higher than those of November 1 (for example, 2.30 ms
+  against 1.57 to 2.10 ms for a static 5,000-node scene). Compare values only within one
+  session.
+- filly does not use the new motion-vector variants. `matc` makes them by default; with
+  `-V motionVectors`, the archive is 136,456 bytes instead of 136,647 bytes. The 1.79.0 archive
+  was 151,687 bytes. The decrease is probably from 1.80.0, which made fog a specialization
+  constant instead of a variant.
+
 ## Filament 1.79.0 (November 1, 2026)
 
 Filament 1.77.1 and 1.79.0 compared in two scratch venvs: the commit before the upgrade with the

@@ -30,8 +30,11 @@ One model that fills the view, one directional light, and a small studio environ
 | SheenChair | 2.90 ms | 0.22 ms | 1.79.0 |
 | Empty scene | 0.80 ms | 0.19 ms | 1.77.1 |
 
-On the NVIDIA GPU, the DamagedHelmet frame takes 0.28 ms of GPU time (1.77.1). See
-[Filament 1.79.0](../archive/performance-log.md#filament-1790-november-1-2026) and
+On the NVIDIA GPU, the DamagedHelmet frame takes 0.28 ms of GPU time (1.77.1). With Filament
+1.80.1, the GPU frames of the three model scenes changed by 0.01 ms or less. The native
+submit did not change measurably. See
+[Filament 1.80.1](../archive/performance-log.md#filament-1801-november-12-2026),
+[Filament 1.79.0](../archive/performance-log.md#filament-1790-november-1-2026), and
 [output path](../archive/performance-log.md#output-path-september-30-2026).
 
 ## Cost of options
@@ -71,8 +74,10 @@ PsychoPy `ImageStim`. These values are from September 30, 2026. See
   [generated meshes](../archive/performance-log.md#generated-meshes).
 - **Transforms of many nodes.** With Filament 1.79.0, a change of the transform of every node in
   every frame costs about 0.1 microseconds per node more than with 1.77.1. For 5,000 nodes, the
-  native submit is 1.9 ms. A static scene and a moving camera are not slower. See
-  [Filament 1.79.0](../archive/performance-log.md#filament-1790-november-1-2026).
+  native submit is 1.9 ms. A static scene and a moving camera are not slower. Filament 1.80.1
+  did not change this. See
+  [Filament 1.79.0](../archive/performance-log.md#filament-1790-november-1-2026) and
+  [Filament 1.80.1](../archive/performance-log.md#filament-1801-november-12-2026).
 
 ## Picking
 

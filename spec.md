@@ -970,7 +970,7 @@ This deliberately keeps the first interop implementation focused on the graphics
 
 **Status (Linux).** The Linux build compiles the pinned Filament from source in manylinux_2_28 with three local patches and passed the tests on Mesa software rendering and WSLg. Offscreen renderers use headless EGL when there is no X display; shared contexts need GLX and an X11 display. Linux was last tested on September 30, 2026, before the October API changes.
 
-**Status (macOS).** The macOS build links the official Filament 1.79.0 release SDK (arm64 only). filly's own CGL platform (`core/cgl_platform.cpp`) replaces Filament's PlatformCocoaGL, whose headless swap chains need the main thread's dispatch queue and a window server. macOS has OpenGL 4.1 only, so Filament runs at feature level 1, as on the other platforms, and there are no sRGB views of host textures (`glTextureView` is OpenGL 4.3). Shared contexts need a core profile host, for example pyglet 2; PsychoPy and Psychtoolbox create legacy contexts and cannot share. The Python and Octave 11.3 tests passed on an Apple M2 with macOS 27 on October 31, 2026. The MATLAB MEX file builds and passes the import check; its tests have not run.
+**Status (macOS).** The macOS build links the official Filament release SDK of `FILAMENT_VERSION` (arm64 only). filly's own CGL platform (`core/cgl_platform.cpp`) replaces Filament's PlatformCocoaGL, whose headless swap chains need the main thread's dispatch queue and a window server. macOS has OpenGL 4.1 only, so Filament runs at feature level 1, as on the other platforms, and there are no sRGB views of host textures (`glTextureView` is OpenGL 4.3). Shared contexts need a core profile host, for example pyglet 2; PsychoPy and Psychtoolbox create legacy contexts and cannot share. The Python and Octave 11.3 tests passed on an Apple M2 with macOS 27 on October 31, 2026. The MATLAB MEX file builds and passes the import check; its tests have not run.
 
 ---
 
@@ -998,7 +998,7 @@ OpenGL support must remain enabled; Filament itself has a build option controlli
 
 Do not build Filament samples/tools unless required for asset processing.
 
-**Decision.** The build uses CMake with scikit-build-core. Windows links the official Filament 1.79.0 release SDK; Linux builds the same version from source. Only the needed static libraries are linked. The material compiler is not linked: every material comes from the precompiled archive, which `matc` and `uberz` make at build time (section 6.1).
+**Decision.** The build uses CMake with scikit-build-core. Windows links the official Filament 1.80.1 release SDK; Linux builds the same version from source. Only the needed static libraries are linked. The material compiler is not linked: every material comes from the precompiled archive, which `matc` and `uberz` make at build time (section 6.1).
 
 ---
 

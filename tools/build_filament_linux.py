@@ -13,8 +13,8 @@ import urllib.request
 # The Filament release of every filly build (FILAMENT_VERSION at the repository root). The
 # hashes below belong to that release; change them together.
 VERSION = (Path(__file__).resolve().parents[1] / "FILAMENT_VERSION").read_text().strip()
-SOURCE_SHA256 = "bb7d0c4901fb6940dbb66e809f36056b68461e7836a423f77dcf29f472bdf811"
-SDK_SHA256 = "3d0dda90685488c2bc6baacc777ab7108229fee07b989802bf7e05b1e20cb4de"
+SOURCE_SHA256 = "89525d8e74a5bc4884ad8879ba5a740196c614b9115a41c4e8d3cb692d7cff83"
+SDK_SHA256 = "c2f46496ba5707605f0459d8714d34c73296fbfd7fcfdbe4c1a00b76607da193"
 LIBRARIES = "gltfio_core filament-iblprefilter filament backend filabridge filaflat geometry ibl utils bluegl smol-v stb dracodec meshoptimizer mikktspace uberzlib zstd basis_transcoder ktxreader image abseil".split()
 # Host tools for filly's material archive. The release archive's tools need a newer glibc than
 # manylinux_2_28, so they are built here with the libraries.

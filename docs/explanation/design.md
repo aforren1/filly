@@ -584,7 +584,7 @@ unsupported required extensions fail. Strict mode turns warnings into errors. Me
 extensions cannot change the image and are ignored. The checks do not replace a glTF validator.
 
 The core reads the document with cgltf. It does not compile cgltf: the header in
-`core/vendor/cgltf` is the one that Filament 1.79.0 builds into `gltfio_core`, which exports
+`core/vendor/cgltf` is the one that Filament 1.80.1 builds into `gltfio_core`, which exports
 the functions, so both parses have the same structure layout. Accessors are read with
 `cgltf_accessor_unpack_floats`, which applies sparse values and normalization.
 

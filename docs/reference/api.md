@@ -20,7 +20,7 @@ logging, Python exceptions, or direct output that bypasses Filament's log stream
 | Name | Value |
 | --- | --- |
 | `filly.__version__` | The version of the filly package, such as `"0.4.0"` |
-| `filly.filament_version` | The Filament release that the native module links, such as `"1.79.0"` |
+| `filly.filament_version` | The Filament release that the native module links, such as `"1.80.1"` |
 
 The web build has `await version()` and `await filamentVersion()`, and the MATLAB and Octave
 frontend has `filly.version()` and `filly.filamentVersion()`. All builds of one filly version link

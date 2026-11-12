@@ -13,10 +13,10 @@ VERSION = (Path(__file__).resolve().parents[1] / "FILAMENT_VERSION").read_text()
 # The release archives of github.com/google/filament. The macOS archive has one top-level folder,
 # `filament/`, which is removed, so that both SDKs have `include` at the root of their folder.
 ARCHIVES = {
-    "Windows": {"name": f"filament-v{VERSION}-windows.tgz", "size": "826 MiB", "folder": "",
-                "sha256": "5fc8ea5a06bd3de3f43da9ec72a09458193db3e0b574e06b6b3f8ef94c21fce9"},
-    "Darwin": {"name": f"filament-v{VERSION}-mac.tgz", "size": "44 MiB", "folder": "filament-mac",
-               "sha256": "a1c4dd85b2ec5789d202630026febc019bc8a774e231ce0bb4407032c2bd2103"},
+    "Windows": {"name": f"filament-v{VERSION}-windows.tgz", "size": "828 MiB", "folder": "",
+                "sha256": "28d513447a93b5087a1f30a8109595dd3d29e26536d6ceb35adf194564b8ce1b"},
+    "Darwin": {"name": f"filament-v{VERSION}-mac.tgz", "size": "43 MiB", "folder": "filament-mac",
+               "sha256": "e8788257ac47d438615fe12773c64aafea7211990e07ea3263c0e8e343ff833f"},
 }
 MACHINES = {"Windows": {"amd64", "x86_64"}, "Darwin": {"arm64"}}
 

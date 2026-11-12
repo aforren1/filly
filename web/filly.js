@@ -119,7 +119,7 @@ export async function version()
 	return module.version();
 }
 
-/** The Filament release that this build links, such as "1.79.0". */
+/** The Filament release that this build links, such as "1.80.1". */
 export async function filamentVersion()
 {
 	const module = await loadModule();

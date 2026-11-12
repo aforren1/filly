@@ -16,8 +16,8 @@ set -euo pipefail
 # The Filament release of every filly build (FILAMENT_VERSION at the repository root). The hashes
 # below belong to that release; change them together.
 VERSION=$(tr -d '[:space:]' < "$(dirname "$0")/../../FILAMENT_VERSION")
-SOURCE_SHA256=bb7d0c4901fb6940dbb66e809f36056b68461e7836a423f77dcf29f472bdf811
-LINUX_SHA256=3d0dda90685488c2bc6baacc777ab7108229fee07b989802bf7e05b1e20cb4de
+SOURCE_SHA256=89525d8e74a5bc4884ad8879ba5a740196c614b9115a41c4e8d3cb692d7cff83
+LINUX_SHA256=c2f46496ba5707605f0459d8714d34c73296fbfd7fcfdbe4c1a00b76607da193
 # The pinned Filament's CI uses this emsdk (build/common/versions). Material packages and the
 # generated JavaScript glue depend on it, so do not float it to "latest".
 EMSDK_VERSION=5.0.4

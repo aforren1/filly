@@ -1,7 +1,7 @@
 # filly and Filament
 
 This page is for users and contributors who know Google Filament. It maps filly's concepts to
-Filament 1.79.0 and gltfio, explains where filly differs, and lists the places where filly
+Filament 1.80.1 and gltfio, explains where filly differs, and lists the places where filly
 depends on Filament internals. For the full design, see [design and limits](design.md). For the
 Filament defects and gaps that filly works around, with the data for upstream issues, see
 [upstream Filament issues](../reference/upstream-issues.md).
@@ -153,7 +153,7 @@ needs. The linked sections give the measurements.
 
 ### glTF extensions
 
-| Extension | gltfio 1.79.0 | filly |
+| Extension | gltfio 1.80.1 | filly |
 | --- | --- | --- |
 | `KHR_materials_unlit`, `clearcoat`, `sheen`, `transmission`, `volume`, `ior`, `specular`, `dispersion`, `pbrSpecularGlossiness`, `variants` | Yes | Through gltfio, with filly's material entries |
 | `KHR_materials_emissive_strength` | Yes, but the strength applies twice | Corrected |
@@ -167,6 +167,7 @@ needs. The linked sections give the measurements.
 | `KHR_animation_pointer` | No | Node channels go to gltfio's animator; the other targets are filly's property animation |
 | `KHR_node_visibility` | No | filly |
 | `KHR_materials_anisotropy`, `iridescence`, `diffuse_transmission` | No (cgltf reads them; gltfio ignores them) | filly's material entries |
+| `KHR_materials_retroreflection` | Yes, from 1.80.1 (JIT shaders only; the SDK archive has no entry for it) | No. A warning, or an error for a required extension and strict loads |
 | Unknown extensions | Ignored | A warning, or an error for required extensions and strict loads |
 
 ## Maintenance: dependencies on Filament internals
@@ -181,7 +182,7 @@ an error.
 | Dependency | filly code | Filament code | Failure |
 | --- | --- | --- | --- |
 | Node and material index markers: during `createInstance()`, gltfio reads extras as `json + offset` | `create_instance()` in `core/renderer.cpp`, `material_marker()` in `core/archive_materials.cpp` | `recurseEntities()` and `createMaterialInstance()` in `libs/gltfio/src/AssetLoader.cpp` | Loud: a missing marker raises `AssetError` |
-| Changes to gltfio's cgltf parse: buffers, meshopt flags, animation channels, samplers, image types, and the appended rest animation | `patch_source()` in `core/gltf_prepare.cpp` | `FilamentAsset::getSourceAsset()`, and the cgltf version in `third_party/cgltf` | Silent. `core/vendor/cgltf/cgltf.h` must be identical to Filament's copy |
+| Changes to gltfio's cgltf parse: buffers, meshopt flags, animation channels, samplers, image types, and the appended rest animation | `patch_source()` in `core/gltf_prepare.cpp` | `FilamentAsset::getSourceAsset()`, and the cgltf version in `third_party/cgltf` | Silent. `core/vendor/cgltf/cgltf.h` must be identical to Filament's copy. Since 1.80, `ResourceLoader` also runs `cgltf_validate()` on the patched parse after Draco decoding; a failure there is loud (`AssetError`) |
 | `TangentsJob`, declared in filly because the SDK does not ship its header | `namespace filament::gltfio` block in `core/renderer.cpp` | `libs/gltfio/src/TangentsJob.h` | Silent: a layout change is undefined behavior |
 | Morph target upload for later instances, which repeats the conditions of `loadResources()` | `fill_morph_targets()` in `core/renderer.cpp` | `libs/gltfio/src/ResourceLoader.cpp` | Silent; a pixel test compares two instances |
 | Buffer layouts for the memory estimate | `estimate_geometry()` in `core/gltf_prepare.cpp` | `createPrimitive()` and `createRenderable()` in `AssetLoader.cpp`, `computeBindingSize()` in `ResourceLoader.cpp` | Silent: wrong estimates only |

@@ -1,14 +1,14 @@
 # Compare with gltf_viewer
 
 Use `tools/compare_reference.py` to compare filly output with Filament's `gltf_viewer`.
-Both come from Filament 1.79.0. This is the only parity target that uses the same engine,
+Both come from Filament 1.80.1. This is the only parity target that uses the same engine,
 the same gltfio loader, and the same shaders. Khronos reference images use other renderers
 and other lighting, so they cannot show pixel parity.
 
 ## Requirements
 
 - A built filly package in `.venv`.
-- `.deps/bin/gltf_viewer.exe` from the Filament 1.79.0 Windows release.
+- `.deps/bin/gltf_viewer.exe` from the Filament 1.80.1 Windows release.
 - Khronos sample assets in `.deps/sample-audit/assets`. To get them, run
   `uv run --no-sync python tools/check_sample_assets.py --download-only`.
 - An OpenGL 4.5 driver. The tool renders both sides with OpenGL.
@@ -88,7 +88,7 @@ The tool gives `gltf_viewer` a `--settings` JSON file. It does not use `--batch`
 | Antialiasing | FXAA and MSAA 4x | None (default), or FXAA and MSAA 4x |
 | SSAO, bloom, TAA, SSR, dithering | SSAO on, bloom on, dithering temporal | All off. Viewer bloom is on with strength 0. See the known issues. filly has `ssao`, `bloom`, and `dithering` options, but temporal dithering noise differs between processes. |
 | Animation | Plays in interactive mode | Off. Both show the authored rest pose. |
-| Image size | Window minus a 410 px sidebar | The viewer window is 410 px wider than the requested size. |
+| Image size | Window minus a 440 px sidebar | The viewer window is 440 px wider than the requested size. |
 
 The viewer screenshot is an 8-bit TIFF. The tool converts it to PNG.
 
@@ -117,7 +117,7 @@ These issues affect the reference side. The tool contains a workaround for each.
 - Some headless captures contain a band of about 10 corrupted rows. This occurred in 2 of 4
   BoxTextured captures in one test, and in none of the later comparison runs. The tool captures twice. If the two captures differ, it captures a third
   time and uses the per-pixel median.
-- The 410 px ImGui sidebar is reserved in headless mode too.
+- The 440 px ImGui sidebar (410 px before Filament 1.80) is reserved in headless mode too.
 - `FilamentApp2` calls `setLensProjection(focalLength)` after `preRender` in every frame. Thus
   `camera.horizontalFov` in the settings has no effect, and `focalLength` must be positive.
   The `horizontalFov` field is passed to Filament as a vertical field of view.

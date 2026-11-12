@@ -3,14 +3,14 @@
 # gl_interop.cpp; Emscripten builds use WebGL2 through gl_interop_web.cpp.
 #
 # Inputs:
-#   FILAMENT_ROOT         Filament 1.79.0 SDK: the desktop SDK (docs/how-to/build.md), or the
+#   FILAMENT_ROOT         Filament 1.80.1 SDK: the desktop SDK (docs/how-to/build.md), or the
 #                         WebAssembly SDK from web/tools/build_filament_web.sh
-#   FILLY_MATERIAL_TOOLS  matc and uberz of Filament 1.79.0 for the build machine
+#   FILLY_MATERIAL_TOOLS  matc and uberz of Filament 1.80.1 for the build machine
 #                         (materials/output.cmake)
 set(FILLY_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(EMSCRIPTEN)
-  set(FILAMENT_ROOT "" CACHE PATH "Filament 1.79.0 WebAssembly SDK directory")
+  set(FILAMENT_ROOT "" CACHE PATH "Filament 1.80.1 WebAssembly SDK directory")
   if(NOT EXISTS "${FILAMENT_ROOT}/include/filament/Engine.h")
     message(FATAL_ERROR "Set FILAMENT_ROOT to the WebAssembly SDK from web/tools/build_filament_web.sh")
   endif()
@@ -45,7 +45,7 @@ else()
   else()
     set(_sdk "${PROJECT_SOURCE_DIR}/.deps")
   endif()
-  set(FILAMENT_ROOT "${_sdk}" CACHE PATH "Filament 1.79.0 SDK directory")
+  set(FILAMENT_ROOT "${_sdk}" CACHE PATH "Filament 1.80.1 SDK directory")
   if(NOT EXISTS "${FILAMENT_ROOT}/include/filament/Engine.h")
     message(FATAL_ERROR "Filament SDK missing. See docs/how-to/build.md for the platform SDK and FILAMENT_ROOT.")
   endif()
@@ -91,10 +91,10 @@ endif()
 
 # The Filament release of every build, which the frontends report (filly.filament_version). The
 # SDK headers carry no release number, only MATERIAL_VERSION, which equals the minor version
-# (checked for 1.65 to 1.79), so a wrong minor version fails here; a wrong patch level does not.
+# (checked for 1.65 to 1.80), so a wrong minor version fails here; a wrong patch level does not.
 file(STRINGS "${PROJECT_SOURCE_DIR}/FILAMENT_VERSION" FILLY_FILAMENT_VERSION LIMIT_COUNT 1)
 if(NOT FILLY_FILAMENT_VERSION MATCHES "^1\\.([0-9]+)\\.[0-9]+$")
-  message(FATAL_ERROR "FILAMENT_VERSION must hold one version such as 1.79.0, not '${FILLY_FILAMENT_VERSION}'")
+  message(FATAL_ERROR "FILAMENT_VERSION must hold one version such as 1.80.1, not '${FILLY_FILAMENT_VERSION}'")
 endif()
 set(FILLY_MATERIAL_VERSION "${CMAKE_MATCH_1}")
 file(STRINGS "${FILAMENT_ROOT}/include/filament/MaterialEnums.h" _line REGEX "MATERIAL_VERSION = [0-9]+")
