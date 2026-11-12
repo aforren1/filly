@@ -38,6 +38,7 @@ For how filly relates to Filament in general, see [filly and Filament](../explan
 | [B9](#b9) | `TRIANGLE_FAN` and `LINE_LOOP` primitives use an uninitialized type | Bug | gltfio | No |
 | [B10](#b10) | Desktop OpenGL platforms return no `Sync` from `createSync()` | Bug | backend | Yes |
 | [B11](#b11) | `AssetLoader::getNodeManager()` is declared but not defined | Bug | gltfio | Yes |
+| [B12](#b12) | `PlatformGLX` exits the process on a driver without GL 4.6 | Bug | backend | Yes |
 | [F1](#f1) | Map glTF node and material indices to instance objects | Feature request | gltfio | Yes |
 | [F2](#f2) | Let the caller choose looping or clamping in `Animator` | Feature request | gltfio | Yes |
 | [F3](#f3) | Support `KHR_animation_pointer` | Feature request | gltfio, cgltf | Yes |
@@ -449,6 +450,41 @@ Windows `gltfio_core.lib` variants and the Linux `libgltfio_core.a` contain
 
 **If upstream fixes it.** filly can restore the authored node extras after `createInstance()` and
 can then expose them. A fix for [F1](#f1) makes the markers unnecessary.
+
+<a id="b12"></a>
+
+### B12. PlatformGLX exits the process on a driver without GL 4.6
+
+- **Version and component:** Filament 1.80.0 and 1.80.1, backend (`PlatformGLX`).
+- **Type:** Bug.
+- **Upstream status:** Checked against 1.80.1. Introduced in 1.80.0 by google/filament#10742
+  (commit `6226a9441`).
+
+**What happens.** `PlatformGLX::createDriver()` and `PlatformGLX::createContext()` ask
+`glXCreateContextAttribsARB()` for GL 4.6, then 4.5, and so on to 4.1. The loop expects a null
+return for a version that the driver lacks (`filament/backend/src/opengl/platforms/PlatformGLX.cpp:209-221`
+and `:266-277`). Mesa also sends an X protocol error, `GLXBadFBConfig`, for that version. The
+platform installs no X error handler, so Xlib's default handler prints the error and calls
+`exit(1)`. The process ends before the loop tries GL 4.5. The application gets no exception and
+no log message from Filament.
+
+**Expected behavior.** The loop ignores the X errors of its own attempts, for example with a
+temporary `XSetErrorHandler()` and an `XSync()` after each attempt, and continues with the next
+version.
+
+**Reproduction.** Run any Filament program with the default GLX platform on Mesa llvmpipe
+(GL 4.5), for example `LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a <program>`. The output is
+`X Error of failed request: GLXBadFBConfig`, and the exit code is 1. A host that installs its own
+X error handler, such as MATLAB, does not show the defect. filly's Linux CI found it: the Python,
+Octave, and web jobs that render with llvmpipe all ended this way with 1.80.1.
+
+**filly workaround.** `tools/build_filament_linux.py` patches `PlatformGLX.cpp`. Both version
+loops call `createContextQuietly()`, which replaces the X error handler, makes the attempt, calls
+`XSync()`, and restores the previous handler. The replacement is process-wide for the time of
+one attempt.
+
+**If upstream fixes it.** Delete the `createContextQuietly()` patch from
+`tools/build_filament_linux.py`.
 
 ## Feature requests
 

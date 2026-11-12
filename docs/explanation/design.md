@@ -809,7 +809,16 @@ closes it first (Psychtoolbox does when its `Screen` MEX file unloads), the rend
 itself in the hook, while Filament's context still works. Xlib runs the newest hook first, so
 this runs before GLX's own cleanup. For an offscreen engine, the platform owns its display and
 closes it after the driver thread exits. This keeps driver libraries loaded through thread-local
-cleanup. The SDK build manifest records these patches. Review them when updating Filament.
+cleanup.
+
+Since Filament 1.80, the GLX platform asks for GL 4.6 first and tries lower versions until one
+succeeds. Mesa reports a version that it lacks with an X protocol error, and Xlib's default
+handler exits the process ([B12](../reference/upstream-issues.md#b12)). The patched platform
+ignores X errors during each attempt and then restores the host's handler. filly needs only
+GL 4.1, so the version that the loop gets does not change filly's features.
+
+The SDK build manifest records these patches, and `tools/build_filament_linux.py` applies them.
+Review them when updating Filament.
 
 Nanobind's linked limited-ABI mode starts at Python 3.12. One `cp312-abi3` wheel supports that
 version and later standard CPython builds. Python 3.10 and 3.11 use version-specific wheels.

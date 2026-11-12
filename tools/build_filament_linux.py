@@ -93,6 +93,38 @@ def main():
         "PlatformGLX::~PlatformGLX() noexcept {\n"
         "    if (mOwnsDisplay && mGLXDisplay) g_x11.closeDisplay(mGLXDisplay);\n"
         "}\n\nvoid PlatformGLX::terminate() noexcept {")
+    # Since 1.80, PlatformGLX asks for GL 4.6 first and counts on a null return to try the next
+    # version down. Mesa also sends GLXBadFBConfig for a version it lacks (llvmpipe has 4.5), and
+    # Xlib's default handler then exits the process: Python and Octave died with no output. The
+    # attempts ignore X errors; XSync delivers the error before the host's handler is restored.
+    replace_once(glx_source, "    X11_FREE free;\n    void* library;\n} g_x11;",
+        "    X11_FREE free;\n"
+        "    decltype(&XSetErrorHandler) setErrorHandler;\n"
+        "    decltype(&XSync) sync;\n"
+        "    void* library;\n} g_x11;\n\n"
+        "static int ignoreXError(Display*, XErrorEvent*) { return 0; }\n\n"
+        "static GLXContext createContextQuietly(Display* display, GLXFBConfig config,\n"
+        "        GLXContext share, const int* attribs) {\n"
+        "    auto previous = g_x11.setErrorHandler(ignoreXError);\n"
+        "    GLXContext context = g_glx.createContext(display, config, share, True, attribs);\n"
+        "    g_x11.sync(display, False);\n"
+        "    g_x11.setErrorHandler(previous);\n"
+        "    return context;\n}")
+    replace_once(glx_source,
+        '    g_x11.free = (X11_FREE)dlsym(g_x11.library, "XFree");\n',
+        '    g_x11.free = (X11_FREE)dlsym(g_x11.library, "XFree");\n'
+        '    g_x11.setErrorHandler = (decltype(&XSetErrorHandler))dlsym(g_x11.library, "XSetErrorHandler");\n'
+        '    g_x11.sync = (decltype(&XSync))dlsym(g_x11.library, "XSync");\n')
+    replace_once(glx_source,
+        "mGLXContext = g_glx.createContext(mGLXDisplay, mGLXConfig,\n"
+        "                (GLXContext)sharedGLContext, True, contextAttribs);",
+        "mGLXContext = createContextQuietly(mGLXDisplay, mGLXConfig,\n"
+        "                (GLXContext)sharedGLContext, contextAttribs);")
+    replace_once(glx_source,
+        "context = g_glx.createContext(mGLXDisplay, mGLXConfig,\n"
+        "                mGLXContext, True, contextAttribs);",
+        "context = createContextQuietly(mGLXDisplay, mGLXConfig,\n"
+        "                mGLXContext, contextAttribs);")
     build = work / "build"
     subprocess.run(["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja",
                     "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_C_COMPILER=clang", "-DCMAKE_CXX_COMPILER=clang++",
