@@ -22,8 +22,8 @@ The frontends have the same objects, names (in each language's style), and behav
 | Frontend | Get it | Needs |
 | --- | --- | --- |
 | Python | `pip install filly` from [PyPI](https://pypi.org/project/filly/) | Python 3.10 or later |
-| MATLAB and Octave | A package from the [releases](https://github.com/aforren1/filly/releases); see [install a release](docs/how-to/matlab.md#install-a-release) | MATLAB R2021b or later, or Octave 6.4 or later (Linux) |
-| Web | [Build it](docs/how-to/build.md#build-for-the-web), then serve `filly.js`, `filly-core.js`, and `filly-core.wasm` | A browser with WebGL2 |
+| MATLAB and Octave | A package from the [releases](https://github.com/aforren1/filly/releases); see [install a release](docs/how-to/matlab.md#install-a-release) | MATLAB R2021b or later (R2023b or later on macOS). Octave 6.4 or later on Linux, Octave 7 or 10 and later on Windows, Octave 10 and later on macOS |
+| Web | `npm install @aforren1/filly`, or `filly-web-<version>.zip` from the [releases](https://github.com/aforren1/filly/releases); see [use filly in a web page](docs/how-to/web.md) | A browser with WebGL2 |
 
 The desktop frontends need Windows or Linux on x86_64, or macOS 11 or later on Apple silicon
 (arm64), and an OpenGL 4.1 driver. On Linux, offscreen rendering works without a display. On
@@ -31,9 +31,8 @@ macOS, filly cannot share textures with PsychoPy or Psychtoolbox windows. The Ps
 copies each frame into the window instead, through an IOSurface on the GPU
 ([PsychoPy on macOS](docs/how-to/psychopy.md#use-psychopy-on-macos)); Psychtoolbox windows are
 not supported. Imported host textures cannot be sampled as sRGB; see
-[macOS limits](docs/how-to/build.md#run-on-macos). The
-release packages for MATLAB and Octave are for Windows and Linux only. To build any frontend
-from source, see [build and test](docs/how-to/build.md).
+[macOS limits](docs/how-to/build.md#run-on-macos). To build any frontend from source, see
+[build and test](docs/how-to/build.md).
 
 ## Render an image
 
@@ -143,7 +142,7 @@ PIXI in PsychoJS. See [use filly in a web page](docs/how-to/web.md).
 - **Picking:** find the model, node, and world position under a pixel of a rendered frame, for
   example where a participant clicked. See [picking](docs/reference/api.md#picking).
 - **No material compiler at run time:** filly ships its materials precompiled. See
-  [material precompilation](docs/explanation/material-precompilation.md).
+  [materials](docs/explanation/materials.md).
 
 ## Examples
 
@@ -182,10 +181,13 @@ MATLAB and Octave examples are in `examples/matlab/`:
   [upstream Filament issues](docs/reference/upstream-issues.md)
 - Explanation: [design and limits](docs/explanation/design.md),
   [filly and Filament](docs/explanation/filament.md),
-  [tested assumptions](docs/explanation/assumptions.md),
-  [material precompilation](docs/explanation/material-precompilation.md),
+  [materials](docs/explanation/materials.md),
   [the web build](docs/explanation/web.md),
   [macOS](docs/explanation/macos.md)
+- Archive (dated records, not kept current): [performance log](docs/archive/performance-log.md),
+  [validation log](docs/archive/validation-log.md),
+  [tested assumptions](docs/archive/assumptions.md),
+  [material precompilation](docs/archive/material-precompilation.md)
 
 The source has one folder per part: `core/` (the shared renderer), `python/`, `matlab/`, and
 `web/`. See [source layout](docs/how-to/build.md#source-layout).
@@ -197,7 +199,8 @@ filly is released under the [MIT License](LICENSE).
 It links [Filament](https://github.com/google/filament) (Apache 2.0),
 [meshoptimizer](https://github.com/zeux/meshoptimizer) (MIT),
 [libwebp](https://chromium.googlesource.com/webm/libwebp) (BSD), and
-[cgltf](https://github.com/jkuhlmann/cgltf) (MIT). Each package installs their licenses.
+[cgltf](https://github.com/jkuhlmann/cgltf) (MIT). Each package includes the licenses of these
+libraries.
 
 The sample models are in the public domain (CC0 1.0). `filly.samples.HORSE` (Python) and
 `filly.samples.horse()` (MATLAB and Octave) are "Horse" by Quaternius; see

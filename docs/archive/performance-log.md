@@ -1,0 +1,993 @@
+# Performance
+
+Measured frame costs of filly on the development laptop, and the frame time that changes to
+filly or to a scene would recover. The tools and the method are in
+[Profile a frame](../how-to/profile.md).
+
+## Conditions
+
+| Item | Value |
+| --- | --- |
+| Machine | Optimus laptop: Intel Iris Xe (driver 32.0.101.7088) drives the 1920 x 1200, 60 Hz panel; NVIDIA RTX A500 Laptop GPU (driver 596.58, 32.0.15.9658). |
+| Power | AC for every result in this page unless a section says "battery". Windows power scheme Balanced, no power-mode overlay. |
+| Load | CPU load before each run: median 15 to 16%, maximum 35%. Runs waited while the load was above 35%. |
+| Build | Scratch venvs built with `tools/profile_tracy.py build --no-tracy`, which then added only `Renderer._frame_info_history()`, the binding that `Stats.gpu_frame_ms` replaced on October 12, 2026. [Output path (September 30, 2026)](#output-path-september-30-2026) names its builds. The other sections used the tree of the morning of September 30: runtime material path (`w-rt`), archive path with 39 entries (`w-ar`), and runtime with the headless-swap candidate fix (`w-ns`), all with color grading as the default output path. PsychoPy runs use `.deps\psychopy311` (runtime path). |
+| Loop | `profile_frame.py cpu`: 120 warmup frames, 600 measured frames. Offscreen frames are paced by a sleep at 60 Hz (or 144 Hz where stated). Hosts swap with vsync at 60 Hz. The model turns 0.5 degrees per frame. |
+| Rounds | 5 rounds; each round runs every configuration once in a fresh process, in an order rotated by one per round. |
+| Cells | Median of the 5 per-round medians, with the range of the per-round medians in brackets. Milliseconds. |
+| GPU time | "GPU frame" is Filament's own timer, `Renderer::getFrameInfoHistory()` `gpuFrameDuration`, now `Stats.gpu_frame_ms`: a `GL_TIME_ELAPSED` query from `beginFrame()` to `endFrame()`. It includes GPU idle gaps inside the frame and the headless `SwapBuffers` (a `glFlush()` since the swap fix), and excludes the host draw. |
+
+Scene: DamagedHelmet (or the named asset) filling the view, one directional light, a small
+studio environment for image-based lighting, background color. "Empty" is the same scene
+without a model.
+
+Assets: plain = DamagedHelmet, clearcoat = ClearCoatCarPaint, sheen = SheenChair,
+anisotropy = CompareAnisotropy, specular = CompareSpecular. In the two Compare assets, half of
+the objects use the plain material.
+
+## Headline
+
+Intel Iris Xe, 1920 x 1080 offscreen, 60 Hz pacing, AC, GPU frame time, measured on
+September 30 after the output-path change:
+
+| Change | GPU saved at 1080p | GPU saved at 512 x 512 |
+| --- | ---: | ---: |
+| Exact output path instead of color grading (the new default) | 0.84 ms (DamagedHelmet), 0.82 ms (empty) | 0.15 ms, 0.11 ms |
+| Direct output instead of the exact path (opt-in) | 0.71 ms (DamagedHelmet), 0.70 ms (empty) | 0.12 ms, 0.11 ms |
+
+The default frame for DamagedHelmet went from 3.16 to 2.32 ms (1.61 ms direct); an empty frame
+from 1.62 to 0.80 ms (0.11 ms direct). On NVIDIA, DamagedHelmet went from 0.367 to 0.275 ms
+(0.181 ms direct). The exact path costs about 0.12 ms more CPU per frame (native submit), because
+its encode pass is a second Filament view. Color grading cost 1.5 ms per 1080p frame on Intel
+mostly because of its 1D LUT: three fetches of a 3D texture per pixel. See
+[Output path (September 30, 2026)](#output-path-september-30-2026).
+
+Earlier headline, before the output-path change (color grading by default, headless
+`SwapBuffers` not yet fixed):
+
+| Change | GPU saved at 1080p | GPU saved at 512 x 512 |
+| --- | ---: | ---: |
+| Direct output instead of color grading | 1.89 ms (DamagedHelmet), 1.96 ms (empty) | 0.66 ms, 0.77 ms |
+| No MSAA 4x | 1.20 ms | 0.35 ms |
+| No FXAA | 0.99 ms | 0.24 ms |
+| Runtime instead of archive materials | 0.38 ms (plain) to 1.18 ms (anisotropy) | 0.17 to 0.48 ms |
+| No shadows | 0.68 ms | 0.36 ms |
+| No `SwapBuffers` on the headless swap chain | 0.46 ms | not measured |
+
+On NVIDIA, the headless `SwapBuffers` blocked Filament's frame for a full display refresh:
+Filament's timer reported 16.2 ms for a frame whose work takes 0.37 ms. Replacing the swap with
+`glFlush()` removed this. See [Headless swap chain](#headless-swap-chain).
+
+A shared-texture host adds about 1.8 ms of main-thread CPU time per frame at 1080p (2.1 ms
+against 0.26 ms offscreen), most of it the wait in `acquire()`. The host draw costs 0.39 ms of
+GPU time for the pyglet blit and 0.78 ms for PsychoPy's `ImageStim` at 1080p. Since
+2026-10-12, the pyglet adapter draws a blended quad instead of a blit; it was not measured again.
+
+## Filament 1.79.0 (November 1, 2026)
+
+Filament 1.77.1 and 1.79.0 compared in two scratch venvs: the commit before the upgrade with the
+1.77.1 SDK, and the upgraded tree with the 1.79.0 SDK. Intel Iris Xe, AC, 1920 x 1080
+offscreen, 5 rounds in rotated order, a fresh process per run. Cells: median of the per-round
+medians, range in brackets, ms.
+
+Single models, `profile_frame.py cpu` through `profile_matrix.py` (600 frames after 120 warmup,
+60 Hz pacing):
+
+| Scenario | GPU frame 1.77.1 | GPU frame 1.79.0 | Native submit 1.77.1 | Native submit 1.79.0 |
+| --- | ---: | ---: | ---: | ---: |
+| DamagedHelmet | 2.560 [2.554-2.567] | 2.572 [2.561-2.579] | 0.328 [0.319-0.335] | 0.210 [0.198-0.254] |
+| SheenChair | 2.901 [2.832-2.907] | 2.899 [2.895-2.915] | 0.337 [0.331-0.348] | 0.221 [0.215-0.243] |
+| DamagedHelmet, shadows | 3.985 [3.978-4.008] | 3.417 [3.411-3.422] | 0.358 [0.350-0.419] | 0.318 [0.281-0.321] |
+
+The clearcoat, anisotropy, and specular scenarios did not run: their assets were not in
+`.deps/sample-audit`.
+
+Many nodes, `tools/benchmark_nodes.py`: N nodes on a grid that share one 256-triangle sphere and
+one material, a directional light, `finish()` after each frame (300 frames after 60 warmup).
+"Update" is the camera move or the `set_transforms()` call before `render()`.
+
+| Nodes | Per frame | Native submit 1.77.1 | Native submit 1.79.0 | Update 1.77.1 | Update 1.79.0 | GPU frame 1.77.1 | GPU frame 1.79.0 |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5,000 | nothing | 1.802 [1.575-1.891] | 2.097 [2.095-2.455] | - | - | 6.511 [6.442-9.576] | 7.367 [6.620-8.349] |
+| 5,000 | camera moves | 1.745 [1.325-1.851] | 2.194 [1.927-2.346] | 0.035 | 0.046 | 6.602 [2.015-7.283] | 7.390 [7.267-7.473] |
+| 5,000 | `set_transforms()` | 1.821 [1.383-1.834] | 2.485 [2.003-2.833] | 2.007 [0.751-2.184] | 2.498 [2.077-2.728] | 9.711 [2.018-9.760] | 9.786 [9.729-9.846] |
+| 20,000 | nothing | 7.968 [6.317-8.621] | 7.320 [6.603-8.184] | - | - | 16.844 | 16.853 |
+| 20,000 | camera moves | 7.538 [7.063-8.026] | 8.270 [5.405-8.578] | 0.058 | 0.056 | 16.648 | 16.650 |
+| 20,000 | `set_transforms()` | 5.983 [5.660-6.097] | 6.920 [6.179-7.067] | 6.183 [5.601-6.685] | 6.811 [5.263-7.261] | 16.872 | 16.872 |
+
+Findings:
+
+- One model: native submit fell by about 0.12 ms per frame (36%). Lit shading GPU time did not
+  change; with shadows, the GPU frame fell by 0.57 ms (14%).
+- Many nodes: the table above overstates the regression for a static scene and a moving
+  camera; the 1.77.1 ranges are wide (one round of each case ran at about a third of the GPU
+  time). A second run, with Tracy-instrumented builds of both releases (`tools/profile_tracy.py`,
+  no capture, 3 alternating runs), gave the results below.
+
+5,000 nodes, second run:
+
+| Per frame | Native submit 1.77.1 | Native submit 1.79.0 | Update 1.77.1 | Update 1.79.0 |
+| --- | ---: | ---: | ---: | ---: |
+| nothing | 1.637 [1.594-1.664] | 1.573 [1.506-1.634] | - | - |
+| camera moves | 1.707 [1.659-1.709] | 1.564 [1.447-1.593] | 0.030 | 0.031 |
+| `set_transforms()` | 1.558 [1.540-1.568] | 1.887 [1.767-1.955] | 1.036 [1.022-1.048] | 1.222 [1.122-1.254] |
+
+Only a change of every node's transform in every frame is slower: about 0.5 ms per frame for
+5,000 nodes, or 0.1 microseconds per changed node. The Tracy zones put all of the native submit
+increase in `Filament::render` (1.468 to 1.829 ms; `beginFrame`, `endFrame`, and filly's output
+passes did not change). 1.79.0 defers world-transform updates to the next read or frame, so
+`render()` now also does that work. A run that read a world transform after `set_transforms()`
+(through `camera.frame()`), which makes Filament update the transforms there, separates the two:
+
+| Part | 1.77.1 | 1.79.0 |
+| --- | ---: | ---: |
+| `set_transforms()` and the world-transform update | 0.888 [0.882-1.033] | 1.152 [1.102-1.228] |
+| `Filament::render`, transforms already updated | 1.421 [1.397-1.469] | 1.734 [1.679-1.886] |
+
+So about half of the increase is in the transform update (per-node change tracking), and half in
+`render()` after it: the incremental scene cache of 1.79.0 updates 5,000 changed entities more
+slowly than 1.77.1 rebuilt the whole cache. Both are inside Filament; filly has no batch call left
+to use. Filament's notes measured these changes on Android, with hierarchies and few changed
+nodes.
+
+## Channel-mixing tone mappers (September 30, 2026)
+
+A tone mapper that mixes channels (`aces_legacy` here) with sRGB encoding now lets Filament's
+color grading encode into an RGBA8 buffer, and a graded variant of filly's encode pass copies it.
+See [output encoding](../explanation/design.md#output-encoding). `before` is the tree with the
+linear 3D LUT output in the RGBA16F buffer; `after` is the changed tree. Both are
+`tools/profile_tracy.py build --no-tracy` builds, `profile_frame.py cpu helmet-aces` (new
+scenario) and `helmet` (linear tone mapping, as a control). Intel Iris Xe unless stated; NVIDIA
+RTX A500 through `SHIM_MCCOMPAT=0x800000001`. AC, Balanced scheme, 60 Hz pacing, 5 rounds,
+14:48 to 15:00. CPU load before runs: median 12%, maximum 35%.
+
+| Scenario | GPU frame, before | GPU frame, after | Native submit (CPU), before | after |
+| --- | ---: | ---: | ---: | ---: |
+| ACES legacy, 1080p | 3.387 [3.299-3.392] | 3.167 [3.042-3.189] | 0.320 [0.303-0.399] | 0.320 [0.269-0.426] |
+| ACES legacy, 512 | 0.979 [0.970-0.982] | 0.890 [0.881-0.897] | 0.281 [0.263-0.290] | 0.286 [0.197-0.395] |
+| ACES legacy, 1080p, FXAA | 4.313 [4.214-4.358] | 4.135 [4.039-4.158] | 0.362 [0.286-0.380] | 0.397 [0.354-0.463] |
+| ACES legacy, 1080p, NVIDIA | 0.394 [0.392-0.399] | 0.349 [0.349-0.355] | 0.276 [0.263-0.340] | 0.224 [0.205-0.296] |
+| Linear, 1080p (control) | 2.308 [2.093-2.317] | 2.300 [2.220-2.315] | 0.266 [0.254-0.370] | 0.298 [0.250-0.309] |
+
+- The GPU frame is 0.18 to 0.22 ms shorter at 1080p on Intel and 0.045 ms on NVIDIA: color
+  grading writes 4 bytes per pixel instead of 8, and the encode pass reads them and applies no
+  transfer function. The CPU ranges overlap.
+- Two rejected variants, measured the same way: one encode material with the viewport test for
+  both routes cost the linear control 0.045 ms (2.364 against 2.319 ms); a graded material that
+  kept the transfer function behind the viewport test cost 1.0 ms more than the variant above
+  (4.213 ms in an earlier session of the same matrix).
+
+## Output path (September 30, 2026)
+
+The default output path changed from Filament's color grading (`"graded"`) to filly's encode pass
+(`"exact"`). See [Output encoding](../explanation/design.md#output-encoding) for the design.
+
+Builds: `old` is the tree before the change (color grading by default, with the `glFlush()`
+headless-swap fix), `new` is the changed tree, both built with
+`tools/profile_tracy.py build --no-tracy --source DIR`. `direct` is `new` with
+`--output-path direct`. Earlier sections of this page used builds without the swap fix, which
+added about 0.46 ms to every Intel GPU frame.
+
+### Why color grading cost 1.5 ms on Intel
+
+RenderDoc replay, Intel, AC, empty scene at 1920 x 1080, median of 10 replays. A scratch build of
+the old tree switched one setting at a time. The same captures were replayed on NVIDIA.
+
+| Variant | colorGrading pass, Intel | NVIDIA |
+| --- | ---: | ---: |
+| As shipped: RGB16F buffer, 1D LUT (`engine.color_grading.use_1d_lut`) | 1.463 | 0.158 |
+| R11G11B10F buffer (`hdrColorBuffer = MEDIUM`) | 1.460 | not replayed |
+| 3D LUT, 32^3 (1D LUT off) | 0.901 | 0.092 |
+| 3D LUT, 16^3 | 0.910 | not replayed |
+| Dithering on | 1.639 | 0.159 |
+| Framebuffer-fetch subpass (wrong output on Intel) | 1.334 in the color pass, plus 0.421 for the copy to the target | no framebuffer fetch |
+
+- The 1D LUT is the largest single cost. Filament stores it as a 512 x 1 x 1 R16F 3D texture and
+  samples it three times per pixel (`colorGrade1D()`); the 3D LUT samples once. The two extra 3D
+  texture fetches cost 0.56 ms at 1080p on Intel and 0.07 ms on NVIDIA.
+- A full-screen pass has a floor: the plain copy of the subpass variant took 0.42 ms at 1080p. The
+  rest of the shader with one 3D LUT fetch took 0.48 ms more.
+- The intermediate format does not matter (1.463 against 1.460 ms), so the pass is not limited by
+  reading the HDR buffer. The LUT dimensions do not matter either.
+- The default frame had no other postprocessing pass: the capture holds the color pass and color
+  grading only (no resolve, blit, or structure pass).
+- The earlier 2.0 ms per frame included 0.46 ms of headless `SwapBuffers`, since fixed. With the
+  fix, the live difference to the direct path was 1.51 ms (1.617 against 0.105 ms, below).
+- Breakdown of 1.46 ms (replay): 0.42 ms full-screen floor, 0.48 ms shader with one LUT fetch,
+  0.56 ms for the two extra fetches of the 1D LUT.
+
+### GPU frame, Intel
+
+Intel Iris Xe, AC, Balanced scheme, 60 Hz pacing (offscreen) or vsync (pyglet), 5 rounds,
+10:47 to 11:14. CPU load before runs: median 15%, maximum 32%.
+
+| Scenario | old | new | direct | old minus new | new minus direct |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Empty, 1080p | 1.617 [1.615-1.625] | 0.800 [0.798-0.801] | 0.105 [0.103-0.106] | 0.82 | 0.70 |
+| DamagedHelmet, 1080p | 3.159 [3.107-3.181] | 2.321 [2.314-2.323] | 1.607 [1.597-1.620] | 0.84 | 0.71 |
+| Empty, 512 | 0.277 [0.275-0.278] | 0.164 [0.163-0.165] | 0.051 [0.050-0.052] | 0.11 | 0.11 |
+| DamagedHelmet, 512 | 0.900 [0.894-0.904] | 0.747 [0.744-0.750] | 0.632 [0.629-0.635] | 0.15 | 0.12 |
+| DamagedHelmet, 1080p, FXAA | 4.063 [4.060-4.075] | 3.262 [3.254-3.277] | - | 0.80 | - |
+| DamagedHelmet, 1080p, pyglet | 3.189 [3.177-3.191] | 2.334 [2.317-2.345] | 1.631 [1.629-1.635] | 0.86 | 0.70 |
+| DamagedHelmet, 512, pyglet | 0.905 [0.900-0.910] | 0.745 [0.743-0.756] | 0.639 [0.631-0.643] | 0.16 | 0.11 |
+
+pyglet host, GPU start to acquired (host timestamps): 4.259, 3.283, and 2.515 ms at 1080p;
+2.637, 2.187, and 2.153 ms at 512. `acquire()` enter (CPU): 1.357, 0.975, and 1.176 ms at 1080p.
+
+The linear buffer format, measured with a scratch build that uses RGBA32F: 0.845 [0.844-0.850] ms
+empty and 2.405 [2.352-2.425] ms DamagedHelmet at 1080p, 0.05 and 0.08 ms more than RGBA16F. See
+[Output encoding](../explanation/design.md#output-encoding) for why RGBA16F was kept.
+
+### GPU frame, NVIDIA
+
+NVIDIA RTX A500, offscreen, 1920 x 1080, 60 Hz pacing, AC, 5 rounds, 11:26 to 11:36. The scratch
+builds ran from a copy of the base interpreter with `GpuPreference=2` under
+`HKCU\Software\Microsoft\DirectX\UserGpuPreferences`, removed afterwards; Filament's log
+confirmed the NVIDIA renderer.
+
+| Scenario | old | new | direct |
+| --- | ---: | ---: | ---: |
+| Empty | 0.232 [0.227-0.240] | 0.209 [0.200-0.217] | 0.092 [0.084-0.106] |
+| DamagedHelmet | 0.367 [0.367-0.368] | 0.275 [0.275-0.276] | 0.181 [0.180-0.181] |
+| DamagedHelmet, FXAA | 0.494 [0.494-0.494] | 0.393 [0.393-0.395] | - |
+
+### CPU time
+
+Native submit (`Stats.cpu_submit_ms`), median of round medians, ms:
+
+| Scenario | old | new | direct |
+| --- | ---: | ---: | ---: |
+| Intel, empty, 1080p | 0.208 | 0.332 | 0.160 |
+| Intel, DamagedHelmet, 1080p | 0.201 | 0.324 | 0.197 |
+| Intel, DamagedHelmet, 1080p, FXAA | 0.243 | 0.377 | - |
+| Intel, DamagedHelmet, 1080p, pyglet | 0.204 | 0.258 | 0.178 |
+| NVIDIA, DamagedHelmet, 1080p | 0.239 | 0.323 | 0.227 |
+| NVIDIA, DamagedHelmet, 1080p, FXAA | 0.243 | 0.438 | - |
+
+The encode pass is a second Filament view, and FXAA a third. In a Tracy build (one run, Intel,
+DamagedHelmet, 1080p), `Filament::render` of the scene view took 0.155 ms and the output passes
+0.115 ms (p50). The round medians of native submit vary by up to 0.15 ms between rounds, so treat
+differences below that as noise. Turning off frustum culling on the pass views was not measurably
+faster (0.301 [0.272-0.513] against 0.412 [0.279-0.453] ms); the change is kept, because the
+triangle is never culled.
+
+Renderer creation compiles the encode material: 0.88 to 0.96 s against 0.70 to 0.80 s before (four
+runs each). Part of this is the material compiler's first use, which a runtime-path load paid
+before. Setting `antialiasing = "fxaa"` compiles the FXAA material: 35 to 39 ms.
+
+Since October 3, 2026, both materials are precompiled at build time. Renderer creation took 0.60
+to 0.82 s (four processes, runtime material path, Intel), and the first render with FXAA,
+including the creation of its material, 17 to 21 ms.
+
+### Per-pass GPU time of the new path
+
+RenderDoc replay, 10 replays, captured on Intel on AC at 10:41 to 10:43, and the same captures
+replayed on NVIDIA. Replay GPU clocks differ between captures: the color pass of the same
+DamagedHelmet frame took 0.97 to 1.46 ms on Intel. Compare passes within one capture.
+
+| Scenario | Pass | Intel ms | NVIDIA ms |
+| --- | --- | ---: | ---: |
+| Empty, 1080p | Color Pass (clears the RGBA16F buffer) | 0.000 | 0.035 |
+| Empty, 1080p | Encode (RGBA16F to SRGB8_A8 target) | 0.686 | 0.076 |
+| DamagedHelmet, 1080p | Color Pass | 1.458 | 0.216 |
+| DamagedHelmet, 1080p | Encode | 0.705 | 0.077 |
+| DamagedHelmet, 1080p, FXAA | Color Pass | 0.973 | 0.217 |
+| DamagedHelmet, 1080p, FXAA | Encode (to the RGBA8 FXAA input) | 0.435 | 0.086 |
+| DamagedHelmet, 1080p, FXAA | FXAA | 0.593 | 0.101 |
+| DamagedHelmet, 512 | Color Pass | 0.547 | 0.094 |
+| DamagedHelmet, 512 | Encode | 0.114 | 0.015 |
+| DamagedHelmet, 1080p, old | Color Pass | 1.451 | 0.220 |
+| DamagedHelmet, 1080p, old | colorGrading | 1.448 | 0.164 |
+| DamagedHelmet, 1080p, FXAA, old | Color Pass | 1.124 | 0.220 |
+| DamagedHelmet, 1080p, FXAA, old | colorGrading | 1.071 | 0.156 |
+| DamagedHelmet, 1080p, FXAA, old | fxaa | 0.672 | 0.131 |
+
+- The encode pass costs about half of color grading in the same capture, on both GPUs. Against
+  the 0.42 ms copy floor on Intel, its transfer function costs about 0.27 ms at the empty scene's
+  clock.
+- A second probe with an RGBA8 instead of SRGB8_A8 offscreen target showed no difference
+  (0.688 ms for both, empty scene).
+- The exact path has no other pass: the scene renders straight into the RGBA16F buffer.
+
+### Encoding accuracy
+
+- Every fp16 value in `[0, 1]` (15,361 values) encodes to the rounded analytic value, sRGB and
+  linear, on Intel and NVIDIA (`test_exact_path_rounds_every_half_float_exactly`).
+- The 319-value sweep: 9 values are one level from the rounded analytic value of the float
+  input, because both drivers truncate the fp32 shader output to fp16 in the RGBA16F buffer; each
+  stored level is exact for the truncated value. Largest deviation 0.538 levels. The same 9
+  values move with MSAA, FXAA, refraction, shadows, SSAO, and transparent views, so the sweep is
+  identical in all of them. With RGBA32F, 0 values moved without MSAA, but 9 still moved with
+  MSAA or a transparent view, which pass through Filament's own fp16 buffers.
+- Bloom and depth of field (Filament's color grading before the encode pass): 19 of 319 values
+  one level off, largest deviation 0.611 levels. Direct path: 23 of 319, 0.676 levels.
+
+## Output path, effects, and size (before the change)
+
+Intel, offscreen, runtime materials, 60 Hz pacing. Measured with color grading as the default
+("graded") and the headless `SwapBuffers`; see
+[Output path (September 30, 2026)](#output-path-september-30-2026) for the current path.
+
+| Scenario | GPU frame 1080p | GPU frame 512 | native submit 1080p | CPU busy 1080p |
+| --- | ---: | ---: | ---: | ---: |
+| Empty, graded | 2.069 [1.835-2.095] | 0.816 [0.637-0.820] | 0.189 [0.167-0.206] | 0.209 [0.185-0.234] |
+| Empty, direct | 0.106 [0.105-0.108] | 0.051 [0.051-0.052] | 0.192 [0.164-0.216] | 0.216 [0.185-0.245] |
+| DamagedHelmet, graded | 3.503 [3.389-3.553] | 1.297 [1.256-1.468] | 0.212 [0.188-0.236] | 0.258 [0.226-0.289] |
+| DamagedHelmet, direct | 1.610 [1.599-1.621] | 0.636 [0.634-0.640] | 0.189 [0.174-0.198] | 0.236 [0.208-0.237] |
+| DamagedHelmet, shadows | 4.179 [4.097-4.246] | 1.657 [1.489-1.765] | 0.246 [0.236-0.271] | 0.285 [0.275-0.313] |
+| DamagedHelmet, MSAA 4x | 4.703 [4.577-4.762] | 1.643 [1.504-1.670] | 0.234 [0.203-0.245] | 0.284 [0.247-0.303] |
+| DamagedHelmet, FXAA | 4.496 [4.402-4.624] | 1.540 [1.496-1.667] | 0.218 [0.211-0.229] | 0.260 [0.256-0.275] |
+
+At 144 Hz pacing (Intel, 1080p, 4 rounds on AC; see [Headless swap chain](#headless-swap-chain)):
+empty graded 2.029, empty direct 0.105, DamagedHelmet graded 3.585, DamagedHelmet direct
+1.624. The pacing rate does not change the GPU frame time.
+
+CPU time does not depend on the output path or the effects within the resolution of these runs:
+native submit is 0.19 to 0.25 ms, and all 60 Hz offscreen runs had frame intervals of
+17.03 to 17.08 ms at the 95th percentile.
+
+## Materials: runtime and archive
+
+The runtime material path was removed on October 6, 2026 (see
+[phase 4 results](material-precompilation.md#phase-4-results-october-6-2026)).
+These numbers compare the two paths before the removal.
+
+Intel, offscreen, color grading on, 60 Hz pacing. "Delta" is archive minus runtime.
+
+| Asset | Runtime 1080p | Archive 1080p | Delta 1080p | Runtime 512 | Archive 512 | Delta 512 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain | 3.503 [3.389-3.553] | 3.887 [3.794-3.937] | +0.38 (+11%) | 1.297 [1.256-1.468] | 1.469 [1.340-1.632] | +0.17 |
+| Clearcoat | 3.039 [2.725-3.110] | 4.141 [4.044-4.253] | +1.10 (+36%) | 1.089 [0.974-1.203] | 1.468 [1.295-1.624] | +0.38 |
+| Sheen | 3.362 [3.255-3.388] | 4.155 [3.984-4.185] | +0.79 (+24%) | 1.367 [1.244-1.377] | 1.609 [1.552-1.687] | +0.24 |
+| Anisotropy | 3.419 [3.372-3.450] | 4.599 [4.477-4.667] | +1.18 (+35%) | 1.515 [1.329-1.572] | 1.991 [1.849-2.019] | +0.48 |
+| Specular | 2.885 [2.767-2.916] | 3.899 [3.790-3.972] | +1.01 (+35%) | 1.177 [0.964-1.239] | 1.423 [1.314-1.566] | +0.25 |
+
+The frame includes about 2.0 ms of color grading at 1080p. Without it, the shading part of the
+archive path costs about 1.3x (plain) to 2.2x (clearcoat, specular) the runtime path. This
+subtraction is an estimate. The RenderDoc Color Pass times (battery, relative only) give 1.15x
+(plain) to 2.09x (clearcoat) on Intel and 1.07x to 1.40x on NVIDIA; see
+[Per-pass GPU time (battery)](#per-pass-gpu-time-battery).
+CPU submit time is the same for both paths (0.18 to 0.21 ms).
+
+## Host paths
+
+Intel, DamagedHelmet, color grading, runtime materials. Offscreen is paced by a sleep; the hosts
+by vsync at 60 Hz. "GPU start to acquired" is measured with GL timestamps in the host context:
+it is Filament's frame on the GPU timeline, including driver-thread latency. PsychoPy runs
+have no GPU frame column because the PsychoPy venv has no instrumented build.
+
+| Path | GPU frame | GPU start to acquired | GPU host draw | `acquire()` enter (CPU) | host draw (CPU) | CPU busy | CPU busy p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1080p offscreen | 3.503 [3.389-3.553] | - | - | - | - | 0.258 [0.226-0.289] | 0.375 [0.344-0.418] |
+| 1080p pyglet | 3.602 [3.559-3.659] | 4.719 [4.593-4.811] | 0.384 [0.381-0.387] | 1.452 [1.424-1.544] | 0.255 [0.247-0.272] | 2.089 [2.057-2.190] | 3.032 [2.959-3.244] |
+| 1080p PsychoPy | - | 5.660 [5.480-5.801] | 0.776 [0.775-0.782] | 1.367 [1.132-1.456] | 0.237 [0.214-0.264] | 2.032 [1.666-2.127] | 3.042 [2.679-3.559] |
+| 512 offscreen | 1.297 [1.256-1.468] | - | - | - | - | 0.240 [0.201-0.282] | 0.340 [0.325-0.399] |
+| 512 pyglet | 1.331 [1.259-1.431] | 2.964 [2.768-3.136] | 0.074 [0.072-0.077] | 1.166 [1.108-1.205] | 0.208 [0.189-0.245] | 1.685 [1.581-1.714] | 2.850 [2.497-3.649] |
+| 512 PsychoPy | - | 3.044 [2.851-3.323] | 0.130 [0.128-0.132] | 1.030 [0.868-1.120] | 0.192 [0.176-0.200] | 1.561 [1.324-1.661] | 2.884 [2.509-3.063] |
+
+- `acquire()` blocks the main thread until Filament's driver thread has processed the frame and
+  published its fence. This is most of the host CPU cost.
+- "CPU busy" is the main thread from frame start to the end of `acquire()` exit; it excludes
+  `flip()`.
+- The shared-host rows of `render()` wall include about 0.09 ms of GL timestamp and `glFlush()`
+  overhead from the measurement; `profile_frame.py` now keeps it outside the timed phases.
+- Frame intervals: 95th percentile 17.4 to 17.8 ms for the hosts at 60 Hz; 1 frame above
+  1.5 times the median in 3,000 PsychoPy and 3,000 pyglet frames.
+
+## Headless swap chain
+
+**Status (September 30, 2026): fixed in the main build.** `SyncPlatform::commit()` in
+`core/gl_interop.cpp` now calls `glFlush()` instead of `SwapBuffers()` for every platform. The
+measurements below come from the `w-ns` scratch build, which made the same change. The full test
+suites pass with it on Windows; Linux was not retested.
+
+filly renders every frame to a headless swap chain, and Filament's `PlatformWGL::commit()`
+calls `SwapBuffers()` on its hidden 1 x 1 window. The candidate fix (`w-ns`) overrides
+`commit()` in filly's platform to call `glFlush()` instead.
+
+DamagedHelmet, 1080p, color grading, 4 or 5 rounds on AC (runs after the switch to battery at
+08:53 are left out):
+
+| GPU, path | Build | GPU frame | GPU start to acquired | `acquire()` enter (CPU) | CPU busy |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Intel, offscreen 60 Hz | current | 3.650 [3.544-3.675] | - | - | 0.250 [0.173-0.275] |
+| Intel, offscreen 60 Hz | fix | 3.191 [3.179-3.205] | - | - | 0.254 [0.169-0.282] |
+| Intel, offscreen 144 Hz | current | 3.585 [3.077-3.669] | - | - | 0.232 [0.143-0.323] |
+| Intel, offscreen 144 Hz | fix | 3.195 [3.111-3.204] | - | - | 0.239 [0.222-0.270] |
+| Intel, pyglet | current | 3.672 [3.547-3.722] | 4.860 [4.582-4.945] | 1.475 [1.378-1.492] | 2.114 [1.989-2.144] |
+| Intel, pyglet | fix | 3.188 [3.150-3.205] | 4.140 [3.612-4.325] | 1.267 [0.882-1.406] | 1.931 [1.427-2.079] |
+| NVIDIA, offscreen 60 Hz | current | 16.229 [16.216-16.302] | - | - | 0.123 [0.108-0.182] |
+| NVIDIA, offscreen 60 Hz | fix | 0.367 [0.367-0.368] | - | - | 0.238 [0.176-0.241] |
+| NVIDIA, offscreen 144 Hz | current | 16.182 [16.160-16.315] | - | - | 0.111 [0.101-0.118] |
+| NVIDIA, offscreen 144 Hz | fix | 0.367 [0.366-0.368] | - | - | 0.202 [0.195-0.223] |
+| NVIDIA, pyglet | current | 0.745 [0.722-0.795] | 1.464 [1.368-1.617] | 1.206 [1.099-1.278] | 1.556 [1.454-1.754] |
+| NVIDIA, pyglet | fix | 0.381 [0.379-0.383] | 1.080 [1.025-1.158] | 0.623 [0.574-0.763] | 1.042 [0.937-1.246] |
+
+- **Confirmed on NVIDIA.** The swap on the hidden window waits for the display refresh, at 60 Hz
+  and at 144 Hz pacing. Filament's timer spans the wait, so its GPU frame reads one refresh
+  (16.2 ms) for 0.37 ms of work. The CPU does not stall offscreen (frame intervals stay at the
+  pacing rate), but the frame's GPU work and its completion are delayed. With a pyglet host the
+  swap costs 0.36 ms of GPU frame time and 0.58 ms of CPU in `acquire()`.
+- **Intel.** The swap costs 0.39 to 0.48 ms of GPU frame time and 0.21 ms of CPU in `acquire()`.
+- Frame ids, `FrameInfo`, fences, and readback worked with the fix in these runs. It was not
+  tested on Linux, with GLX or EGL, or with the test suite.
+
+## Per-pass GPU time (battery)
+
+**Battery.** Captured on the Intel GPU at 09:09 to 09:15 on battery (Balanced scheme), after
+the switch from AC at 08:53. Use these tables as relative breakdowns only; do not compare them
+with the AC tables above.
+
+`profile_frame.py renderdoc`, one frame after 120 warmup frames, 1920 x 1080 unless stated,
+median of 10 replays per action. The same capture is replayed on each GPU. Pass names are
+Filament's frame-graph names. Replay times exclude inter-pass gaps, driver-thread latency, and
+the headless swap, so they are lower than the live GPU frame.
+
+| Scenario | Pass | Intel ms | NVIDIA ms |
+| --- | --- | ---: | ---: |
+| Empty, graded | colorGrading | 1.475 | 0.158 |
+| Empty, graded | Color Pass (clears) | 0.000 | 0.038 |
+| Empty, direct | Color Pass (clears) | 0.000 | 0.025 |
+| DamagedHelmet, graded | Color Pass | 1.697 | 0.239 |
+| DamagedHelmet, graded | colorGrading | 1.488 | 0.165 |
+| DamagedHelmet, direct | Color Pass | 1.636 | 0.203 |
+| DamagedHelmet, shadows | Shadow Pass (1024 x 1024 D16) | 0.158 | 0.046 |
+| DamagedHelmet, shadows | Color Pass | 2.123 | 0.250 |
+| DamagedHelmet, shadows | colorGrading | 1.504 | 0.165 |
+| DamagedHelmet, MSAA 4x | Color Pass (with resolve) | 2.794 | 0.521 |
+| DamagedHelmet, MSAA 4x | colorGrading | 1.501 | 0.166 |
+| DamagedHelmet, FXAA | Color Pass | 1.679 | 0.242 |
+| DamagedHelmet, FXAA | colorGrading (to an RGBA8 intermediate) | 1.482 | 0.156 |
+| DamagedHelmet, FXAA | fxaa | 0.959 | 0.132 |
+| DamagedHelmet 512, graded | Color Pass | 0.620 | 0.098 |
+| DamagedHelmet 512, graded | colorGrading | 0.215 | 0.030 |
+| DamagedHelmet 512, direct | Color Pass | 0.594 | 0.080 |
+
+Color Pass of each material, runtime and archive path (colorGrading is 1.44 to 1.51 ms on
+Intel and 0.16 ms on NVIDIA in every case):
+
+| Asset | Intel runtime | Intel archive | Ratio | NVIDIA runtime | NVIDIA archive | Ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain | 1.697 | 1.947 | 1.15 | 0.239 | 0.256 | 1.07 |
+| Clearcoat | 1.075 | 2.246 | 2.09 | 0.141 | 0.197 | 1.40 |
+| Sheen | 1.282 | 2.230 | 1.74 | 0.201 | 0.222 | 1.10 |
+| Anisotropy | 1.485 | 2.209 | 1.49 | 0.217 | 0.238 | 1.10 |
+| Specular | 0.940 | 1.508 | 1.60 | 0.145 | 0.171 | 1.18 |
+
+- The color-grading pass costs the same with or without a model: it is a fixed full-screen
+  cost of about 1.5 ms at 1080p on Intel (replay) and 0.22 ms at 512 x 512.
+- On NVIDIA every pass is 6 to 10 times faster than on Intel.
+- The archive shaders have no preprocessor source in the capture, so the shader table does not
+  list their features. The feature list of the runtime shaders is in the capture reports.
+- The render-target column of the tool shows "1x1" for the direct path; that column is not
+  reliable for imported or direct targets.
+
+## CPU split (battery)
+
+**Battery.** Tracy-instrumented build (`tools/profile_tracy.py`), DamagedHelmet, 1080p, color
+grading, Intel GPU, 600 frames after 120 warmup, one run each, 09:19 to 09:20. CPU clocks on
+battery are lower than on AC: the `acquire()` wait was 2.1 ms here against 1.45 ms on AC.
+
+| Zone (ms) | Thread | Offscreen p50 | Offscreen p95 | pyglet p50 | pyglet p95 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `submit` (native part of `render()`) | main | 0.187 | 0.369 | 0.245 | 0.381 |
+| `Filament::beginFrame` | main | 0.030 | 0.060 | 0.032 | 0.058 |
+| `Filament::render` | main | 0.141 | 0.280 | 0.187 | 0.301 |
+| `Filament::endFrame` | main | 0.012 | 0.025 | 0.015 | 0.027 |
+| `Engine::flush` | main | 0.000 | 0.001 | 0.000 | 0.000 |
+| filly bookkeeping (`submit` minus the above) | main | about 0.004 | | about 0.011 | |
+| `ImportedTarget::acquire` / `wait_on_host` | main | - | - | 2.112 | 4.182 |
+| `driver frame` (backend beginFrame to endFrame) | driver | 0.590 | 1.296 | 1.099 | 2.439 |
+| `driver commit` (headless SwapBuffers) | driver | 0.158 | 0.355 | 0.369 | 1.454 |
+| `driver createSync` | driver | - | - | 0.125 | 0.565 |
+
+Python around the native call: `render()` wall minus native submit was 0.013 ms (offscreen)
+and 0.017 ms (pyglet); the model edit took 0.03 ms. The pyglet host draw took 0.52 ms of CPU.
+
+- Filament's `Renderer::render` (culling, frame-graph setup, command recording) is 75% of the
+  native submit. filly's own bookkeeping is below 0.02 ms.
+- The main thread's largest cost in a shared host is `wait_on_host`: waiting for the driver
+  thread to reach the frame's fence. The driver thread spends 0.6 to 1.1 ms on the frame's GL
+  commands, of which 0.16 to 0.37 ms is the headless `SwapBuffers`.
+
+## Headless swap chain in nsys (battery)
+
+**Battery.** NVIDIA, DamagedHelmet, 1080p, 300 frames after 120 warmup, one run each,
+09:03 to 09:06. Driver-thread GL time per frame and the latency from the end of `render()` on
+the Python thread to the end of that frame on the driver thread (`SwapBuffers`, or `glFlush`
+with the fix):
+
+| Path | Build | Driver thread GL calls per frame | of which `glFenceSync` | render() to frame end p50 | p95 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Offscreen 60 Hz | current | 16.38 ms | 15.35 ms | 0.68 ms | 16.91 ms |
+| Offscreen 144 Hz pacing | current | 16.43 ms | 15.55 ms | 8.41 ms | 15.92 ms |
+| pyglet 60 Hz | current | 1.41 ms | 0.86 ms | 1.11 ms | 1.77 ms |
+| Offscreen 60 Hz | fix | 1.28 ms | 0.17 ms | 1.17 ms | 1.78 ms |
+| Offscreen 144 Hz pacing | fix | 1.12 ms | 0.16 ms | 0.98 ms | 1.67 ms |
+| pyglet 60 Hz | fix | 0.64 ms | 0.10 ms | 1.15 ms | 1.71 ms |
+
+The first GL call after the headless `SwapBuffers` (`glFenceSync`) blocks the driver thread
+until the next vertical blank of the 60 Hz display. Offscreen, a frame's GPU work can then wait
+up to one refresh after `render()` returns (p95 16.9 ms at 60 Hz, median 8.4 ms at 144 Hz
+pacing). With the fix, the driver thread finishes each frame about 1 ms after `render()`.
+
+## Automatic instancing
+
+`EXT_mesh_gpu_instancing` expands into one child node per instance, and the children share the
+mesh's vertex and index buffers and the material instance. Filament's automatic instancing
+(`Engine::setAutomaticInstancingEnabled`) merges consecutive draws in the sorted command list
+that have the same material instance, primitive, index range, and raster state, and that are
+not skinned, morphed, or instanced already. It draws up to 64 of them in one call (8 in WebGL),
+and copies their per-object data into a temporary uniform buffer for each pass. filly now turns
+it on for every renderer.
+
+Measured on October 12, 2026 with a probe build that had an environment switch for the
+setting. 1920 x 1080 offscreen, the lighting of the DamagedHelmet scenario, AC. `finish()` after
+each frame, so each frame is complete before the next starts. 60 warmup and 300 measured
+frames in 3 interleaved rounds; 6 rounds for DamagedHelmet, Sponza, and the wooden horse on
+Intel, and for 1,000 and 5,000 spheres, DamagedHelmet, and Sponza on NVIDIA. Cells: median of
+the per-round medians, range in brackets, ms. "Render + finish" is the wall time of `render()`
+and `finish()`. Generated assets: N UV spheres of 256 triangles (64 for 20,000) with one
+material; "5,000 x 8 materials" splits them over 8 materials. SimpleInstancing is the Khronos
+sample.
+
+Intel Iris Xe:
+
+| Scene | Instancing | `cpu_submit_ms` | GPU frame | Render + finish |
+| --- | --- | ---: | ---: | ---: |
+| SimpleInstancing | off | 0.198 [0.183-0.217] | 1.483 [1.480-1.487] | 2.846 [2.798-2.909] |
+| SimpleInstancing | on | 0.181 [0.180-0.234] | 1.331 [1.296-1.336] | 2.584 [2.539-2.695] |
+| 1,000 spheres | off | 0.477 [0.469-0.501] | 5.816 [5.814-5.826] | 8.557 [8.417-8.670] |
+| 1,000 spheres | on | 0.505 [0.495-0.524] | 3.832 [3.746-3.835] | 5.503 [5.450-5.517] |
+| 5,000 spheres | off | 1.367 [1.327-1.369] | 11.089 [10.992-12.245] | 19.552 [18.125-20.313] |
+| 5,000 spheres | on | 1.731 [1.685-1.735] | 9.514 [9.511-9.515] | 12.640 [12.552-12.705] |
+| 5,000 x 8 materials | off | 1.507 [1.480-1.510] | 11.339 [10.106-11.797] | 19.290 [19.080-19.843] |
+| 5,000 x 8 materials | on | 1.836 [1.815-1.865] | 9.903 [9.822-10.300] | 13.253 [13.060-13.366] |
+| 20,000 spheres | off | 10.596 [6.097-10.887] | 35.717 [34.724-36.011] | 91.277 [65.039-94.321] |
+| 20,000 spheres | on | 14.218 [7.703-14.602] | 8.990 [8.961-8.997] | 28.171 [19.773-28.559] |
+| DamagedHelmet | off | 0.152 [0.132-0.210] | 2.477 [2.470-2.499] | 3.711 [3.661-4.024] |
+| DamagedHelmet | on | 0.176 [0.139-0.253] | 2.493 [2.478-2.505] | 3.781 [3.679-4.064] |
+| Sponza | off | 0.171 [0.156-0.320] | 3.981 [3.437-4.143] | 5.649 [5.418-6.376] |
+| Sponza | on | 0.212 [0.174-0.321] | 4.009 [3.016-4.141] | 5.862 [4.650-6.340] |
+| Wooden horse | off | 0.166 [0.127-0.221] | 1.882 [1.774-1.939] | 3.157 [2.929-3.441] |
+| Wooden horse | on | 0.135 [0.129-0.233] | 1.823 [1.778-1.916] | 2.987 [2.917-3.410] |
+
+NVIDIA RTX A500:
+
+| Scene | Instancing | `cpu_submit_ms` | GPU frame | Render + finish |
+| --- | --- | ---: | ---: | ---: |
+| SimpleInstancing | off | 0.410 [0.184-0.584] | 0.174 [0.154-0.174] | 1.616 [0.866-1.978] |
+| SimpleInstancing | on | 0.428 [0.192-0.563] | 0.177 [0.169-0.181] | 1.651 [0.887-1.870] |
+| 1,000 spheres | off | 1.453 [0.971-1.743] | 0.436 [0.344-0.724] | 3.781 [2.739-4.164] |
+| 1,000 spheres | on | 1.423 [1.039-1.624] | 0.398 [0.394-0.399] | 3.175 [2.550-3.457] |
+| 5,000 spheres | off | 4.754 [4.153-5.330] | 2.769 [1.328-3.509] | 9.804 [7.449-11.465] |
+| 5,000 spheres | on | 5.129 [2.021-6.112] | 1.189 [1.183-1.191] | 9.730 [5.333-11.006] |
+| 20,000 spheres | off | 20.211 [14.861-23.698] | 14.633 [10.039-18.676] | 30.604 [29.935-44.278] |
+| 20,000 spheres | on | 22.905 [16.378-24.053] | 1.872 [1.845-2.610] | 31.165 [27.107-31.779] |
+| DamagedHelmet | off | 0.366 [0.180-0.466] | 0.294 [0.287-0.382] | 1.748 [1.201-2.255] |
+| DamagedHelmet | on | 0.368 [0.278-0.425] | 0.291 [0.286-0.536] | 1.697 [1.330-2.686] |
+| Sponza | off | 0.445 [0.331-0.593] | 0.419 [0.416-0.515] | 2.207 [1.871-2.926] |
+| Sponza | on | 0.489 [0.328-0.531] | 0.419 [0.418-0.429] | 2.290 [1.956-2.648] |
+| Wooden horse | off | 0.334 [0.258-0.510] | 0.221 [0.221-0.223] | 1.621 [1.463-1.859] |
+| Wooden horse | on | 0.320 [0.269-0.344] | 0.220 [0.219-0.222] | 1.556 [1.504-1.610] |
+
+- **Instanced assets.** On Intel, instancing cut render plus finish by 9% (SimpleInstancing),
+  36% (1,000), 31 to 35% (5,000), and 69% (20,000). On NVIDIA the GPU frame fell by up to 87%,
+  but the frame stayed bound by Filament's CPU work on the main thread, so render plus finish
+  did not change beyond the spread of the rounds.
+- **Cost.** The temporary uniform buffer adds main-thread time when instances are batched: 0.03
+  ms at 1,000 instances, 0.36 ms at 5,000, and 3.6 ms at 20,000 on Intel. It is smaller than
+  the driver and GPU time that it saves on Intel.
+- **Scenes without repeated primitives** (DamagedHelmet, Sponza with 103 primitives and 25
+  materials, the wooden horse) showed no difference larger than the spread of the rounds on
+  either GPU. Filament then only scans the sorted command list.
+- **Pixels.** Every scene above rendered identical pixels with instancing off and on, without
+  and with shadows and MSAA 4x, at 800 x 600. So did the 1,000-sphere scene after per-instance
+  edits: a moved instance, a scaled instance, an instance moved out of the view, and two
+  node-local material copies.
+- **60 Hz paced loop** (5 rounds of 600 frames, no `finish()`): the same direction. For 1,000
+  instances on Intel the GPU frame went from 6.1 to 4.3 ms; for 20,000, `cpu_submit_ms` went
+  from 28 to 14 ms, because frames without instancing filled Filament's command queue.
+
+## Generated meshes
+
+Measured on October 29, 2026. Scene: N boxes (`filly.shapes.box(0.6, 0.6, 0.6)`, 24 vertices)
+on a grid, one directional light, 512 x 512 offscreen target, `msaa = 4`. Modes:
+
+- **Separate:** N `scene.create_mesh(**box)` calls.
+- **Shared:** one `renderer.create_mesh_asset(**box)` and N `scene.add(asset)` calls. No model
+  has a material handle, so all show one material instance.
+- **glTF asset:** one `renderer.load_asset()` of the same box as a GLB and N `scene.add()`
+  calls. Before this change, this was the only way to share the buffers; each model has its own
+  material instance.
+
+"Before" is the tree of October 27, 2026; "after" is this change. Each configuration ran in a
+fresh process: creation, then 30 warmup frames, 120 frames of `render()` and `target.read()`,
+and 120 frames of `render()` and `finish()`. 3 rounds; each round ran every configuration once,
+in an order rotated by one per round, and the two builds were interleaved. Cells: median of the
+per-round values, range in brackets. "Create" is the wall time of the N calls and of setting
+each model's position. "Private" is the process private bytes that creation added, after a
+`finish()`; the empty renderer had 750 MiB (Intel) or 670 MiB (NVIDIA). "Peak WS" is the peak
+working set of the process, with the frames; it was 282 MiB (Intel) or 142 MiB (NVIDIA) before
+creation. Frame times are medians of one process, in ms. AC power.
+
+Intel Iris Xe:
+
+| Mode | Build | N | Create (ms) | Private (MiB) | Peak WS (MiB) | Render + read | Render + finish |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Separate | before | 100 | 108 [97-152] | 64 [64-65] | 336 [336-336] | 3.4 [3.2-3.5] | 1.8 [1.7-2.1] |
+| Separate | after | 100 | 15 [15-16] | 29 [29-29] | 308 [308-308] | 3.6 [3.2-4.0] | 2.1 [2.0-2.1] |
+| Shared | after | 100 | 6 [4-6] | 0 [0-0] | 293 [293-293] | 3.0 [2.9-3.1] | 1.7 [1.5-1.8] |
+| Separate | before | 1,000 | 551 [429-609] | 480 [478-481] | 553 [552-553] | 6.9 [6.7-7.9] | 9.4 [9.3-10.4] |
+| Separate | after | 1,000 | 159 [126-391] | 296 [296-297] | 436 [436-436] | 6.6 [6.2-10.3] | 4.9 [4.9-9.2] |
+| glTF asset | before | 1,000 | 105 [97-135] | 23 [23-23] | 326 [326-326] | 5.6 [5.0-5.8] | 4.0 [3.6-4.3] |
+| Shared | after | 1,000 | 45 [42-46] | 3 [3-3] | 298 [297-298] | 3.7 [3.1-3.8] | 2.2 [2.0-2.3] |
+| Separate | before | 3,000 | 2,899 [2,402-2,964] | 1,402 [1,401-1,403] | 1,022 [1,021-1,022] | 26.3 [26.3-26.6] | 24.1 [23.6-25.0] |
+| Separate | after | 3,000 | 533 [424-692] | 895 [894-895] | 715 [714-715] | 21.2 [11.8-21.9] | 20.2 [20.2-20.2] |
+| Shared | after | 3,000 | 162 [104-175] | 11 [11-11] | 315 [314-315] | 4.7 [3.9-5.0] | 3.3 [2.6-3.6] |
+
+NVIDIA RTX A500, N = 1,000:
+
+| Mode | Build | Create (ms) | Private (MiB) | Peak WS (MiB) | Render + read | Render + finish |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Separate | before | 618 [353-788] | 59 [59-59] | 219 [219-219] | 2.7 [2.6-4.5] | 1.3 [1.1-3.8] |
+| Separate | after | 151 [134-174] | 28 [28-28] | 193 [193-193] | 2.6 [2.4-2.7] | 1.2 [1.1-1.2] |
+| glTF asset | before | 138 [112-138] | 27 [27-27] | 191 [191-192] | 2.6 [2.3-3.2] | 1.2 [0.9-1.4] |
+| Shared | after | 40 [38-42] | 3 [3-3] | 170 [170-170] | 2.0 [2.0-2.3] | 0.8 [0.8-0.8] |
+
+- **Memory of a separate mesh.** On Intel, a box went from 0.47 to 0.30 MiB of private bytes.
+  The integrated GPU allocates buffer objects in system memory, so these bytes are mostly
+  driver allocations. On NVIDIA the buffers are in GPU memory, and a box added 0.06 MiB of
+  private bytes before and 0.03 MiB after.
+- **Creation.** Creation of 1,000 separate boxes fell from 0.43-0.61 s to 0.13-0.39 s on Intel.
+  Before, the time per box grew with the number of models in the scene; see the next section.
+- **Shared meshes.** 3,000 shared boxes used 11 MiB of private bytes where 3,000 separate boxes
+  used 895 MiB, and they rendered in 4.7 ms instead of 21 ms with readback. Models that show one
+  material instance draw together: at 1,000 boxes, render plus finish took 2.2 ms against
+  4.0 ms for the glTF asset, whose models have their own material instances, on Intel, and
+  0.8 against 1.2 ms on NVIDIA.
+- **Frames of separate meshes.** Render plus finish of 1,000 separate boxes fell from 9.4 to
+  4.9 ms on Intel, and an earlier run on the same day gave 9.4 and 4.5 ms.
+  Render plus read did not change beyond the spread. Each mesh now binds one vertex buffer
+  instead of four; this run does not show which part of the frame changed. Intel frame times
+  vary between rounds (for example 6.2 to 10.3 ms); compare the ranges, not only the medians.
+- **Updates.** `update_mesh(positions=...)` of a 1,089-vertex plane took 0.07 to 0.08 ms before
+  and after the change, and 7.6 to 13.1 ms (before) against 7.4 to 8.7 ms (after) for 66,049
+  vertices: no difference beyond the spread (3 interleaved processes each, 250 updates, each
+  followed by a render).
+
+### Where the cost of a generated mesh went
+
+Measured with a scratch build of the October 27 tree that recorded the time and the change of
+the process private bytes around each step of `create_mesh()`, for 1,000 boxes on Intel. The
+memory column comes from a second run that called `Engine::flushAndWait()` before and after each
+step, so that the allocations of Filament's driver thread count in the step that queued them.
+
+| Step | ms per box | KiB per box |
+| --- | ---: | ---: |
+| Build the placeholder glTF document | 0.022 | 3 |
+| Parse and prepare it | 0.018 | 5 |
+| `createInstancedAsset()`: gltfio builds the placeholder's buffers | 0.054 | 78 |
+| `createInstance()`: entities and material instance | 0.043 | 8 |
+| Construct the stb, KTX2, and WebP texture providers | 0.043 | 21 |
+| `ResourceLoader::loadResources()`: placeholder upload and tangents | 0.011 | 167 |
+| `flushAndWait()` after the load | 0.135 | 0 |
+| Add the instance to the scene | 0.033 | 0 |
+| Build the mesh's own 4 vertex buffers and index buffer | 0.002 | 209 |
+| `SurfaceOrientation`, CPU copies, upload, `setGeometryAt()` | 0.010 | 1 |
+| Total | 0.37 | 492 |
+
+The memory is in buffer objects: on this driver each one added about 40 KiB, also for 24
+vertices. A UV attribute on the placeholder added 41 KiB (a one-triangle GLB loaded with and
+without it: 261 and 220 KiB). The staging buffers of `update_mesh()` were already allocated at
+the first update, and `SurfaceOrientation` cost 0.002 ms. The change keeps the mesh in one
+vertex buffer object, drops the placeholder's UVs, constructs texture providers only for
+documents with images, and does not wait after the placeholder load. gltfio's other placeholder
+buffers remain, about 0.2 MiB per separate mesh; see
+[design](../explanation/design.md#runtime-textures-and-generated-meshes).
+
+`scene.add()` also updated the diffuse-transmission settings of every model in the scene, so
+the time of an add grew with the number of models: 0.044 ms for the first 500 models of a shared
+box and 0.20 ms for models 3,501 to 4,000 (2 processes). It now updates only the new model:
+0.035 to 0.043 ms for every batch of 500, up to 4,000 models.
+
+## Picking
+
+Measured on October 12, 2026 with the build that added `Renderer.pick()`. 1920 x 1080 offscreen,
+AC, 60 Hz pacing by a sleep, no `finish()`. Scenes: ChronographWatch (one asset, one directional
+light), and 400 lit boxes (400 generated meshes, so 400 draws per depth pass). Each process
+rendered 60 warmup frames and then six blocks of 360 frames with 0, 1, 10, 0, 1, and 10
+queries per frame. 3 rounds; each round ran every configuration once in a fresh process, in
+an order rotated by one per round. Cells: median of the per-round medians (frames 30 and
+later of each block), range in brackets, ms. "ready()" is the time of one `ready()` call.
+
+| GPU | Scene | Queries per frame | `cpu_submit_ms` | GPU frame | `ready()` |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Intel | Watch | 0 | 0.21 [0.21-0.22] | 5.93 [5.67-6.62] | 0.007 |
+| Intel | Watch | 1 | 0.21 [0.20-0.22] | 7.76 [7.25-7.78] | 0.023 |
+| Intel | Watch | 10 | 0.21 [0.20-0.22] | 9.38 [9.28-9.59] | 0.030 |
+| Intel | Watch, `ssao` | 0 | 0.24 [0.21-0.33] | 7.91 [7.77-8.26] | 0.007 |
+| Intel | Watch, `ssao` | 1 | 0.23 [0.23-0.38] | 8.04 [6.90-8.39] | 0.022 |
+| Intel | Watch, `ssao` | 10 | 0.25 [0.23-0.35] | 9.82 [9.47-9.96] | 0.031 |
+| Intel | Watch, `pick_blended` | 0 | 0.22 [0.21-0.22] | 7.29 [6.49-7.39] | 0.007 |
+| Intel | Watch, `pick_blended` | 1 | 0.21 [0.21-0.22] | 7.54 [6.42-8.10] | 0.023 |
+| Intel | Watch, `pick_blended` | 10 | 0.21 [0.20-0.23] | 9.66 [8.32-9.74] | 0.030 |
+| Intel | 400 boxes | 0 | 0.36 [0.36-0.86] | 2.07 [2.07-2.09] | 0.006 |
+| Intel | 400 boxes | 1 | 0.46 [0.43-0.85] | 3.56 [3.35-4.69] | 0.021 |
+| Intel | 400 boxes | 10 | 0.43 [0.38-1.09] | 4.43 [4.01-6.21] | 0.046 |
+| NVIDIA | Watch | 0 | 0.29 [0.23-0.41] | 1.12 [1.10-1.52] | 0.008 |
+| NVIDIA | Watch | 1 | 0.42 [0.25-0.44] | 2.02 [1.16-2.46] | 0.032 |
+| NVIDIA | Watch | 10 | 0.38 [0.25-0.40] | 3.07 [1.91-3.41] | 0.037 |
+| NVIDIA | Watch, `ssao` | 0 | 0.39 [0.23-0.61] | 2.05 [1.34-2.35] | 0.008 |
+| NVIDIA | Watch, `ssao` | 1 | 0.48 [0.22-0.55] | 2.68 [1.35-2.69] | 0.030 |
+| NVIDIA | Watch, `ssao` | 10 | 0.35 [0.31-0.57] | 3.10 [2.67-3.80] | 0.032 |
+| NVIDIA | Watch, `pick_blended` | 0 | 0.41 [0.33-0.45] | 1.46 [1.40-1.89] | 0.010 |
+| NVIDIA | Watch, `pick_blended` | 1 | 0.37 [0.31-0.51] | 2.01 [1.58-2.12] | 0.027 |
+| NVIDIA | Watch, `pick_blended` | 10 | 0.45 [0.33-0.45] | 3.18 [2.74-3.77] | 0.042 |
+| NVIDIA | 400 boxes | 0 | 0.64 [0.36-0.95] | 0.26 [0.19-0.45] | 0.008 |
+| NVIDIA | 400 boxes | 1 | 0.54 [0.42-1.16] | 0.99 [0.89-2.14] | 0.018 |
+| NVIDIA | 400 boxes | 10 | 0.55 [0.40-1.15] | 1.75 [1.39-3.54] | 0.041 |
+
+- **Frames without queries** run no extra pass: Filament culls its structure pass when nothing
+  reads it. filly sets the ambient-occlusion resolution to 1 only without `ssao`, so the 0-query
+  rows are the cost of the scene alone.
+- **One query** adds a full-resolution depth pass with a picking attachment, and one 1 x 1
+  readback: 1.8 ms on Intel and 0.9 ms on NVIDIA for the watch, 1.5 and 0.7 ms for 400 draws.
+  With `ssao` the SSAO depth pass carries the picking attachment, so the step is 0.1 ms (Intel)
+  to 0.6 ms (NVIDIA). The rounds of the Intel watch differed by up to 1 ms between processes,
+  so treat single-ms differences on Intel as approximate.
+- **Further queries** cost 0.1 to 0.2 ms each of GPU frame time. Filament issues one
+  `glReadPixels()` into its own pixel buffer and one fence per query; the GPU frame timer also
+  counts the gaps while the driver thread issues them.
+- **CPU.** Submission did not change beyond the spread of the rounds. `ready()` takes 0.02 to
+  0.05 ms.
+- **First pick.** Before `prepare()` rendered its hidden pick, the first frame with a pick in a
+  renderer took about 55 ms longer on Intel (render plus `finish()` 60 ms instead of 6 ms), also
+  for an empty scene, and also after `prepare()` and after an RGBA readback. Later frames did not
+  repeat it, also in new scenes and for new materials. It is a one-time cost of the driver's
+  integer readback path, not a program compile. See [first pick after prepare()](#first-pick-after-prepare).
+
+Latency, one query per trial, 120 trials, 60 Hz loop (box at 1024 x 1024 and the watch at 1920 x
+1080 gave the same counts). "Renders" counts the renders after the one that took the query,
+until `ready()` returned `True`; ms is the time from that render to that call.
+
+| Loop | Intel renders | Intel ms (median) | NVIDIA renders | NVIDIA ms (median) |
+| --- | --- | ---: | --- | ---: |
+| `ready()` at the start of each frame, before `render()` | 1 (119 of 120) | 33.3 | 0 (120 of 120) | 16.7 |
+| `ready()` just after each `render()` | 2 (100 to 116 of 120), else 1 | 33.4 to 33.5 | 1 (120 of 120) | 16.8 to 16.9 |
+| `finish()` after each `render()`, then `ready()` | 0 | 2.2 (box), 4.9 (watch) | 0 | 0.9 (box), 2.0 (watch) |
+
+Filament checks the readback fence when a frame begins or ends on its driver thread, and in
+`finish()`. On NVIDIA the fence had signaled by the end of the frame that took the query; on
+Intel only by the start of the next one. A `ready()` right after `render()` runs before the
+driver thread reaches that frame's start, so it sees the answer one render later. The one
+outlier per run (4 renders, 84 ms) is the first pick of the renderer, measured before
+`prepare()` rendered a hidden pick.
+
+In browsers (`web/tests/test_web.py`, one render per `requestAnimationFrame`, Intel), the answer
+arrived 2 or 3 frames after the render that took the query in Chrome, Edge, and Firefox: WebGL
+signals fences only after the page returns to the event loop. With Filament 1.79.0 (November 1,
+2026), the same test measured 1 frame in Chrome and Firefox.
+
+### First pick after prepare()
+
+Measured on October 13, 2026. `prepare()` renders one hidden frame with one pick, once per
+renderer (desktop only). One lit box, 1920 x 1080 offscreen, AC, a fresh process per run, 3 runs
+per row. Steps: `prepare()` and `ready()` polled every 2 ms, 5 renders, then 4 frames with one
+pick each. Each frame is `render()` plus `finish()`, in ms. "Before" is the build without the
+hidden pick; "no prepare()" is the new build without a `prepare()` call. A background compile
+job ran on the machine for part of an earlier round; these rounds ran without it.
+
+| GPU | Build | `prepare()` call | Until `ready()` | First pick frame | Later pick frames |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Intel | Before | 0.13 to 0.14 | 145 to 160 | 45 to 59 | 2.7 to 3.0 |
+| Intel | Hidden pick | 0.45 to 0.87 | 98 to 149 | 7.0 to 10.2 | 2.9 to 3.2 |
+| Intel | No `prepare()` | | | 78 to 155 (with program compiles) | 3.1 to 4.0 |
+| Intel, `ssao` | Before | 0.12 to 0.14 | 145 to 161 | 44 to 46 | 3.1 to 4.2 |
+| Intel, `ssao` | Hidden pick | 0.47 to 0.51 | 88 to 110 | 4.1 to 5.2 | 3.5 to 4.4 |
+| NVIDIA | Before | 0.15 to 0.16 | 4.9 to 5.4 | 2.6 to 2.7 | 0.5 to 1.0 |
+| NVIDIA | Hidden pick | 0.50 to 0.54 | 8.3 to 12.9 | 3.9 to 4.1 | 0.7 to 1.4 |
+| NVIDIA, `ssao` | Before | 0.15 to 0.16 | 4.8 to 5.3 | 1.1 to 1.5 | 0.8 to 2.2 |
+| NVIDIA, `ssao` | Hidden pick | 0.46 to 1.11 | 10.6 to 20.6 | 3.3 to 6.8 | 1.3 to 4.1 |
+
+- **Intel.** The hidden pick removes the one-time driver cost: the first pick frame took 7 to
+  10 ms instead of 45 to 59 ms. The time until `ready()` did not grow, because the driver does
+  the work on Filament's driver thread while the compiler threads run.
+- **NVIDIA** had no one-time cost to remove. The hidden pick added 3 to 8 ms until `ready()`.
+- **What remains** of the first pick frame is the allocation of the picking buffer at the
+  target size. Filament frees frame-graph textures that 8 frames did not use
+  (`resourceAllocatorCacheMaxAge` = 8), so a pick after 8 or more frames without picks allocates
+  it again. In the same scene, with 0 to 30 plain frames before each pick (3 picks per gap):
+
+| GPU | Pick frame after 0 to 7 plain frames | After 9, 12, or 30 plain frames | Plain frame |
+| --- | ---: | ---: | ---: |
+| Intel | 2.8 to 4.4 | 4.8 to 9.8 (most 4.9 to 6.5) | 2.2 to 3.5 |
+| NVIDIA | 0.9 to 2.0 | 2.7 to 4.1 | 0.8 to 1.5 |
+
+  After 8 plain frames, the pick frame was in between (Intel 3.0 to 4.1, NVIDIA 2.7 to 3.1).
+- **Chrome** (ANGLE on Direct3D 11, Intel; 1920 x 1080; 8 page loads, alternately with and
+  without `await renderer.prepare(scene)`, a `requestAnimationFrame` between frames). The first
+  pick's `render()` plus `finish()` took 2.4 to 4.4 ms, later ones 0.6 to 1.8 ms, and its answer
+  arrived 21 to 41 ms after the render, later ones 6 to 12 ms. A hidden pick in `prepare()` (a
+  test build) did not change these numbers, so the web build does not render it. A pick after
+  12 frames without picks answered after 13 to 20 ms.
+
+## Readback (October 29, 2026)
+
+Measured on October 29, 2026, before and after the change that replaced Filament's
+`readPixels()` with filly's own pixel buffers and added `RenderTarget.begin_read()` and
+`read(out=...)`. Both builds: Python 3.11, built from the same tree except for that change. AC,
+Balanced. Scene: DamagedHelmet filling the view, one directional light, the small studio
+environment, `output_path = "exact"`. Each frame is `render()` followed by the operation in the
+column, without pacing. 60 warmup frames, 300 measured frames. 3 rounds; each round ran every
+configuration once in a fresh process, in an order rotated by one per round. Cells: median of
+the per-round medians of the frame time, range in brackets, ms. CPU load before each run: 12 to
+44%, median 30% (a video call was open); runs waited while it was above 45%. Ranges that overlap
+mean no measured difference; this is frequent on Intel, whose clocks change with load.
+
+### Cost of the earlier read()
+
+One process per GPU, 1920 x 1080, after a render and `finish()`. The native phases of `read()`
+were timed with `std::chrono::steady_clock` in a probe build. Filament's readback path on its
+driver thread was then repeated by a probe task on the same thread, with a timer around each
+step (median of 28 reads). The NVIDIA numbers agree with an `nsys` trace of the unchanged build:
+`glMapBufferRange` took 1.34 ms, followed by 3.7 ms without GL calls.
+
+| Step | NVIDIA RTX A500 | Intel Iris Xe |
+| --- | ---: | ---: |
+| `read()` call, wall time | 7.88 | 7.66 |
+| Native `read()` | 6.94 | 6.82 |
+| of which: `Engine::flushAndWait()`, which runs the steps below on the driver thread | 6.92 | 6.80 |
+| of which: allocation, `readPixels()` call, message pump, NumPy array | 0.05 | 0.06 |
+| Probe: new `GL_STATIC_DRAW` buffer, `glReadPixels()`, fence | 0.28 | 0.25 |
+| Probe: `glFinish()` | 0.11 | 2.65 |
+| Probe: `glMapBufferRange()` | 1.30 | 0.00 |
+| Probe: flip copy into a new allocation | 4.34 | 4.11 |
+| Probe: the same copy into reused memory | 0.93 | 0.82 |
+| Probe: unmap and delete the buffer | 0.05 | 0.03 |
+
+- **Page faults were the largest part.** Each `read()` allocated a new 8 MiB array, and the copy
+  into it made Windows map and zero each page on first write: 3.4 ms of the 4.3 ms copy, on both
+  GPUs. A CPU-only copy between two heap buffers showed the same difference.
+- **The GPU transfer.** On NVIDIA, the new `GL_STATIC_DRAW` buffer made `glMapBufferRange()` do
+  the 1.3 ms transfer over PCIe. With a kept buffer, the transfer ran before the fence and the
+  map took 0.01 ms. On Intel, `glFinish()` waited 1.6 to 2.6 ms for the GPU's copy into the
+  buffer.
+- **The wait.** `flushAndWait()` waits for all queued GPU work and then for the driver thread.
+  It cannot wait for one readback while a later frame renders.
+- At 512 x 512, the native `read()` took 1.26 ms on NVIDIA (map 0.38, copy into new memory 0.41)
+  and 1.41 ms on Intel (`glFinish()` 0.41, copy 0.59).
+- 0.9 ms of the wall time at 1920 x 1080 was outside the native call. Most of it is the release
+  of the previous frame's array, which the loop drops after each read: releasing an 8 MiB array
+  from the earlier `read()` took 0.7 to 1.1 ms in a separate measurement.
+
+### After the change
+
+`read()` now waits only for its own fence and copies once, from a kept `GL_STREAM_READ` pixel
+buffer into the array. In an `nsys` trace on NVIDIA at 1920 x 1080, MSAA 1 (120 frames), render
+plus `read(out=...)` took 2.95 ms per frame, of which the driver thread waited 1.46 ms in
+`glClientWaitSync()` for the transfer. With one readback in flight, a frame took 1.69 ms, and
+the wait 0.12 ms.
+
+Frame time, ms. "Before" is `read()` in the build without the change. "Pipelined" renders frame
+N, calls `begin_read()`, then reads the readback of frame N - 1 (1 in flight) or N - 2 (2 in
+flight); `read(out=...)` cycles through 2 or 3 arrays. `render()` and `finish()` took the same
+time in both builds.
+
+| GPU | Size | MSAA | render + `finish()` | render + `read()`, before | render + `read()` | render + `read(out=...)` | pipelined `read()`, 1 in flight | pipelined `read(out=...)`, 1 in flight | pipelined `read(out=...)`, 2 in flight |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| NVIDIA | 512 x 512 | 1 | 0.33 [0.32-0.39] | 1.53 [1.35-1.65] | 0.70 [0.70-0.78] | 0.73 [0.67-0.74] | 0.57 [0.52-0.60] | 0.53 [0.48-0.56] | 0.55 [0.53-0.60] |
+| NVIDIA | 512 x 512 | 4 | 0.42 [0.40-0.44] | 1.57 [1.52-2.05] | 0.78 [0.76-0.86] | 0.83 [0.80-0.86] | 0.61 [0.60-0.67] | 0.63 [0.61-0.63] | 0.60 [0.60-0.64] |
+| NVIDIA | 1920 x 1080 | 1 | 0.55 [0.54-0.64] | 6.01 [5.69-6.46] | 2.98 [2.65-4.73] | 3.27 [2.72-5.18] | 1.70 [1.68-3.16] | 2.14 [1.96-2.84] | 2.60 [2.05-2.60] |
+| NVIDIA | 1920 x 1080 | 4 | 1.25 [1.06-1.28] | 13.49 [10.45-13.79] | 4.32 [3.55-6.16] | 3.89 [3.56-5.70] | 2.33 [1.99-2.35] | 2.55 [2.02-3.36] | 2.61 [1.95-3.11] |
+| Intel | 512 x 512 | 1 | 0.68 [0.61-0.84] | 1.94 [1.47-2.11] | 1.20 [0.91-1.97] | 1.36 [1.15-2.93] | 0.50 [0.44-0.59] | 0.50 [0.37-0.54] | 0.54 [0.47-0.61] |
+| Intel | 512 x 512 | 4 | 0.70 [0.64-0.70] | 1.45 [1.25-1.82] | 0.95 [0.85-0.98] | 0.88 [0.82-1.15] | 0.44 [0.43-0.57] | 0.43 [0.43-1.06] | 0.48 [0.44-0.51] |
+| Intel | 1920 x 1080 | 1 | 0.95 [0.93-0.99] | 8.48 [6.42-10.77] | 3.37 [2.70-5.89] | 3.00 [2.95-3.82] | 1.72 [1.66-2.34] | 1.78 [1.66-2.16] | 1.86 [1.79-2.06] |
+| Intel | 1920 x 1080 | 4 | 2.20 [2.07-2.82] | 14.24 [6.91-16.10] | 4.29 [4.02-6.34] | 4.65 [3.83-5.13] | 2.40 [2.31-3.21] | 2.55 [2.50-2.97] | 2.71 [2.63-3.45] |
+
+Frames per second over the measured loop, including the reads after the last frame:
+
+| GPU | Size | MSAA | `read()`, before | `read()` | `read(out=...)` | pipelined `read()`, 1 in flight | pipelined `read(out=...)`, 1 in flight | pipelined `read(out=...)`, 2 in flight |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| NVIDIA | 512 x 512 | 1 | 630 [586-716] | 1370 [1227-1391] | 1312 [1272-1454] | 1634 [1508-1823] | 1795 [1629-1988] | 1685 [1529-1797] |
+| NVIDIA | 512 x 512 | 4 | 605 [472-647] | 1241 [1119-1274] | 1147 [1097-1200] | 1568 [1431-1598] | 1538 [1478-1588] | 1548 [1488-1579] |
+| NVIDIA | 1920 x 1080 | 1 | 150 [148-154] | 311 [201-370] | 278 [191-350] | 501 [304-503] | 413 [311-446] | 334 [329-457] |
+| NVIDIA | 1920 x 1080 | 4 | 75 [73-96] | 214 [156-274] | 242 [171-276] | 397 [375-484] | 362 [271-461] | 345 [294-489] |
+| Intel | 512 x 512 | 1 | 501 [462-672] | 812 [551-1076] | 722 [334-867] | 1947 [1502-2093] | 1953 [1806-2506] | 1634 [1522-2089] |
+| Intel | 512 x 512 | 4 | 664 [527-790] | 1018 [1005-1142] | 1122 [804-1183] | 1979 [1675-2084] | 2147 [894-2167] | 1941 [1827-2042] |
+| Intel | 1920 x 1080 | 1 | 94 [94-125] | 290 [163-358] | 313 [251-327] | 567 [394-589] | 550 [444-578] | 523 [470-525] |
+| Intel | 1920 x 1080 | 4 | 76 [66-113] | 211 [149-239] | 212 [174-258] | 395 [302-414] | 361 [325-381] | 356 [279-362] |
+
+- **Synchronous read.** A frame with `read()` took 1.5 to 3.3 times less time than before. What
+  remains at 1920 x 1080 is the render, the GPU's transfer (1.4 ms on NVIDIA in the probe, with a
+  kept buffer), and the copy into the array (0.8 ms).
+- **New arrays.** `read()` without `out` was as fast as `read(out=...)`, because the loop drops
+  each array and `read()` reuses its storage. A loop that keeps every array pays the page faults
+  of new storage, 3.4 ms per 1920 x 1080 frame, on each read.
+- **Pipelined read.** One readback in flight saved a further 1.3 to 2 ms per 1920 x 1080 frame,
+  because the GPU's transfer overlaps the next frame. Two in flight were not faster.
+- **Intel ranges.** Several Intel rows have wide ranges, for example "before" at 1920 x 1080. At
+  512 x 512 with MSAA 1, the ranges of `read()` before and after the change overlap; the
+  pipelined rows do not overlap with either.
+- **MATLAB.** On NVIDIA at 1920 x 1080 (2 runs, 200 frames), `render()` plus `read()` in MATLAB
+  R2023a took 25 ms before and 16.5 ms after the change, and 12 ms with one readback in flight.
+  The conversion to MATLAB's column-major layout and MATLAB's allocation remain; they were not
+  split.
+
+## GPU frame time validation
+
+`Stats.gpu_frame_ms` exposes Filament's frame timer. On October 12, 2026 it was compared with
+independent measures on both GPUs (DamagedHelmet, 1920 x 1080, AC, 60 Hz pacing unless stated):
+
+| Check | Intel Iris Xe | NVIDIA RTX A500 |
+| --- | ---: | ---: |
+| `gpu_frame_ms`, offscreen, median of rounds (instancing tables above) | 2.48 ms | 0.29 ms |
+| RenderDoc replay, sum of passes (median of 10 replays; excludes gaps between passes) | 2.37 ms | 0.31 ms |
+| `gpu_frame_ms`, PsychoPy host, vsync, median of 597 frames | 2.69 ms | 0.34 ms |
+| Host GL timestamps, `render()` to `acquire()`, same run (upper bound) | 4.54 ms | 1.34 ms |
+| `gpu_frame_ms`, pyglet host, vsync, median of 597 frames | 2.64 ms | 0.33 ms |
+| Host GL timestamps, same run (upper bound) | 3.42 ms | 1.22 ms |
+
+- The timer is within 5% (Intel) and 8% (NVIDIA) of the RenderDoc sum, and below the host's
+  upper bound in every run. The nsys workload trace could not split Filament's frames in this
+  build (the last range of a frame runs to the next frame), so it gave no third measure.
+- The frame number matches the timed frame: frames that alternate between a 16 x 16 and a
+  2048 x 2048 MSAA target report times that alternate with them (`python/tests/test_renderer.py`).
+- Other scenarios on Intel, 200 frames: ACES tone mapping 3.31 ms, direct output 1.59 ms, FXAA
+  3.47 ms, MSAA 4x 4.35 ms, shadows 3.83 ms. The values follow the
+  [output path](#output-path-september-30-2026) results.
+- Delay: `frames_rendered - gpu_frame_number` was 3 in a 60 Hz loop and 2 with `finish()` after
+  each frame, on both GPUs.
+- Unthrottled loops (offscreen, no pacing, 600 frames at 1080p and 256 x 256, both GPUs): no
+  value at all, as described in [Limits](../how-to/profile.md#limits).
+- Web: in headless Chrome 154 and Edge 155 on ANGLE (Direct3D 11, Intel), filly's own timer
+  query reported every frame after a delay of 2 frames, with one `requestAnimationFrame` between
+  frames. A lit sphere took 4.70 ms at 1080p and 0.80 ms at 256 x 256; the same scene on desktop
+  took 3.24 ms and 0.37 ms. The browser's Direct3D pipeline is a different driver path, so these
+  values were checked only for frame attribution, not against an independent tool. An
+  availability read and a disjoint read together took less than 1 microsecond in Chrome.
+  Firefox 157 does not offer
+  `EXT_disjoint_timer_query_webgl2`.
+
+## Ranked recoverable frame time
+
+Measured at 1080p on the Intel GPU unless stated. "Native" means a change to filly's C++ code.
+Ranks 2 to 5 and 7 were measured with color grading as the default; their size relative to the
+exact path is not remeasured.
+
+| Rank | Saving | Change | Cost or risk | Native |
+| --- | --- | --- | --- | --- |
+| - | done: 0.84 ms GPU (0.15 ms at 512); NVIDIA 0.09 ms | Default output through filly's encode pass instead of Filament's color grading. | 0.12 ms more CPU per frame. Renderer creation compiled the encode material (about 0.17 s more) until October 3, 2026; the material is now precompiled at build time. | Yes (done) |
+| - | done: NVIDIA one refresh of latency and 0.58 ms CPU per frame in `acquire()`; Intel 0.46 ms GPU and 0.21 ms CPU | `SyncPlatform::commit()` calls `glFlush()` instead of `SwapBuffers()`. | Not tested on Linux in these runs. | Yes (done) |
+| 1 | 0.71 ms GPU (0.12 ms at 512) | Use `output_path = "direct"`. | No tone mapping other than linear, no FXAA, MSAA, bloom, SSAO, refraction, transparency, dithering, vignette, or depth of field; `MASK` materials rejected. Output is within one 8-bit level of the analytic encoding but rounds differently from the exact path. | No (exists as an opt-in) |
+| 2 | 1.2 ms GPU (0.35 ms at 512) | Do not use MSAA 4x. | Aliased edges. | No |
+| 3 | 0.94 ms GPU (1.0 ms before the change) | Do not use FXAA. | Aliased edges. | No |
+| 4 | 0.4 to 1.2 ms GPU (0.17 to 0.48 ms at 512) for plain to anisotropic materials | Split the archive's extended entries into specialized entries. | More archive entries increase its size. | Yes (material build) |
+| 5 | 0.68 ms GPU (0.36 ms at 512) | Turn shadows off where a stimulus does not need them. | Visual. | No |
+| 6 | about 0.1 ms CPU per frame | Run the encode pass without a second Filament view: raw GL on Filament's driver thread through the platform hook. | filly would have to restore every GL state that Filament caches, and create the textures itself to know their names. Not tried for the encode pass; the readback does both since October 29, 2026 (see [readback](#readback-october-29-2026)). | Yes |
+| 7 | about 0.39 ms GPU at 1080p (0.06 ms at 512) | Draw the shared texture in PsychoPy with a blit, as the pyglet adapter did when this was measured, when no transform, mask, or blending is needed. | Loses `ImageStim` placement, opacity, and masking for that path. Estimated from the pyglet blit (0.384 ms) against `ImageStim` (0.776 ms); not measured in PsychoPy. | No (adapter) |
+| 8 | about 2 ms GPU for DamagedHelmet at 1080p (2.32 ms Intel, 0.28 ms NVIDIA) | Render on the NVIDIA GPU (`SHIM_MCCOMPAT=0x800000001`, a driver profile, or a per-executable GPU preference). | On this Optimus laptop the panel is driven by the Intel GPU, so the host window's frames are copied between adapters. The latency of that copy is not measured. | No |
+| - | not measured | Render and acquire later in the frame so that `acquire()` finds the frame already published. | Changes the experiment loop. | No |
+
+Items 1 to 5 add up only where a scene uses all of the features. For a plain stimulus at 1080p,
+the exact path takes the Filament frame from 3.16 ms to 2.32 ms on the Intel GPU, and the direct
+path to 1.61 ms.
+
+## Open questions
+
+- **Color grading cost (answered September 30).** The 2.0 ms per frame included 0.46 ms of
+  headless `SwapBuffers`. The remaining 1.5 ms is mostly the 1D LUT, three fetches of a 3D
+  texture per pixel, plus a 0.42 ms floor for any full-screen pass on this GPU at this load. The
+  earlier revision's 0.6 ms is still not explained; its loop, GPU clock state, and engine
+  feature flags are not recorded.
+- **Intel GPU clocks.** The Intel GPU lowers its clock at light load, and nothing on this
+  laptop fixes it. The numbers here are for the load of one paced stimulus; a heavier scene
+  can raise the clock and lower per-pass times.
+- **Not measured on AC:** the per-pass tables, the Tracy split, and the nsys traces (all taken on
+  battery and labeled), and the headless-swap comparison at 512 x 512.
+- **Not measured at all:** the cost of copying an NVIDIA-rendered host window to the Intel-driven
+  panel; the PsychoPy host with the headless-swap fix (the PsychoPy venv has no scratch build);
+  `--sync finish` loops; displays above 60 Hz (144 Hz was emulated by pacing only).
+- **nsys ranges with the fix.** Without a swap, the last GPU range of a Filament frame in nsys
+  extends to the first GL call of the next frame, so nsys "GPU busy" per frame is not valid for
+  the fixed build. Use Filament's GPU frame time instead.

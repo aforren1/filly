@@ -67,7 +67,7 @@ looks nearly opaque in `gltf_viewer`. Filament's volume shader scales thickness 
 node's own scale and omits the parent's 0.1 scale, so the amber is ten times thicker than
 `KHR_materials_volume` specifies. filly uses the complete node transform. This asset
 therefore differs from `gltf_viewer` (MAE 3.07, maximum 175 of 255; see
-[the comparison](../how-to/reference-comparison.md#results)). An earlier version also spread
+[the comparison](../archive/reference-comparison-results.md)). An earlier version also spread
 rough-glass blur over an estimated volume travel distance; that was removed.
 
 Perspective transmission is now exactly Filament's. Orthographic views, for which Filament defines
@@ -113,7 +113,7 @@ MandarinOrange, GlassVaseFlowers, ChronographWatch, and TransmissionRoughnessTes
 PsychoPy example completed a 30-frame smoke run with perspective projection and a gray background.
 This catalog audit and these material corrections have not yet been retested on Linux.
 The corrected TrafficCone PsychoPy demo also
-completed 90 frames; see [validation results](validation.md) for timing and test limits.
+completed 90 frames; see [validation results](../archive/validation-log.md) for timing and test limits.
 
 ## Dielectric iridescence
 

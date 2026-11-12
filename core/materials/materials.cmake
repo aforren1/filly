@@ -1,6 +1,6 @@
 # filly's material archive: one package per entry and blending mode, compiled with the SDK's
 # matc, packed with uberz, and embedded in the module as a byte array. See
-# docs/explanation/material-precompilation.md for the entry list.
+# docs/explanation/materials.md for the entry list.
 #
 # Inputs: FILAMENT_ROOT, FILLY_CORE_DIR, and FILLY_MATERIAL_TOOLS and FILLY_MATC from
 # output.cmake. Outputs: the target filly_material_archive, a static library that defines

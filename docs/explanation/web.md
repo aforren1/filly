@@ -16,7 +16,7 @@ desktop filly:
   (anisotropy and iridescence parameters, diffuse transmission, the orthographic refraction LOD)
   and its encode pass would be missing.
 
-The web build compiles filly's core with its precompiled [material archive](material-precompilation.md)
+The web build compiles filly's core with its precompiled [material archive](materials.md)
 and its output passes, for GLSL ES 3.00 (`matc -p mobile`). The material path is therefore the
 same as on the desktop.
 

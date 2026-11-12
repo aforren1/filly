@@ -317,7 +317,7 @@ Toolkit`).
 - **The driver thread blocks after the headless swap on NVIDIA.** Filament presents each frame
   with `SwapBuffers` on a hidden window. On NVIDIA, the next GL call waits for the display's
   vertical blank, and Filament's GPU frame timer reads about one refresh. See
-  [Performance](../reference/performance.md#headless-swap-chain).
+  [Performance](../archive/performance-log.md#headless-swap-chain).
 - **Markers cost time.** NVTX ranges, GL timestamps, and the extra `glFlush()` after the first
   timestamp add CPU time. Compare runs with the same options.
 

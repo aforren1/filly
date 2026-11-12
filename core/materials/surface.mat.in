@@ -1,7 +1,7 @@
 // filly's lit and refractive glTF materials. materials.cmake writes one file per archive entry
 // and blending mode from this template. Its #define lines select the lobes and inputs.
 // The shader code reproduces the removed runtime material path, which matched gltf_viewer; see
-// docs/explanation/material-precompilation.md.
+// docs/archive/material-precompilation.md.
 //
 // Texture roles:
 // - The five core roles use gltfio's sampler names, so gltfio binds their glTF textures.
@@ -155,7 +155,7 @@ fragment {
         // With these inputs, Filament's isotropic lobe uses the specular F90 of glTF (1 for
         // specular 1) instead of its own F90 from F0, which is lower on dark metals and at low
         // IOR. Only the entries for KHR_materials_specular and the anisotropic entries, whose
-        // lobe ignores F90, have them; see docs/explanation/material-precompilation.md.
+        // lobe ignores F90, have them; see docs/archive/material-precompilation.md.
         material.specularFactor = materialParams.specularStrength;
         material.specularColorFactor = materialParams.specularColorFactor;
         if (materialParams.specularSlot > -1) {

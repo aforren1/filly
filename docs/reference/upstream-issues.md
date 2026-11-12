@@ -143,7 +143,7 @@ reference).
 
 filly test of its own provider for item 1:
 `python/tests/test_material_paths.py::test_specular_only_material_is_not_refractive`. Analysis:
-[material precompilation](../explanation/material-precompilation.md#matching).
+[material precompilation](../archive/material-precompilation.md#matching).
 
 **filly workaround.** filly does not use the SDK archive. It builds its own archive
 (`core/materials/`) and uses its own `MaterialProvider` (`core/archive_materials.cpp`), in the
@@ -262,7 +262,7 @@ ABeautifulGame, and GlassHurricaneCandleHolder. filly's removed runtime material
 gltfio's generator rules. It differed from filly's archive path by up to 148 levels on
 PotOfCoalsAnimationPointer. With an explicit `KHR_materials_ior` of 1.5 on the refractive
 materials, the two paths differed by at most 1. See
-[material precompilation](../explanation/material-precompilation.md), cause "IOR default".
+[material precompilation](../archive/material-precompilation.md), cause "IOR default".
 
 **filly workaround.** filly's provider sets `ior` to 1.5 when the material has no IOR
 (`core/archive_materials.cpp`).
@@ -379,7 +379,7 @@ MeshPrimitiveModes drawn as points.
 triangle list and a loop to a closed line strip, or it skips the primitive.
 
 **Reproduction.** Sample asset MeshPrimitiveModes. See
-[material precompilation](../explanation/material-precompilation.md), cause "TRIANGLE_FAN".
+[material precompilation](../archive/material-precompilation.md), cause "TRIANGLE_FAN".
 
 **filly workaround.** None.
 
@@ -592,5 +592,5 @@ would then decode these textures, and filly's provider could use gltfio's bindin
   Vulkan SPIR-V and unoptimized GLSL. filly does not use that archive, so this page does not list
   it.
 - **Skinned mesh bounding boxes.** gltfio's culling boxes for skinned meshes under a scaled
-  armature are wrong (see [validation](validation.md)). This page does not cover it, because
+  armature are wrong (see [validation](../archive/validation-log.md)). This page does not cover it, because
   filly's handling is changing to `FilamentInstance::recomputeBoundingBoxes()`.

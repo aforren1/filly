@@ -43,7 +43,7 @@ entries: core lit; lit with clearcoat, sheen, and iridescence, with and without
 transmission, each opaque, masked, and blended. Only materials with `KHR_materials_specular` get
 an entry with specular inputs: with them, Filament uses the specular extension's F90 instead of
 its F90 from F0, which is lower for dark metals and low IOR. See
-[material precompilation](../explanation/material-precompilation.md).
+[material precompilation](../archive/material-precompilation.md#fresnel-f90-in-the-extended-entries).
 
 The GPU driver compiles each GL program at its first draw, so render one warmup frame after
 loading and before a timing-critical trial, or [prepare the scene](#prepare-a-scene) first. The
@@ -52,7 +52,7 @@ machine or driver that has not seen the programs. With six sample assets on the 
 the first frame of each took 1.3 s in total with cold driver caches (Intel Iris Xe), and 0.07 s
 with warm caches. filly does not compile programs at renderer creation and does not keep its
 own program binary cache: neither made the first frames faster in these measurements. See
-[material precompilation](../explanation/material-precompilation.md#gap-closure-september-30-2026).
+[material precompilation](../archive/material-precompilation.md#gap-closure-september-30-2026).
 
 Transmission and volume shading is Filament's. For perspective cameras it is identical to
 `gltf_viewer`, including its limits: rough-glass blur is an angular estimate from the vertical
@@ -64,7 +64,7 @@ Volume thickness is scaled by the complete model-to-world transform, as `KHR_mat
 specifies. This includes parent nodes, animation, and model edits. The scalar is the mean of the
 three transformed axis lengths, so nonuniform scale is approximate. Filament 1.77.1 uses only the
 mesh node's own scale, an upstream TODO. Assets whose volume meshes have scaled parents therefore
-differ from `gltf_viewer`; see [the comparison](../how-to/reference-comparison.md#results).
+differ from `gltf_viewer`; see [the comparison](../archive/reference-comparison-results.md).
 
 Both offscreen and shared-context engines reserve a 12 MiB backend command ring with the SDK's
 1 MiB minimum batch size, and a 32 MiB backend handle arena. This supports the tested 10,000-mesh
@@ -170,7 +170,7 @@ On the development laptop at 1920 x 1080, `gpu_frame_ms` for DamagedHelmet was w
 sum of RenderDoc's per-pass replay times: 2.48 ms against 2.37 ms on Intel Iris Xe, and 0.29 ms
 against 0.31 ms on NVIDIA RTX A500. It stayed below the GPU time that GL timestamps in a
 PsychoPy or pyglet host measured around the frame. See
-[Performance](performance.md#gpu-frame-time-validation).
+[Performance](../archive/performance-log.md#gpu-frame-time-validation).
 
 ### Prepare a scene
 
@@ -311,7 +311,7 @@ renders has its answer, and `result` works without `ready()`. If the renderer ha
 since the render that took the query, for example because the host renders only after changes,
 `ready()` begins a frame that renders nothing, so that Filament checks the readback. The answer
 then arrives at a later call. Measured in a 60 Hz loop on the
-development laptop (see [Performance](performance.md#picking)):
+development laptop (see [Performance](../archive/performance-log.md#picking)):
 
 | Loop | Intel Iris Xe | NVIDIA RTX A500 |
 | --- | --- | --- |
@@ -331,7 +331,7 @@ A frame with picks costs one more depth pass of the scene geometry (with `ssao` 
 `pick_blended`, the SSAO depth pass serves) and one readback per query. At 1920 x 1080, one query
 added 0.1 to 1.8 ms to the GPU frame on Intel Iris Xe and 0.6 to 0.9 ms on NVIDIA RTX A500, and
 each further query about 0.1 to 0.2 ms. Frames without queries cost the same as before. CPU
-submission did not change. See [Performance](performance.md#picking).
+submission did not change. See [Performance](../archive/performance-log.md#picking).
 
 In JavaScript, `renderer.pick(scene, x, y)` returns a `PickQuery` with `ready()`, `result`
 (`{ model, node, position, depth }` or `null`), `frameNumber`, and `await query.wait()`; the
@@ -394,8 +394,8 @@ next `render()`.
 of a `RenderTarget` and of an `ImportedTarget`, and no other option changes it.
 
 - `"srgb"`: apply the sRGB transfer function. A host that samples the texture as plain RGBA8 into
-  a non-sRGB framebuffer, and a NumPy readback, both see sRGB values: an unlit 0.5 grey is 188.
-- `"linear"`: store linear values: an unlit 0.5 grey is 128.
+  a non-sRGB framebuffer, and a NumPy readback, both see sRGB values: an unlit 0.5 gray is 188.
+- `"linear"`: store linear values: an unlit 0.5 gray is 128.
 
 On the default output path, the stored level is the rounded analytic value of the scene-linear
 color as filly's RGBA16F buffer holds it: exact for every fp16 value. A color that is not an fp16
@@ -452,7 +452,7 @@ of five interleaved rounds of 600 frames:
 The exact path also takes about 0.1 ms more CPU time per `render()`. At 512 x 512 the difference
 is 0.11 to 0.12 ms of GPU time on the Intel GPU. Use `"direct"` when the frame budget needs this
 time and the scene uses none of the conflicting settings. See
-[Performance](performance.md#output-path-september-30-2026).
+[Performance](../archive/performance-log.md#output-path-september-30-2026).
 
 Material factors, background colors, light colors, and environment values are linear inputs.
 
@@ -461,7 +461,7 @@ Material factors, background colors, light colors, and environment values are li
 | `tone_mapping` | Filament tone mapper |
 | --- | --- |
 | `"linear"` | `LinearToneMapper`: clamps each channel to `[0, 1]`. Neutral colors stay neutral. The default. |
-| `"aces_legacy"` | `ACESLegacyToneMapper`. The default in `gltf_viewer`. It tints neutral grey. |
+| `"aces_legacy"` | `ACESLegacyToneMapper`. The default in `gltf_viewer`. It tints neutral gray. |
 | `"aces"` | `ACESToneMapper` |
 | `"filmic"` | `FilmicToneMapper` |
 | `"pbr_neutral"` | `PBRNeutralToneMapper` (Khronos PBR Neutral) |
@@ -564,7 +564,7 @@ with the default of Filament's `VignetteOptions`, and it keeps its value while `
 Set `transparent = True` and `background = (0, 0, 0, 0)` to keep alpha. Transparent scenes use
 the exact path. The output is premultiplied after encoding: RGB is the encoded straight color
 multiplied by alpha. An unlit
-0.5 grey at alpha 0.5 is `(94, 94, 94, 128)` with sRGB encoding. This is what OpenGL blending
+0.5 gray at alpha 0.5 is `(94, 94, 94, 128)` with sRGB encoding. This is what OpenGL blending
 with `GL_ONE, GL_ONE_MINUS_SRC_ALPHA` into a non-sRGB framebuffer expects. The background is
 straight RGBA; the renderer multiplies its RGB by alpha. The PsychoPy adapter converts to its
 normal ImageStim blending. Refraction samples the Filament scene; it cannot refract host
@@ -704,7 +704,7 @@ primitive and a material in one call (8 in WebGL). A node-local material copy ta
 out of the batch; skinned and morphed primitives are never batched. Each instance is still one
 renderable on the CPU: culling and command setup grow with the count. At 1920 x 1080, 20,000
 instances took 14 ms (Intel) to 23 ms (NVIDIA) of `cpu_submit_ms`. See
-[Performance](performance.md#automatic-instancing).
+[Performance](../archive/performance-log.md#automatic-instancing).
 
 Diffuse transmission uses a custom shader with direct and environment backlighting.
 It supports factor and color textures, UV sets 0 and 1, texture transforms, sampler filters,
@@ -1124,7 +1124,7 @@ as `scene.load()` is for a file. Each call makes new vertex and index buffers, w
 model its node and material (see [design](../explanation/design.md#runtime-textures-and-generated-meshes)).
 On the test laptop (Intel Iris Xe), a box from `create_mesh()` added 0.3 MiB to the process
 private bytes and took 0.13 to 0.4 ms; see
-[performance](performance.md#generated-meshes). To show the same arrays many times, use a
+[performance](../archive/performance-log.md#generated-meshes). To show the same arrays many times, use a
 shared mesh.
 
 `filly.shapes` returns arrays for `create_mesh(**shape)`:
@@ -1155,7 +1155,7 @@ filly.set_transforms([box.node("mesh") for box in boxes], transforms)  # transfo
 | Behavior | Shared mesh |
 | --- | --- |
 | Geometry | One vertex buffer and one index buffer for all models. `asset.memory.gpu_geometry_bytes` does not change when you add models. |
-| Material | Each model has its own material, as models of a glTF asset do: an edit to one model does not change the others. Until a model's material handle is requested (`model.material()` or `node.material()`), the model shows one material instance that all such models of the asset share. Filament's [automatic instancing](performance.md#automatic-instancing) merges the draws of models that show the same material instance and buffers. A model that has a material handle draws separately. Set the factors in `create_mesh_asset()` when all copies have the same material. |
+| Material | Each model has its own material, as models of a glTF asset do: an edit to one model does not change the others. Until a model's material handle is requested (`model.material()` or `node.material()`), the model shows one material instance that all such models of the asset share. Filament's [automatic instancing](../archive/performance-log.md#automatic-instancing) merges the draws of models that show the same material instance and buffers. A model that has a material handle draws separately. Set the factors in `create_mesh_asset()` when all copies have the same material. |
 | `update_mesh()` | Changes the asset's buffers. Every model of the asset, in every scene, shows the new vertices at its next render. |
 | `bounds` | The creation-time bounds of the arrays, for every model. |
 | `close()` | `asset.close()` releases only the placeholder document. Models that exist keep the mesh and can call `update_mesh()`. The buffers stay until the asset and its last model close. |
@@ -1165,7 +1165,7 @@ the asset and its last model close. Add the models before the frame loop. On the
 1,000 models of a box asset took 42 to 46 ms to add and 3 MiB of private bytes, where 1,000
 `create_mesh()` boxes took 126 to 391 ms and 296 MiB. With 1,000 boxes, a frame of render and
 `finish()` took 2.2 ms for the shared mesh and 4.9 ms for separate meshes. See
-[performance](performance.md#generated-meshes).
+[performance](../archive/performance-log.md#generated-meshes).
 
 ### Animation
 
@@ -1379,7 +1379,7 @@ returns a `Texture`.
 
 | Channels | Meaning |
 | --- | --- |
-| 1 | Grey: sampled as (v, v, v, 1). |
+| 1 | Gray: sampled as (v, v, v, 1). |
 | 3 | RGB, alpha one. |
 | 4 | RGBA with straight alpha. Alpha has an effect only in `"blend"` or `"mask"` materials. |
 
@@ -1495,7 +1495,7 @@ more than the copy itself (0.8 ms). Without `out`, `read()` therefore reuses the
 last array from `read()` that Python freed, if it has the same size. A loop that replaces its
 array (`image = target.read()`) frees each array after the next read, so two buffers alternate.
 A loop that keeps every array gets new storage for each one. `Renderer.close()` frees the spare
-storage. See [Performance](performance.md#readback-october-29-2026).
+storage. See [Performance](../archive/performance-log.md#readback-october-29-2026).
 
 With `out`, the pixels go into that array. It must be a writable, C-contiguous `uint8` array of
 shape `(height, width, 4)`, for example from `numpy.empty()`. Another dtype or a read-only array
@@ -1538,7 +1538,7 @@ save(frames - 1, pending.read())
   and `read()` took 3.0 ms on NVIDIA RTX A500 and 3.4 ms on Intel Iris Xe, against 6.0 and 8.5 ms
   before the October 29, 2026 change. With one readback in flight, a frame took 1.7 ms on both.
   `render()` and `finish()` alone took 0.55 and 0.95 ms. See
-  [Performance](performance.md#readback-october-29-2026).
+  [Performance](../archive/performance-log.md#readback-october-29-2026).
 
 ## ImportedTarget
 

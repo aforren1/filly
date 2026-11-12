@@ -114,7 +114,7 @@ needs. The linked sections give the measurements.
 - **Material archive.** filly uses gltfio's archive format (`matc`, `uberz`) with its own
   materials and its own `MaterialProvider`. The SDK archive lacks anisotropy, iridescence,
   diffuse transmission, and the orthographic refraction blur, and its matching drops features.
-  See [material precompilation](material-precompilation.md).
+  See [materials](materials.md).
 - **glTF preparation.** filly reads each document with cgltf before gltfio does. It checks
   extensions, decodes data that gltfio cannot read, and builds the tables for the features in the
   next section. See [glTF preparation](design.md#gltf-preparation).
@@ -163,7 +163,7 @@ needs. The linked sections give the measurements.
 | `KHR_draco_mesh_compression` | Yes | Through gltfio; `python/tests/test_draco.py` and a browser test check the decoder |
 | `EXT_meshopt_compression` | Yes, with meshoptimizer 0.18 | Decoded by filly with meshoptimizer 1.0, which adds the version 1 codec and the COLOR filter |
 | `KHR_meshopt_compression` | No | Decoded by filly |
-| `EXT_mesh_gpu_instancing` | No | One child node per instance. The children share a primitive and a material instance, and filly turns on `Engine::setAutomaticInstancingEnabled(true)`, so Filament draws up to 64 per call (8 in WebGL). See [performance](../reference/performance.md#automatic-instancing) |
+| `EXT_mesh_gpu_instancing` | No | One child node per instance. The children share a primitive and a material instance, and filly turns on `Engine::setAutomaticInstancingEnabled(true)`, so Filament draws up to 64 per call (8 in WebGL). See [performance](../archive/performance-log.md#automatic-instancing) |
 | `KHR_animation_pointer` | No | Node channels go to gltfio's animator; the other targets are filly's property animation |
 | `KHR_node_visibility` | No | filly |
 | `KHR_materials_anisotropy`, `iridescence`, `diffuse_transmission` | No (cgltf reads them; gltfio ignores them) | filly's material entries |

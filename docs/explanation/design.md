@@ -105,7 +105,7 @@ one only after the driver thread has processed it; an unthrottled caller runs mo
 ahead of that thread. Disabling the GPU-completion metric (an engine feature flag) does not stop
 the warning, and Filament has no other switch. A 60 Hz loop, or a 1 ms sleep per frame, does not
 log it. In embedded mode, the host owns the window and every
-display-buffer swap. See [tested assumptions](assumptions.md).
+display-buffer swap. See [tested assumptions](../archive/assumptions.md).
 
 Shadows, FXAA, MSAA, SSAO, bloom, dithering, fog, depth of field, and vignette are
 scene properties and disabled by default. The PsychoPy demo enables FXAA. Screen-space
@@ -183,7 +183,7 @@ each OpenGL buffer object added about 40 KiB to the process private bytes, also 
 box. Before October 29, 2026, a box had about ten: four vertex buffers and an index buffer of
 its own, and gltfio's buffers for the placeholder triangle (positions, tangent frames, UVs, the
 dummy attributes, and the generated indices). It took 0.47 MiB and 0.43 to 0.61 ms in a scene
-of 1,000 boxes (see [performance](../reference/performance.md#generated-meshes)). Now:
+of 1,000 boxes (see [performance](../archive/performance-log.md#generated-meshes)). Now:
 
 - The mesh keeps its attributes as blocks of one vertex buffer object: positions, tangent
   frames, UVs, then colors. An update sends only the blocks that changed
@@ -277,7 +277,7 @@ with rotated multi-primitive meshes. There, filly's boxes were smaller, by up to
 ## Output encoding
 
 The encoding does not depend on other options. Earlier, disabling postprocessing wrote linear
-values into the 8-bit target (0.5 grey became 128), and enabling it wrote sRGB values through the
+values into the 8-bit target (0.5 gray became 128), and enabling it wrote sRGB values through the
 selected tone mapper (188 with linear tone mapping, and a warm tint with the ACES legacy default).
 The default tone mapper is now the neutral linear clamp.
 
@@ -437,7 +437,7 @@ level; the largest deviation from the exact value was 0.68 levels.
 
 ### Cost of the output path
 
-Measured on September 30, 2026; see [Performance](../reference/performance.md#output-path-september-30-2026).
+Measured on September 30, 2026; see [Performance](../archive/performance-log.md#output-path-september-30-2026).
 Intel Iris Xe, 1920 x 1080, GPU frame time from Filament's timer, 60 Hz pacing, median of five
 interleaved rounds:
 
@@ -570,7 +570,7 @@ parameters that the entry has. A material with more extension textures than its 
 samplers loads without the least important ones, and a warning names them.
 
 The module links no material compiler (`filamat`) and no gltfio material provider. It is
-7.4 MB; with `filamat` it was 15.2 MB. See [material precompilation](material-precompilation.md).
+7.4 MB; with `filamat` it was 15.2 MB. See [material precompilation](../archive/material-precompilation.md).
 The extension links only the selected static libraries. The SDK tools are not installed in the
 wheel.
 
@@ -814,25 +814,22 @@ cleanup. The SDK build manifest records these patches. Review them when updating
 Nanobind's linked limited-ABI mode starts at Python 3.12. One `cp312-abi3` wheel supports that
 version and later standard CPython builds. Python 3.10 and 3.11 use version-specific wheels.
 The wheel workflow repairs Linux dependencies, audits the stable ABI, and tests installed wheels.
-It uploads artifacts without publishing to PyPI.
+On a version tag, it also publishes the wheels to PyPI.
 
-## Next milestones
+## What is not validated
 
-The PsychoPy stress benchmark now records frame intervals, CPU timing, Windows process/GPU
-memory samples, and resource counts over repeated asset trials. It samples memory outside the
-frame loop and writes raw frames between trials. See [stress testing](../how-to/stress-test.md).
-This provides a repeatable measurement tool; isolated GPU timing and display deadline validation
-remain separate work.
+The PsychoPy stress benchmark records frame intervals, CPU timing, Windows process and GPU
+memory, and resource counts over repeated asset trials. See
+[measure timing](../how-to/stress-test.md). `Stats.gpu_frame_ms` gives the GPU time of each
+frame. These items are not validated yet:
 
-1. Add isolated GPU timing and validate display deadlines at experimental display rates.
-2. Add more Windows GPU and driver coverage.
-3. Add PTB integration and macOS/native Wayland context adapters.
-4. Validate Linux PsychoPy presentation and more Linux GPU drivers.
-5. Measure resource growth over longer runs and larger scenes.
-6. Report the pyglet 1.4.11 window-class defect to pyglet and PsychoPy (see
-   [validation](../reference/validation.md)).
-7. Capture a native stack for the rare crash when two processes create shared-context renderers
-   at the same time, and find the owner of the thread-pool handle closed twice at exit.
+- Display deadlines at the display rates of experiments.
+- Windows GPUs and drivers other than the Intel Iris Xe and NVIDIA RTX A500 of the test laptop,
+  and Linux GPU drivers other than Mesa.
+- Native Wayland: filly has no context adapter for it.
+- Memory growth over long runs and large scenes.
+- The cause of the rare crash when two processes create shared-context renderers at the same
+  time. See [validation](../reference/validation.md#known-defects).
 
 The tests check functional sharing and image correctness on Windows, Linux Mesa software rendering,
 and the WSLg Intel D3D12 driver. WSLg hardware tests also pass offscreen shutdown checks.

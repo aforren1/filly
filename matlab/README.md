@@ -11,11 +11,16 @@ package is the MATLAB and Octave frontend. It uses the same native renderer as t
 | `filly-matlab-linux` | MATLAB R2021b and later, Linux x64 with glibc 2.28 or later |
 | `filly-octave-linux-6.4` | Octave 6.4 through 9, Linux x64 with glibc 2.28 or later |
 | `filly-octave-linux-10` | Octave 10 and later, Linux x64 with glibc 2.28 or later |
+| `filly-octave-windows-7.3` | Octave 7, Windows x64. Psychtoolbox for Windows supports only Octave 7.3 |
+| `filly-octave-windows-10` | Octave 10 and later, Windows x64 |
+| `filly-matlab-macos` | MATLAB R2023b and later, macOS 11 or later on Apple silicon |
+| `filly-octave-macos` | Octave 10 and later, macOS 11 or later on Apple silicon |
 
-Octave 10 changed the MEX ABI. Use the Octave package for your Octave version: the other one
-does not load.
+Octave 10 changed the MEX ABI. Use the Octave package for your Octave version and operating
+system: the others do not load.
 
 The renderer needs OpenGL 4.1 or later. Psychtoolbox is necessary only to draw into its windows.
+On macOS, filly renders offscreen only: it cannot draw into Psychtoolbox windows.
 
 ## Install
 

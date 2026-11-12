@@ -1713,7 +1713,7 @@ Renderer::Renderer(uintptr_t shared_context) {
     // EXT_mesh_gpu_instancing children share geometry and material instances, so Filament draws
     // up to 64 of them per call (8 in WebGL). With 1,000 or more instances this saved 35 to 70%
     // of the frame on Intel; scenes without repeated primitives showed no measurable cost, and
-    // pixels were identical. See docs/reference/performance.md#automatic-instancing.
+    // pixels were identical. See docs/archive/performance-log.md#automatic-instancing.
     state_->engine->setAutomaticInstancingEnabled(true);
     state_->frame_chain = state_->engine->createSwapChain(1, 1, 0);
     if (!state_->frame_chain) throw BackendError("Could not create the headless frame swap chain");
@@ -1721,7 +1721,7 @@ Renderer::Renderer(uintptr_t shared_context) {
     // subpass writes a black frame with a gradient tile. Only scenes that use Filament's
     // postprocessing (tone mapping other than linear, bloom, depth of field, vignette) run color
     // grading. Drivers without the extension never take that path, so the flag changes nothing
-    // there. See docs/explanation/assumptions.md.
+    // there. See docs/archive/assumptions.md.
     if (!state_->engine->getDebugRegistry().setProperty("d.renderer.disable_subpasses", true))
         throw BackendError("Filament SDK lacks the required separate postprocessing pass control");
     // Without this flag, a per-channel tone mapper still goes through a 32^3 10-bit LUT in a
@@ -1739,7 +1739,7 @@ Renderer::Renderer(uintptr_t shared_context) {
     detail::output_pass(*state_, state_->encode, detail::PassKind::encode);
     // No material warmup: compiling the common archive entries at renderer creation made the
     // first frames slower on both test GPUs unless the application stayed idle for seconds.
-    // See docs/explanation/material-precompilation.md.
+    // See docs/archive/material-precompilation.md#first-use-with-cold-driver-shader-caches.
 }
 
 Scene Renderer::create_scene() {
@@ -2042,7 +2042,7 @@ void submit_picks(detail::SceneData& data, const f::Camera& camera, const f::Vie
 // The first picking readback of a renderer cost the Intel Iris Xe driver 45 to 60 ms, also in an
 // empty scene; later ones did not. prepare() pays it here, in a frame of its own empty view and
 // 32 x 32 target (Filament's minimum structure buffer), so that no scene, target, camera, or
-// Stats changes. Browsers showed no such cost (see docs/reference/performance.md#picking).
+// Stats changes. Browsers showed no such cost (see docs/archive/performance-log.md#picking).
 std::shared_ptr<detail::PickData> warm_picking(detail::State& state) {
     using T = f::Texture;
     constexpr uint32_t size = 32;

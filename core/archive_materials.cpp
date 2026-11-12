@@ -1,6 +1,6 @@
 // filly's glTF material provider. Every glTF material gets an instance of an entry in filly's
 // precompiled material archive (core/materials). Nothing is compiled at run time. See
-// docs/explanation/material-precompilation.md.
+// docs/explanation/materials.md.
 #include "materials.h"
 #include "webp_provider.h"
 #include <filament/Engine.h>

@@ -460,7 +460,7 @@ first use of a large entry. Two points stay open for phase 3:
    [gap closure](#gap-closure-september-30-2026)). *Done October 6, 2026; see
    [Phase 4 results](#phase-4-results-october-6-2026).*
 5. **Web.** Build the same `.mat` sources with `-p mobile`, and link the provider into the
-   Emscripten build. *Done October 3, 2026: `web/`, [the web build](web.md). The output-pass
+   Emscripten build. *Done October 3, 2026: `web/`, [the web build](../explanation/web.md). The output-pass
    materials moved from `filamat` to precompiled packages for it, in every build.*
 
 ### Risks
@@ -506,7 +506,7 @@ row names the NVIDIA RTX A500 Laptop GPU of the same machine.
 
 | Fix | Change | Regression test | Before the fix (*measured*) |
 | --- | --- | --- | --- |
-| Generated meshes | `Model::attach_mesh()` always supplies `COLOR` (white `UBYTE4` when the mesh has no colors) and `UV1` (reads the `UV0` buffer). | `test_mesh.py::test_mesh_without_colors_is_white` | A 0.5 grey unlit blended plane over a 0.2 background showed 124 (background) with `precompiled_shaders=True`, 188 with compiled shaders. |
+| Generated meshes | `Model::attach_mesh()` always supplies `COLOR` (white `UBYTE4` when the mesh has no colors) and `UV1` (reads the `UV0` buffer). | `test_mesh.py::test_mesh_without_colors_is_white` | A 0.5 gray unlit blended plane over a 0.2 background showed 124 (background) with `precompiled_shaders=True`, 188 with compiled shaders. |
 | Iridescence without anisotropy | The runtime generator emits only the lobes of the extensions that the material has (`SurfaceSource::has_anisotropy`, `has_iridescence`). | `test_material_paths.py::test_iridescence_without_strength_matches_the_plain_material` | In the test scene, 89 of 9,216 pixels differed by 1 from the plain material. |
 | Specular-only materials | `ArchiveSpecs::supports()` rejects a first archive match with transmission or volume for a key without them; such keys compile. | `test_material_paths.py::test_specular_only_material_is_not_refractive` | The material was the SDK's transmission entry (screen-space refraction). The test scene showed no pixel difference at transmission 0. |
 
@@ -861,7 +861,7 @@ the design estimated (7.3 to 7.4 MB). The Linux archive wheel is 2,488,650 bytes
 - The NVIDIA frame times beyond the noisy first round.
 - Materials over the slot limit in real assets; only generated test assets exercise the drop.
 - `TEXCOORD_2` and higher in real assets; none in the sample set.
-- Removal of `filamat` (phase 4). The web build (phase 5) runs; see [the web build](web.md).
+- Removal of `filamat` (phase 4). The web build (phase 5) runs; see [the web build](../explanation/web.md).
   *Phase 4 done October 6, 2026.*
 
 ## Gap closure (September 30, 2026)

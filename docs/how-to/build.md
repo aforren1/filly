@@ -87,7 +87,7 @@ The hash check does not apply to a local folder. Use only the verified release.
 glTF materials use filly's precompiled material archive. The build compiles it from
 `core/materials` with the SDK's `matc` and `uberz` and embeds it in the module. The module
 has no material compiler, so nothing is compiled at run time. The design and the entry list are
-in [material precompilation](../explanation/material-precompilation.md).
+in [material precompilation](../explanation/materials.md).
 
 The build also compiles the materials of filly's output passes (encode and FXAA) with `matc`.
 The archive step also needs `uberz`, and optionally `matinfo`. All come from the same Filament

@@ -220,7 +220,7 @@ grating.update(nextPixels);  // each frame, the same size and type
 ```
 
 `pixels` is a `Uint8Array`, or a `Float32Array` of linear values, with rows from the top. Use 3
-or 4 channels: WebGL2 cannot show a 1-channel texture as grey.
+or 4 channels: WebGL2 cannot show a 1-channel texture as gray.
 
 A material can also sample a texture that your page draws into, without a copy:
 
@@ -351,7 +351,7 @@ see [picking](../reference/api.md#picking).
 The first pick at a target size answers later than the next ones. In Chrome on the test laptop,
 at 1920 x 1080, the first answer arrived 21 to 41 ms after the render, later ones after 6 to
 12 ms, and a pick after 12 frames without picks after 13 to 20 ms. `prepare()` does not change
-this. See [performance](../reference/performance.md#first-pick-after-prepare).
+this. See [performance](../archive/performance-log.md#first-pick-after-prepare).
 
 ## Handle errors
 

@@ -121,7 +121,7 @@ include(materials/output.cmake)
 
 # glTF materials come from filly's precompiled material archive (materials/), built here with the
 # SDK's matc and uberz. The module has no material compiler. See
-# docs/explanation/material-precompilation.md.
+# docs/explanation/materials.md.
 include(materials/materials.cmake)
 
 add_library(filly_core STATIC renderer.cpp output_pass.cpp archive_materials.cpp gltf_prepare.cpp json.cpp

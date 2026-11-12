@@ -15,7 +15,7 @@ pytestmark = pytest.mark.gpu
 
 # Nine texture slots, which once exceeded the sampler limit of a compiled lit material, then two
 # specular textures. Extension textures share the generic samplers of an archive entry; see
-# docs/explanation/material-precompilation.md.
+# docs/explanation/materials.md.
 SLOTS = [
     ("pbrMetallicRoughness", "baseColorTexture"), ("pbrMetallicRoughness", "metallicRoughnessTexture"),
     (None, "normalTexture"), (None, "occlusionTexture"), (None, "emissiveTexture"),
